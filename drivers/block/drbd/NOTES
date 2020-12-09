@@ -1,0 +1,34 @@
+These sources have been copied in from the official upstream drbd git repo at
+https://github.com/LINBIT/drbd.git, and modified slightly to build in-tree.
+Here's how it's done:
+
+1. Make sure you've got a checked out kernel source tree, already configured
+   and built once.  For this example, let's say you did that at /scrap/linux.
+
+2. Somewhere, clone the upstream drbd git repo.  For this example, let's say
+   you did it at /scrap/drbd.
+
+3. Checkout the appropriate branch.  For this example, let's say you've checked
+   out drbd-9.0.
+
+4. At the toplevel of your drbd checkout, make sure all submodules are up to
+   date and then do:
+
+   % make KDIR=/scrap/linux/
+
+   or if you want to use an installed kernel tree:
+
+   % make KVER=version
+   
+   This will fail if you haven't installed coccinelle >= 1.0.8.  If needed,
+   compile and install it, then try again.  If building for the current kernel
+   fails, figure out why by looking at kernel git log since previous release
+   and submit patches to drbd-dev@lists.linbit.com.
+
+5. Run the import-upstream script like this:
+
+   % ./import-upstream /scrap/drbd
+
+6. Commit the resulting files.
+
+7. Then modify Makefile after reviewing diffs and comments.
