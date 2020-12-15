@@ -287,7 +287,7 @@ static void page_chain_add(struct page **head,
 	*head = chain_first;
 }
 
-static struct page *__drbd_alloc_pages(unsigned int number, gfp_t gfp_mask)
+static struct page *__drbd_alloc_pages(struct drbd_resource *resource, unsigned int number, gfp_t gfp_mask)
 {
 	struct page *page = NULL;
 	struct page *tmp = NULL;
@@ -295,12 +295,12 @@ static struct page *__drbd_alloc_pages(unsigned int number, gfp_t gfp_mask)
 
 	/* Yes, testing drbd_pp_vacant outside the lock is racy.
 	 * So what. It saves a spin_lock. */
-	if (drbd_pp_vacant >= number) {
-		spin_lock(&drbd_pp_lock);
-		page = page_chain_del(&drbd_pp_pool, number);
+	if (resource->pp_vacant >= number) {
+		spin_lock(&resource->pp_lock);
+		page = page_chain_del(&resource->pp_pool, number);
 		if (page)
-			drbd_pp_vacant -= number;
-		spin_unlock(&drbd_pp_lock);
+			resource->pp_vacant -= number;
+		spin_unlock(&resource->pp_lock);
 		if (page)
 			return page;
 	}
@@ -321,10 +321,10 @@ static struct page *__drbd_alloc_pages(unsigned int number, gfp_t gfp_mask)
 	 * function "soon". */
 	if (page) {
 		tmp = page_chain_tail(page, NULL);
-		spin_lock(&drbd_pp_lock);
-		page_chain_add(&drbd_pp_pool, page, tmp);
-		drbd_pp_vacant += i;
-		spin_unlock(&drbd_pp_lock);
+		spin_lock(&resource->pp_lock);
+		page_chain_add(&resource->pp_pool, page, tmp);
+		resource->pp_vacant += i;
+		spin_unlock(&resource->pp_lock);
 	}
 	return NULL;
 }
@@ -396,6 +396,7 @@ struct page *drbd_alloc_pages(struct drbd_transport *transport, unsigned int num
 {
 	struct drbd_connection *connection =
 		container_of(transport, struct drbd_connection, transport);
+	struct drbd_resource *resource = connection->resource;
 	struct page *page = NULL;
 	DEFINE_WAIT(wait);
 	unsigned int mxb;
@@ -405,7 +406,7 @@ struct page *drbd_alloc_pages(struct drbd_transport *transport, unsigned int num
 	rcu_read_unlock();
 
 	if (atomic_read(&connection->pp_in_use) < mxb)
-		page = __drbd_alloc_pages(number, gfp_mask & ~__GFP_RECLAIM);
+		page = __drbd_alloc_pages(resource, number, gfp_mask & ~__GFP_RECLAIM);
 
 	/* Try to keep the fast path fast, but occasionally we need
 	 * to reclaim the pages we lent to the network stack. */
@@ -413,12 +414,12 @@ struct page *drbd_alloc_pages(struct drbd_transport *transport, unsigned int num
 		drbd_reclaim_net_peer_reqs(connection);
 
 	while (page == NULL) {
-		prepare_to_wait(&drbd_pp_wait, &wait, TASK_INTERRUPTIBLE);
+		prepare_to_wait(&resource->pp_wait, &wait, TASK_INTERRUPTIBLE);
 
 		drbd_reclaim_net_peer_reqs(connection);
 
 		if (atomic_read(&connection->pp_in_use) < mxb) {
-			page = __drbd_alloc_pages(number, gfp_mask);
+			page = __drbd_alloc_pages(resource, number, gfp_mask);
 			if (page)
 				break;
 		}
@@ -434,7 +435,7 @@ struct page *drbd_alloc_pages(struct drbd_transport *transport, unsigned int num
 		if (schedule_timeout(HZ/10) == 0)
 			mxb = UINT_MAX;
 	}
-	finish_wait(&drbd_pp_wait, &wait);
+	finish_wait(&resource->pp_wait, &wait);
 
 	if (page)
 		atomic_add(number, &connection->pp_in_use);
@@ -449,27 +450,28 @@ void drbd_free_pages(struct drbd_transport *transport, struct page *page, int is
 {
 	struct drbd_connection *connection =
 		container_of(transport, struct drbd_connection, transport);
+	struct drbd_resource *resource = connection->resource;
 	atomic_t *a = is_net ? &connection->pp_in_use_by_net : &connection->pp_in_use;
 	int i;
 
 	if (page == NULL)
 		return;
 
-	if (drbd_pp_vacant > (DRBD_MAX_BIO_SIZE/PAGE_SIZE) * drbd_minor_count)
+	if (resource->pp_vacant > DRBD_MAX_BIO_SIZE/PAGE_SIZE)
 		i = page_chain_free(page);
 	else {
 		struct page *tmp;
 		tmp = page_chain_tail(page, &i);
-		spin_lock(&drbd_pp_lock);
-		page_chain_add(&drbd_pp_pool, page, tmp);
-		drbd_pp_vacant += i;
-		spin_unlock(&drbd_pp_lock);
+		spin_lock(&resource->pp_lock);
+		page_chain_add(&resource->pp_pool, page, tmp);
+		resource->pp_vacant += i;
+		spin_unlock(&resource->pp_lock);
 	}
 	i = atomic_sub_return(i, a);
 	if (i < 0)
 		drbd_warn(connection, "ASSERTION FAILED: %s: %d < 0\n",
 			is_net ? "pp_in_use_by_net" : "pp_in_use", i);
-	wake_up(&drbd_pp_wait);
+	wake_up(&resource->pp_wait);
 }
 
 /*
@@ -666,9 +668,9 @@ static int drbd_send_disconnect(struct drbd_connection *connection)
 	if (connection->agreed_pro_version < 118)
 		return 0;
 
-	if (!conn_prepare_command(connection, 0, CONTROL_STREAM))
+	if (!conn_prepare_command(connection, 0, DATA_STREAM))
 		return -EIO;
-	return send_command(connection, -1, P_DISCONNECT, CONTROL_STREAM);
+	return send_command(connection, -1, P_DISCONNECT, DATA_STREAM);
 }
 
 /* Gets called if a connection is established, or if a new minor gets created
@@ -3916,6 +3918,7 @@ static enum sync_strategy drbd_uuid_compare(struct drbd_peer_device *peer_device
 	u64 resolved_uuid;
 	bool my_current_in_peers_history;
 	bool peers_current_in_my_history;
+	bool bitmap_matches_initial;
 	bool flags_matches_initial;
 	bool uuid_matches_initial;
 	bool initial_handshake;
@@ -3936,12 +3939,18 @@ static enum sync_strategy drbd_uuid_compare(struct drbd_peer_device *peer_device
 		test_bit(INITIAL_STATE_SENT, &peer_device->flags) &&
 		!test_bit(INITIAL_STATE_RECEIVED, &peer_device->flags);
 	uuid_matches_initial = self == (peer_device->comm_current_uuid & ~UUID_PRIMARY);
+	bitmap_matches_initial = drbd_bitmap_uuid(peer_device) == peer_device->comm_bitmap_uuid;
 	flags_matches_initial = local_uuid_flags == peer_device->comm_uuid_flags;
-	if (initial_handshake && (!uuid_matches_initial || !flags_matches_initial)) {
+	if (initial_handshake && (!uuid_matches_initial || !flags_matches_initial || !bitmap_matches_initial)) {
 		*rule_nr = 9;
 		if (!uuid_matches_initial)
 			drbd_warn(peer_device, "My current UUID changed during "
 				  "handshake. Retry connecting.\n");
+		if (!bitmap_matches_initial)
+			drbd_warn(peer_device, "My bitmap UUID changed during "
+				  "handshake. Retry connecting. 0x%llX to 0x%llX\n",
+				  (unsigned long long)peer_device->comm_bitmap_uuid,
+				  (unsigned long long)drbd_bitmap_uuid(peer_device));
 		if (!flags_matches_initial)
 			drbd_warn(peer_device, "My uuid_flags changed from 0x%llX to 0x%llX during "
 				  "handshake. Retry connecting.\n",
@@ -5514,6 +5523,7 @@ static int receive_uuids110(struct drbd_connection *connection, struct packet_in
 	u64 bitmap_uuids_mask, node_mask;
 	struct drbd_peer_md *peer_md = NULL;
 	struct drbd_device *device;
+	int not_allocated = -1;
 
 
 	peer_device = conn_peer_device(connection, pi->vnr);
@@ -5552,6 +5562,10 @@ static int receive_uuids110(struct drbd_connection *connection, struct packet_in
 	peer_device->current_uuid = be64_to_cpu(p->current_uuid);
 	peer_device->dirty_bits = be64_to_cpu(p->dirty_bits);
 	peer_device->uuid_flags = be64_to_cpu(p->uuid_flags);
+	if (peer_device->uuid_flags & UUID_FLAG_HAS_UNALLOC) {
+		not_allocated = peer_device->uuid_flags >> UUID_FLAG_UNALLOC_SHIFT;
+		peer_device->uuid_flags &= ~UUID_FLAG_UNALLOC_MASK;
+	}
 
 	pos = 0;
 	for (i = 0; i < ARRAY_SIZE(peer_device->bitmap_uuids); i++) {
@@ -5560,7 +5574,8 @@ static int receive_uuids110(struct drbd_connection *connection, struct packet_in
 		if (bitmap_uuids_mask & NODE_MASK(i)) {
 			bitmap_uuid = be64_to_cpu(p->other_uuids[pos++]);
 
-			if (peer_md && !(peer_md[i].flags & MDF_HAVE_BITMAP))
+			if (peer_md && !(peer_md[i].flags & MDF_HAVE_BITMAP) &&
+			    i != not_allocated)
 				peer_md[i].flags |= MDF_NODE_EXISTS;
 		} else {
 			bitmap_uuid = -1;

@@ -2196,7 +2196,8 @@ static bool drbd_fail_request_early(struct drbd_device *device, struct bio *bio)
 
 blk_qc_t drbd_submit_bio(struct bio *bio)
 {
-	struct drbd_device *device = bio->bi_disk->private_data;
+	struct request_queue *q = bio->bi_disk->queue;
+	struct drbd_device *device = (struct drbd_device *) q->queuedata;
 #ifdef CONFIG_DRBD_TIMING_STATS
 	ktime_t start_kt;
 #endif
@@ -2212,6 +2213,19 @@ blk_qc_t drbd_submit_bio(struct bio *bio)
 
 	if (device->cached_err_io) {
 		bio->bi_status = BLK_STS_IOERR;
+		bio_endio(bio);
+		return BLK_QC_T_NONE;
+	}
+
+	/* This is both an optimization: READ of size 0, nothing to do
+	 * and a workaround: (older) ZFS explodes on size zero reads, see
+	 * https://github.com/zfsonlinux/zfs/issues/8379
+	 * Actually don't do anything for size zero bios.
+	 * Add a "WARN_ONCE", so we can tell the caller to stop doing this.
+	 */
+	if (bio_op(bio) == REQ_OP_READ && bio->bi_iter.bi_size == 0) {
+		WARN_ONCE(1, "size zero read from upper layers");
+		bio->bi_status = BLK_STS_OK;
 		bio_endio(bio);
 		return BLK_QC_T_NONE;
 	}

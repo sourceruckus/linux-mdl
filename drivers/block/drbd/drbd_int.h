@@ -916,6 +916,29 @@ struct drbd_resource {
 	struct drbd_thread_timing_details w_timing_details[DRBD_THREAD_DETAILS_HIST];
 	wait_queue_head_t barrier_wait;  /* upon each state change. */
 	struct rcu_head rcu;
+
+	/* drbd's page pool, used to buffer data received from the peer, or
+	 * data requested by the peer.
+	 *
+	 * This does not have an emergency reserve.
+	 *
+	 * When allocating from this pool, it first takes pages from the pool.
+	 * Only if the pool is depleted will try to allocate from the system.
+	 *
+	 * The assumption is that pages taken from this pool will be processed,
+	 * and given back, "quickly", and then can be recycled, so we can avoid
+	 * frequent calls to alloc_page(), and still will be able to make
+	 * progress even under memory pressure.
+	 *
+	 * We do not use a standard mempool, because we want to hand out the
+	 * pre-allocated objects first.
+	 *
+	 * Note: This is a single linked list, the next pointer is the private
+	 *       member of struct page. */
+	struct page *pp_pool;
+	spinlock_t pp_lock;
+	int pp_vacant;
+	wait_queue_head_t pp_wait;
 };
 
 struct drbd_connection {
@@ -1201,6 +1224,7 @@ struct drbd_peer_device {
 	unsigned long comm_bm_set; /* communicated number of set bits. */
 	u64 comm_current_uuid; /* communicated current UUID */
 	u64 comm_uuid_flags; /* communicated UUID flags */
+	u64 comm_bitmap_uuid;
 	union drbd_state comm_state;
 
 #ifdef CONFIG_DEBUG_FS
@@ -1540,7 +1564,6 @@ extern void drbd_md_set_sector_offsets(struct drbd_device *device,
 extern int drbd_md_write(struct drbd_device *device, struct meta_data_on_disk_9 *buffer);
 extern int drbd_md_sync(struct drbd_device *device);
 extern int drbd_md_sync_if_dirty(struct drbd_device *device);
-extern int drbd_md_read(struct drbd_device *device, struct drbd_backing_dev *bdev);
 extern void drbd_uuid_received_new_current(struct drbd_peer_device *, u64 , u64) __must_hold(local);
 extern void drbd_uuid_set_bitmap(struct drbd_peer_device *peer_device, u64 val) __must_hold(local);
 extern void _drbd_uuid_set_bitmap(struct drbd_peer_device *peer_device, u64 val) __must_hold(local);
@@ -1783,24 +1806,6 @@ extern struct kmem_cache *drbd_bm_ext_cache;	/* bitmap extents */
 extern struct kmem_cache *drbd_al_ext_cache;	/* activity log extents */
 extern mempool_t drbd_request_mempool;
 extern mempool_t drbd_ee_mempool;
-
-/* drbd's page pool, used to buffer data received from the peer,
- * or data requested by the peer.
- *
- * This does not have an emergency reserve.
- *
- * When allocating from this pool, it first takes pages from the pool.
- * Only if the pool is depleted will try to allocate from the system.
- *
- * The assumption is that pages taken from this pool will be processed,
- * and given back, "quickly", and then can be recycled, so we can avoid
- * frequent calls to alloc_page(), and still will be able to make progress even
- * under memory pressure.
- */
-extern struct page *drbd_pp_pool;
-extern spinlock_t   drbd_pp_lock;
-extern int	    drbd_pp_vacant;
-extern wait_queue_head_t drbd_pp_wait;
 
 /* We also need a standard (emergency-reserve backed) page pool
  * for meta data IO (activity log, bitmap).
