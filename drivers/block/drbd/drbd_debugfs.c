@@ -1716,6 +1716,7 @@ static const struct file_operations drbd_refcounts_fops = {
 static int drbd_compat_show(struct seq_file *m, void *ignored)
 {
 	seq_puts(m, "genl_policy__yes_in_ops\n");
+	seq_puts(m, "nla_strscpy__no_present\n");
 	return 0;
 }
 
