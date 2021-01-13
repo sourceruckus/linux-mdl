@@ -77,15 +77,15 @@ modules_install-Linux:
 	$(MAKE) -C /scrap/linux-mdl-5.10 M=`pwd` modules_install \
 		INSTALL_MOD_PATH=$(DESTDIR)$(INSTALL_MOD_PATH) \
 		INSTALL_MOD_DIR=$(INSTALL_MOD_DIR) \
-		KERNELRELEASE=5.10.1-mdl-zfs2+
+		KERNELRELEASE=5.10.5-mdl+
 	@# Remove extraneous build products when packaging
-	kmoddir=$(DESTDIR)$(INSTALL_MOD_PATH)/lib/modules/5.10.1-mdl-zfs2+; \
+	kmoddir=$(DESTDIR)$(INSTALL_MOD_PATH)/lib/modules/5.10.5-mdl+; \
 	if [ -n "$(DESTDIR)" ]; then \
 		find $$kmoddir -name 'modules.*' | xargs $(RM); \
 	fi
-	sysmap=$(DESTDIR)$(INSTALL_MOD_PATH)/boot/System.map-5.10.1-mdl-zfs2+; \
+	sysmap=$(DESTDIR)$(INSTALL_MOD_PATH)/boot/System.map-5.10.5-mdl+; \
 	if [ -f $$sysmap ]; then \
-		depmod -ae -F $$sysmap 5.10.1-mdl-zfs2+; \
+		depmod -ae -F $$sysmap 5.10.5-mdl+; \
 	fi
 
 modules_install-FreeBSD:
@@ -96,7 +96,7 @@ modules_install: modules_install-Linux
 
 modules_uninstall-Linux:
 	@# Uninstall the kernel modules
-	kmoddir=$(DESTDIR)$(INSTALL_MOD_PATH)/lib/modules/5.10.1-mdl-zfs2+; \
+	kmoddir=$(DESTDIR)$(INSTALL_MOD_PATH)/lib/modules/5.10.5-mdl+; \
 	for objdir in $(ZFS_MODULES); do \
 		$(RM) -R $$kmoddir/$(INSTALL_MOD_DIR)/$$objdir; \
 	done

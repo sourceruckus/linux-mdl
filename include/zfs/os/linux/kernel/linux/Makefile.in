@@ -135,7 +135,6 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-fsync.m4 \
 	$(top_srcdir)/config/kernel-generic_io_acct.m4 \
 	$(top_srcdir)/config/kernel-generic_readlink.m4 \
-	$(top_srcdir)/config/kernel-get-disk-and-module.m4 \
 	$(top_srcdir)/config/kernel-get-disk-ro.m4 \
 	$(top_srcdir)/config/kernel-get-link.m4 \
 	$(top_srcdir)/config/kernel-global_page_state.m4 \

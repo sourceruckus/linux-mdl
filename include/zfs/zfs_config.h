@@ -17,9 +17,6 @@
 /* bdi_setup_and_register() wants 2 args */
 /* #undef HAVE_2ARGS_BDI_SETUP_AND_REGISTER */
 
-/* lookup_bdev() wants 2 args */
-/* #undef HAVE_2ARGS_LOOKUP_BDEV */
-
 /* vfs_getattr wants 2 args */
 /* #undef HAVE_2ARGS_VFS_GETATTR */
 
@@ -80,6 +77,9 @@
 /* bdev_check_media_change() exists */
 #define HAVE_BDEV_CHECK_MEDIA_CHANGE 1
 
+/* bdev_whole() is available */
+/* #undef HAVE_BDEV_WHOLE */
+
 /* bio->bi_opf is defined */
 #define HAVE_BIO_BI_OPF 1
 
@@ -88,6 +88,9 @@
 
 /* bio has bi_iter */
 #define HAVE_BIO_BVEC_ITER 1
+
+/* bio_*_io_acct() available */
+#define HAVE_BIO_IO_ACCT 1
 
 /* bio_set_dev() is available */
 #define HAVE_BIO_SET_DEV 1
@@ -177,6 +180,9 @@
 /* DECLARE_EVENT_CLASS() is available */
 #define HAVE_DECLARE_EVENT_CLASS 1
 
+/* lookup_bdev() wants dev_t arg */
+/* #undef HAVE_DEVT_LOOKUP_BDEV */
+
 /* sops->dirty_inode() wants flags */
 #define HAVE_DIRTY_INODE_WITH_FLAGS 1
 
@@ -219,10 +225,10 @@
 /* fops->fsync() without dentry */
 /* #undef HAVE_FSYNC_WITHOUT_DENTRY */
 
-/* generic_start_io_acct()/generic_end_io_acct() available */
+/* generic_*_io_acct() 3 arg available */
 /* #undef HAVE_GENERIC_IO_ACCT_3ARG */
 
-/* generic_start_io_acct()/generic_end_io_acct() 4 arg available */
+/* generic_*_io_acct() 4 arg available */
 /* #undef HAVE_GENERIC_IO_ACCT_4ARG */
 
 /* generic_readlink is global */
@@ -236,9 +242,6 @@
 
 /* Define if the GNU gettext() function is already present or preinstalled. */
 #define HAVE_GETTEXT 1
-
-/* get_disk_and_module() is available */
-#define HAVE_GET_DISK_AND_MODULE 1
 
 /* iops->get_link() cookie */
 /* #undef HAVE_GET_LINK_COOKIE */
@@ -396,6 +399,9 @@
 /* Define to 1 if you have the `mlockall' function. */
 #define HAVE_MLOCKALL 1
 
+/* lookup_bdev() wants mode arg */
+/* #undef HAVE_MODE_LOOKUP_BDEV */
+
 /* Define if host toolchain supports MOVBE */
 #define HAVE_MOVBE 1
 
@@ -464,6 +470,9 @@
 
 /* REQ_PREFLUSH is defined */
 #define HAVE_REQ_PREFLUSH 1
+
+/* revalidate_disk() is available */
+/* #undef HAVE_REVALIDATE_DISK */
 
 /* revalidate_disk_size() is available */
 #define HAVE_REVALIDATE_DISK_SIZE 1
@@ -712,7 +721,7 @@
 /* #undef ZFS_IS_GPL_COMPATIBLE */
 
 /* Define the project alias string. */
-#define ZFS_META_ALIAS "zfs-2.0.0-51_g3075b29ca"
+#define ZFS_META_ALIAS "zfs-2.0.1-mdl-1"
 
 /* Define the project author. */
 #define ZFS_META_AUTHOR "OpenZFS"
@@ -742,10 +751,10 @@
 #define ZFS_META_NAME "zfs"
 
 /* Define the project release. */
-#define ZFS_META_RELEASE "51_g3075b29ca"
+#define ZFS_META_RELEASE "1"
 
 /* Define the project version. */
-#define ZFS_META_VERSION "2.0.0"
+#define ZFS_META_VERSION "2.0.1-mdl"
 
 /* count is located in percpu_ref.data */
 #define ZFS_PERCPU_REF_COUNT_IN_DATA 1

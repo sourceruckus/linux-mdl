@@ -135,7 +135,6 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-fsync.m4 \
 	$(top_srcdir)/config/kernel-generic_io_acct.m4 \
 	$(top_srcdir)/config/kernel-generic_readlink.m4 \
-	$(top_srcdir)/config/kernel-get-disk-and-module.m4 \
 	$(top_srcdir)/config/kernel-get-disk-ro.m4 \
 	$(top_srcdir)/config/kernel-get-link.m4 \
 	$(top_srcdir)/config/kernel-global_page_state.m4 \
@@ -419,7 +418,7 @@ LIBUUID_PC = uuid
 LINUX = /scrap/linux-mdl-5.10
 LINUX_OBJ = /scrap/linux-mdl-5.10
 LINUX_SYMBOLS = NONE
-LINUX_VERSION = 5.10.1-mdl-zfs2+
+LINUX_VERSION = 5.10.5-mdl+
 LIPO = 
 LN_S = ln -s
 LTLIBICONV = -liconv
@@ -449,10 +448,10 @@ OTOOL64 =
 PACKAGE = zfs
 PACKAGE_BUGREPORT = 
 PACKAGE_NAME = zfs
-PACKAGE_STRING = zfs 2.0.0
+PACKAGE_STRING = zfs 2.0.1-mdl
 PACKAGE_TARNAME = zfs
 PACKAGE_URL = 
-PACKAGE_VERSION = 2.0.0
+PACKAGE_VERSION = 2.0.1-mdl
 PATH_SEPARATOR = :
 PKG_CONFIG = /usr/bin/pkg-config
 PKG_CONFIG_LIBDIR = 
@@ -474,7 +473,7 @@ QAT_OBJ =
 QAT_SRC = 
 QAT_SYMBOLS = 
 RANLIB = ranlib
-RELEASE = 51_g3075b29ca
+RELEASE = 1
 RM = rm -f
 RPM = rpm
 RPMBUILD = rpmbuild
@@ -498,14 +497,14 @@ TARGET_CPU = x86_64
 TEST_JOBS = 16
 USE_NLS = yes
 VENDOR = ubuntu
-VERSION = 2.0.0
+VERSION = 2.0.1-mdl
 XGETTEXT = /usr/bin/xgettext
 XGETTEXT_015 = /usr/bin/xgettext
 XGETTEXT_EXTRA_OPTIONS = 
 ZFS_CONFIG = all
 ZFS_INIT_SYSTEMD = systemd
 ZFS_INIT_SYSV = init.d
-ZFS_META_ALIAS = zfs-2.0.0-51_g3075b29ca
+ZFS_META_ALIAS = zfs-2.0.1-mdl-1
 ZFS_META_AUTHOR = OpenZFS
 ZFS_META_DATA = 
 ZFS_META_KVER_MAX = 5.10
@@ -515,8 +514,8 @@ ZFS_META_LT_AGE =
 ZFS_META_LT_CURRENT = 
 ZFS_META_LT_REVISION = 
 ZFS_META_NAME = zfs
-ZFS_META_RELEASE = 51_g3075b29ca
-ZFS_META_VERSION = 2.0.0
+ZFS_META_RELEASE = 1
+ZFS_META_VERSION = 2.0.1-mdl
 ZFS_MODULE_LOAD = modules-load.d
 ZLIB_CFLAGS = 
 ZLIB_LIBS = -lz
