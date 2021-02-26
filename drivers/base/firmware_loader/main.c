@@ -548,7 +548,7 @@ fw_get_filesystem_firmware(struct device *device, struct fw_priv *fw_priv,
 		size = rc;
 		rc = 0;
 
-		dev_dbg(device, "Loading firmware from %s\n", path);
+		dev_printk(KERN_INFO, device, "Loading firmware from %s\n", path);
 		if (decompress) {
 			dev_dbg(device, "f/w decompressing %s\n",
 				fw_priv->fw_name);
