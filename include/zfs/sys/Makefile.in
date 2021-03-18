@@ -281,12 +281,12 @@ am__kernel_HEADERS_DIST = abd.h abd_impl.h aggsum.h arc.h arc_impl.h \
 	xvattr.h zap.h zap_impl.h zap_leaf.h zcp.h zcp_global.h \
 	zcp_iter.h zcp_prop.h zcp_set.h zfeature.h zfs_acl.h \
 	zfs_bootenv.h zfs_context.h zfs_debug.h zfs_delay.h zfs_file.h \
-	zfs_fuid.h zfs_project.h zfs_quota.h zfs_ratelimit.h \
-	zfs_refcount.h zfs_rlock.h zfs_sa.h zfs_stat.h zfs_sysfs.h \
-	zfs_vfsops.h zfs_vnops.h zfs_znode.h zil.h zil_impl.h \
-	zio_checksum.h zio_compress.h zio_crypt.h zio.h zio_impl.h \
-	zio_priority.h zrlock.h zthr.h zfs_ioctl.h zfs_ioctl_impl.h \
-	zfs_onexit.h zvol.h zvol_impl.h
+	zfs_fuid.h zfs_project.h zfs_quota.h zfs_racct.h \
+	zfs_ratelimit.h zfs_refcount.h zfs_rlock.h zfs_sa.h zfs_stat.h \
+	zfs_sysfs.h zfs_vfsops.h zfs_vnops.h zfs_znode.h zil.h \
+	zil_impl.h zio_checksum.h zio_compress.h zio_crypt.h zio.h \
+	zio_impl.h zio_priority.h zrlock.h zthr.h zfs_ioctl.h \
+	zfs_ioctl_impl.h zfs_onexit.h zvol.h zvol_impl.h
 am__vpath_adj_setup = srcdirstrip=`echo "$(srcdir)" | sed 's|.|.|g'`;
 am__vpath_adj = case $$p in \
     $(srcdir)/*) f=`echo "$$p" | sed "s|^$$srcdirstrip/||"`;; \
@@ -336,11 +336,11 @@ am__libzfs_HEADERS_DIST = abd.h abd_impl.h aggsum.h arc.h arc_impl.h \
 	xvattr.h zap.h zap_impl.h zap_leaf.h zcp.h zcp_global.h \
 	zcp_iter.h zcp_prop.h zcp_set.h zfeature.h zfs_acl.h \
 	zfs_bootenv.h zfs_context.h zfs_debug.h zfs_delay.h zfs_file.h \
-	zfs_fuid.h zfs_project.h zfs_quota.h zfs_ratelimit.h \
-	zfs_refcount.h zfs_rlock.h zfs_sa.h zfs_stat.h zfs_sysfs.h \
-	zfs_vfsops.h zfs_vnops.h zfs_znode.h zil.h zil_impl.h \
-	zio_checksum.h zio_compress.h zio_crypt.h zio.h zio_impl.h \
-	zio_priority.h zrlock.h zthr.h
+	zfs_fuid.h zfs_project.h zfs_quota.h zfs_racct.h \
+	zfs_ratelimit.h zfs_refcount.h zfs_rlock.h zfs_sa.h zfs_stat.h \
+	zfs_sysfs.h zfs_vfsops.h zfs_vnops.h zfs_znode.h zil.h \
+	zil_impl.h zio_checksum.h zio_compress.h zio_crypt.h zio.h \
+	zio_impl.h zio_priority.h zrlock.h zthr.h
 HEADERS = $(kernel_HEADERS) $(libzfs_HEADERS)
 RECURSIVE_CLEAN_TARGETS = mostlyclean-recursive clean-recursive	\
   distclean-recursive maintainer-clean-recursive
@@ -801,6 +801,7 @@ COMMON_H = \
 	zfs_fuid.h \
 	zfs_project.h \
 	zfs_quota.h \
+	zfs_racct.h \
 	zfs_ratelimit.h \
 	zfs_refcount.h \
 	zfs_rlock.h \

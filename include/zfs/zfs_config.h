@@ -80,6 +80,9 @@
 /* bdev_whole() is available */
 /* #undef HAVE_BDEV_WHOLE */
 
+/* bio->bi_bdev->bd_disk exists */
+/* #undef HAVE_BIO_BDEV_DISK */
+
 /* bio->bi_opf is defined */
 #define HAVE_BIO_BI_OPF 1
 
@@ -90,7 +93,7 @@
 #define HAVE_BIO_BVEC_ITER 1
 
 /* bio_*_io_acct() available */
-#define HAVE_BIO_IO_ACCT 1
+/* #undef HAVE_BIO_IO_ACCT */
 
 /* bio_set_dev() is available */
 #define HAVE_BIO_SET_DEV 1
@@ -185,6 +188,9 @@
 
 /* sops->dirty_inode() wants flags */
 #define HAVE_DIRTY_INODE_WITH_FLAGS 1
+
+/* disk_*_io_acct() available */
+#define HAVE_DISK_IO_ACCT 1
 
 /* Define to 1 if you have the <dlfcn.h> header file. */
 #define HAVE_DLFCN_H 1
@@ -721,7 +727,7 @@
 /* #undef ZFS_IS_GPL_COMPATIBLE */
 
 /* Define the project alias string. */
-#define ZFS_META_ALIAS "zfs-2.0.1-mdl-1"
+#define ZFS_META_ALIAS "zfs-2.0.4-mdl-1"
 
 /* Define the project author. */
 #define ZFS_META_AUTHOR "OpenZFS"
@@ -730,7 +736,7 @@
 /* #undef ZFS_META_DATA */
 
 /* Define the maximum compatible kernel version. */
-#define ZFS_META_KVER_MAX "5.10"
+#define ZFS_META_KVER_MAX "5.11"
 
 /* Define the minimum compatible kernel version. */
 #define ZFS_META_KVER_MIN "3.10"
@@ -754,7 +760,7 @@
 #define ZFS_META_RELEASE "1"
 
 /* Define the project version. */
-#define ZFS_META_VERSION "2.0.1-mdl"
+#define ZFS_META_VERSION "2.0.4-mdl"
 
 /* count is located in percpu_ref.data */
 #define ZFS_PERCPU_REF_COUNT_IN_DATA 1
