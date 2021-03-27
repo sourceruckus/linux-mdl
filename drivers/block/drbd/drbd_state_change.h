@@ -12,7 +12,6 @@ struct drbd_device_state_change {
 	struct drbd_device *device;
 	enum drbd_disk_state disk_state[2];
 	bool have_quorum[2];
-	bool have_ldev;
 };
 
 struct drbd_connection_state_change {
@@ -20,6 +19,16 @@ struct drbd_connection_state_change {
 	enum drbd_conn_state cstate[2];
 	enum drbd_role peer_role[2];
 	bool susp_fen[2];
+};
+
+/* exception: stores state, not change.
+ * for get_initial_state. */
+struct drbd_path_state {
+	struct drbd_connection *connection;
+	struct drbd_path *path;
+	/* not an array,
+	 * because it's not an array in struct drbd_path either */
+	bool path_established;
 };
 
 struct drbd_peer_device_state_change {
@@ -32,14 +41,22 @@ struct drbd_peer_device_state_change {
 	bool resync_susp_other_c[2];
 };
 
+struct drbd_state_change_object_count {
+	unsigned int n_devices;
+	unsigned int n_connections;
+	unsigned int n_paths;
+};
+
 struct drbd_state_change {
 	struct list_head list;
 	unsigned int n_devices;
 	unsigned int n_connections;
+	unsigned int n_paths;
 	struct drbd_resource_state_change resource[1];
 	struct drbd_device_state_change *devices;
 	struct drbd_connection_state_change *connections;
 	struct drbd_peer_device_state_change *peer_devices;
+	struct drbd_path_state *paths;
 };
 
 extern struct drbd_state_change *remember_state_change(struct drbd_resource *, gfp_t);

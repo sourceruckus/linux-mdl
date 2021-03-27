@@ -39,6 +39,7 @@
 #include "drbd_wrappers.h"
 #include "drbd_strings.h"
 #include "drbd_state.h"
+#include "drbd_state_change.h"
 #include "drbd_protocol.h"
 #include "drbd_kref_debug.h"
 #include "drbd_transport.h"
@@ -250,15 +251,26 @@ extern u64 directly_connected_nodes(struct drbd_resource *, enum which_state);
 	 typecheck(u64, b) && \
 	((s64)(a) - (s64)(b) > 0))
 
+/* An application I/O request.
+ *
+ * Fields marked as "immutable" may only be modified when the request is
+ * exclusively owned, e.g. when the request is created or is being retried.
+ */
 struct drbd_request {
+	/* "immutable" */
 	struct drbd_device *device;
 
 	/* if local IO is not allowed, will be NULL.
 	 * if local IO _is_ allowed, holds the locally submitted bio clone,
 	 * or, after local IO completion, the ERR_PTR(error).
-	 * see drbd_request_endio(). */
+	 * see drbd_request_endio().
+	 *
+	 * Only accessed by app/submitter/endio - strictly sequential,
+	 * no serialization required. */
 	struct bio *private_bio;
 
+	/* Fields sector and size are "immutable". Otherwise protected by
+	 * interval_lock. */
 	struct drbd_interval i;
 
 	/* epoch: used to check on "completion" whether this req was in
@@ -268,6 +280,8 @@ struct drbd_request {
 	 * This corresponds to "barrier" in struct p_barrier[_ack],
 	 * and to "barrier_nr" in struct drbd_epoch (and various
 	 * comments/function parameters/local variable names).
+	 *
+	 * "immutable"
 	 */
 	unsigned int epoch;
 
@@ -277,17 +291,27 @@ struct drbd_request {
 	 * Assigned from device->resource->dagtag_sector.
 	 *
 	 * Given that some IO backends write several GB per second meanwhile,
-	 * lets just use a 64bit sequence space. */
+	 * lets just use a 64bit sequence space.
+	 *
+	 * "immutable"
+	 */
 	u64 dagtag_sector;
 
-	struct list_head tl_requests; /* ring list in the transfer log */
-	struct bio *master_bio;       /* master bio pointer */
+	/* list entry in transfer log (protected by RCU) */
+	struct list_head tl_requests;
+
+	/* list entry in submitter lists, peer ack list, or retry lists;
+	 * protected by the locks for those lists */
+	struct list_head list;
+
+	/* master bio pointer; "immutable" */
+	struct bio *master_bio;
 
 	/* see struct drbd_device */
 	struct list_head req_pending_master_completion;
 	struct list_head req_pending_local;
 
-	/* for generic IO accounting */
+	/* for generic IO accounting; "immutable" */
 	unsigned long start_jif;
 
 	/* for request_timer_fn() */
@@ -346,14 +370,34 @@ struct drbd_request {
 	/* once it hits 0, we may destroy this drbd_request object */
 	struct kref kref;
 
-	/* If not NULL, destruction of this drbd_request will
-	 * cause kref_put() on ->destroy_next. */
+	/* Creates a dependency chain between writes so that we know that a
+	 * peer ack can be sent when kref reaches zero.
+	 *
+	 * If not NULL, destruction of this drbd_request will
+	 * cause kref_put() on ->destroy_next.
+	 *
+	 * "immutable" */
 	struct drbd_request *destroy_next;
 
+	/* lock to protect state flags */
+	spinlock_t rq_lock;
 	unsigned int local_rq_state;
 	u16 net_rq_state[DRBD_NODE_ID_MAX];
+
+	/* for reclaim from transfer log */
+	struct rcu_head rcu;
 };
 
+/* Used to multicast peer acks. */
+struct drbd_peer_ack {
+	struct drbd_resource *resource;
+	struct list_head list;
+	u64 pending_mask;
+	u64 mask;
+	u64 dagtag_sector;
+};
+
+/* Tracks received writes grouped in epochs. Protected by epoch_lock. */
 struct drbd_epoch {
 	struct drbd_connection *connection;
 	struct drbd_peer_request *oldest_unconfirmed_peer_req;
@@ -530,7 +574,6 @@ enum device_flag {
 	MD_SYNC,		/* tell worker to call drbd_md_sync() */
 	MAKE_NEW_CUR_UUID,	/* tell worker to ping peers and eventually write new current uuid */
 
-	HAVE_LDEV,
 	STABLE_RESYNC,		/* One peer_device finished the resync stable! */
 	READ_BALANCE_RR,
 	PRIMARY_LOST_QUORUM,
@@ -562,10 +605,13 @@ enum peer_device_flag {
 				   D_UP_TO_DATE before becoming secondary! */
 	AHEAD_TO_SYNC_SOURCE,   /* Ahead -> SyncSource queued */
 	SYNC_TARGET_TO_BEHIND,  /* SyncTarget, wait for Behind */
+	HANDLING_CONGESTION,    /* Set while testing for congestion and handling it */
+	HANDLE_CONGESTION,      /* tell worker to change state due to congestion */
 	HOLDING_UUID_READ_LOCK, /* did a down_read(&device->uuid_sem) */
 	RS_SOURCE_MISSED_END,   /* SyncSource did not got P_UUIDS110 */
 	RS_PEER_MISSED_END,     /* Peer (which was SyncSource) did not got P_UUIDS110 after resync */
 	SYNC_SRC_CRASHED_PRI,   /* Source of this resync was a crashed primary */
+	HAVE_SIZES,		/* Cleared when connection gets lost; set when sizes received */
 };
 
 /* We could make these currently hardcoded constants configurable
@@ -768,6 +814,7 @@ enum resource_flag {
 				 */
 	TWOPC_ABORT_LOCAL,
 	TWOPC_EXECUTED,         /* Commited or aborted */
+	TWOPC_STATE_CHANGE_PENDING, /* set between sending commit and changing local state */
 	DEVICE_WORK_PENDING,	/* tell worker that some device has pending work */
 	PEER_DEVICE_WORK_PENDING,/* tell worker that some peer_device has pending work */
 	RESOURCE_WORK_PENDING,  /* tell worker that some peer_device has pending work */
@@ -843,24 +890,35 @@ struct drbd_resource {
 #endif
 	struct kref kref;
 	struct kref_debug_info kref_debug;
-	struct idr devices;		/* volume number to device mapping */
+
+	/* Volume number to device mapping. Updates protected by conf_update. */
+	struct idr devices;
+
+	/* RCU list. Updates protected by adm_mutex, conf_update and state_rwlock. */
 	struct list_head connections;
-	struct list_head resources;
+
+	struct list_head resources;     /* list entry in global resources list */
 	struct res_opts res_opts;
 	int max_node_id;
-	struct mutex conf_update;	/* for ready-copy-update of net_conf and disk_conf
+	struct mutex conf_update;	/* for read-copy-update of net_conf and disk_conf
 					   and devices, connection and peer_devices lists */
 	struct mutex adm_mutex;		/* mutex to serialize administrative requests */
 	struct mutex open_release;	/* serialize open/release */
-	spinlock_t req_lock;
-	u64 dagtag_sector;		/* Protected by req_lock.
+	rwlock_t state_rwlock;          /* serialize state changes */
+	u64 dagtag_sector;		/* Protected by tl_update_lock.
 					 * See also dagtag_sector in
 					 * &drbd_request */
 	unsigned long flags;
 
+	/* Protects updates to the transfer log and related counters. */
+	spinlock_t tl_update_lock;
 	struct list_head transfer_log;	/* all requests not yet fully processed */
+	struct drbd_request *tl_previous_write;
 
-	struct list_head peer_ack_list;  /* requests to send peer acks for */
+	spinlock_t peer_ack_lock;
+	struct list_head peer_ack_req_list;  /* requests to send peer acks for */
+	struct list_head peer_ack_list;  /* peer acks to send */
+	struct drbd_work peer_ack_work;
 	u64 last_peer_acked_dagtag;  /* dagtag of last PEER_ACK'ed request */
 	struct drbd_request *peer_ack_req;  /* last request not yet PEER_ACK'ed */
 
@@ -895,6 +953,9 @@ struct drbd_resource {
 	bool cached_all_devices_have_quorum;
 
 	enum write_ordering_e write_ordering;
+
+	/* Protects the current transfer log (tle) fields. */
+	spinlock_t current_tle_lock;
 	atomic_t current_tle_nr;	/* transfer log epoch number */
 	unsigned current_tle_writes;	/* writes seen within this tl epoch */
 
@@ -935,8 +996,7 @@ struct drbd_resource {
 	 * Note: This is a single linked list, the next pointer is the private
 	 *       member of struct page. */
 	struct page *pp_pool;
-	spinlock_t pp_lock;
-	int pp_vacant;
+	atomic_t pp_vacant;
 	wait_queue_head_t pp_wait;
 };
 
@@ -1004,11 +1064,11 @@ struct drbd_connection {
 	struct drbd_thread ack_receiver;
 	struct workqueue_struct *ack_sender;
 	struct work_struct peer_ack_work;
-
-	struct list_head peer_requests; /* All peer requests in the order we received them.. */
 	u64 last_dagtag_sector;
 
 	atomic_t active_ee_cnt;
+	spinlock_t peer_reqs_lock;
+	struct list_head peer_requests; /* All peer requests in the order we received them.. */
 	struct list_head active_ee; /* IO in progress (P_DATA gets written to disk) */
 	struct list_head sync_ee;   /* IO in progress (P_RS_DATA_REPLY gets written to disk) */
 	struct list_head read_ee;   /* [RS]P_DATA_REQUEST being read */
@@ -1060,14 +1120,19 @@ struct drbd_connection {
 		 *
 		 * There is also a special value to reliably re-start
 		 * the transfer log walk after having scheduled the requests
-		 * for RESEND. */
+		 * for RESEND.
+		 *
+		 * req_next is only accessed by drbd_sender thread, in
+		 * case of a resend from some worker, but then regular IO
+		 * is suspended.
+		 */
 #define TL_NEXT_REQUEST_RESEND	((void*)1)
 		struct drbd_request *req_next;
 	} todo;
 
 	/* cached pointers,
 	 * so we can look up the oldest pending requests more quickly.
-	 * protected by resource->req_lock */
+	 * TODO: RCU */
 	struct drbd_request *req_ack_pending;
 	struct drbd_request *req_not_net_done;
 
@@ -1245,7 +1310,7 @@ struct submit_worker {
 	struct workqueue_struct *wq;
 	struct work_struct worker;
 
-	/* protected by ..->resource->req_lock */
+	spinlock_t lock;
 	struct list_head writes;
 	struct list_head peer_writes;
 };
@@ -1262,10 +1327,12 @@ struct drbd_device {
 	long magic;
 #endif
 	struct drbd_resource *resource;
-	struct list_head peer_devices;
-	struct list_head pending_bitmap_io;
 
-	struct opener openers;
+	/* RCU list. Updates protected by adm_mutex, conf_update and state_rwlock. */
+	struct list_head peer_devices;
+
+	spinlock_t pending_bmio_lock;
+	struct list_head pending_bitmap_io;
 
 	unsigned long flush_jif;
 #ifdef CONFIG_DEBUG_FS
@@ -1320,11 +1387,13 @@ struct drbd_device {
 	atomic_t suspend_cnt;	/* recursive suspend counter, if non-zero, IO will be blocked. */
 
 	/* Interval trees of pending local requests */
+	spinlock_t interval_lock;
 	struct rb_root read_requests;
 	struct rb_root write_requests;
 
 	/* for statistics and timeouts */
 	/* [0] read, [1] write */
+	spinlock_t pending_completion_lock;
 	struct list_head pending_master_completion[2];
 	struct list_head pending_completion[2];
 
@@ -1375,6 +1444,8 @@ struct drbd_device {
 	ktime_t al_mid_kt;
 	ktime_t al_after_sync_page_kt;
 #endif
+	struct list_head openers;
+	spinlock_t openers_lock;
 
 	struct rcu_head rcu;
 	struct work_struct finalize_work;
@@ -1433,45 +1504,25 @@ conn_peer_device(struct drbd_connection *connection, int volume_number)
 	return idr_find(&connection->peer_devices, volume_number);
 }
 
-static inline unsigned drbd_req_state_by_peer_device(struct drbd_request *req,
-		struct drbd_peer_device *peer_device)
-{
-	int idx = peer_device->node_id;
-	if (idx < 0 || idx >= DRBD_NODE_ID_MAX) {
-		drbd_warn(peer_device, "FIXME: node_id: %d\n", idx);
-		/* WARN(1, "bitmap_index: %d", idx); */
-		return 0;
-	}
-	return req->net_rq_state[idx];
-}
-
 #define for_each_resource(resource, _resources) \
 	list_for_each_entry(resource, _resources, resources)
 
 #define for_each_resource_rcu(resource, _resources) \
 	list_for_each_entry_rcu(resource, _resources, resources)
 
-#define for_each_resource_safe(resource, tmp, _resources) \
-	list_for_each_entry_safe(resource, tmp, _resources, resources)
-
-/* Each caller of for_each_connect() must hold req_lock or adm_mutex or conf_update.
-   The update locations hold all three! */
+/* see drbd_resource.connections for locking requirements */
 #define for_each_connection(connection, resource) \
 	list_for_each_entry(connection, &resource->connections, connections)
 
 #define for_each_connection_rcu(connection, resource) \
 	list_for_each_entry_rcu(connection, &resource->connections, connections)
 
-#define for_each_connection_safe(connection, tmp, resource) \
-	list_for_each_entry_safe(connection, tmp, &resource->connections, connections)
-
 #define for_each_connection_ref(connection, m, resource)		\
 	for (connection = __drbd_next_connection_ref(&m, NULL, resource); \
 	     connection;						\
 	     connection = __drbd_next_connection_ref(&m, connection, resource))
 
-/* Each caller of for_each_peer_device() must hold req_lock or adm_mutex or conf_update.
-   The update locations hold all three! */
+/* see drbd_device.peer_devices for locking requirements */
 #define for_each_peer_device(peer_device, device) \
 	list_for_each_entry(peer_device, &device->peer_devices, peer_devices)
 
@@ -1526,7 +1577,6 @@ extern int drbd_send_protocol(struct drbd_connection *connection);
 extern u64 drbd_collect_local_uuid_flags(struct drbd_peer_device *peer_device, u64 *authoritative_mask);
 extern u64 drbd_resolved_uuid(struct drbd_peer_device *peer_device_base, u64 *uuid_flags);
 extern int drbd_send_uuids(struct drbd_peer_device *, u64 uuid_flags, u64 weak_nodes);
-extern void drbd_gen_and_send_sync_uuid(struct drbd_peer_device *);
 extern int drbd_attach_peer_device(struct drbd_peer_device *);
 extern int drbd_send_sizes(struct drbd_peer_device *, uint64_t u_size_diskless, enum dds_flags flags);
 extern int conn_send_state(struct drbd_connection *, union drbd_state);
@@ -1544,8 +1594,6 @@ extern int drbd_send_ov_request(struct drbd_peer_device *, sector_t sector, int 
 
 extern int drbd_send_bitmap(struct drbd_device *, struct drbd_peer_device *);
 extern int drbd_send_dagtag(struct drbd_connection *connection, u64 dagtag);
-extern void drbd_send_sr_reply(struct drbd_connection *connection, int vnr,
-			       enum drbd_state_rv retcode);
 extern int drbd_send_rs_deallocated(struct drbd_peer_device *, struct drbd_peer_request *);
 extern void drbd_send_twopc_reply(struct drbd_connection *connection,
 				  enum drbd_packet, struct twopc_reply *);
@@ -1834,6 +1882,7 @@ void del_connect_timer(struct drbd_connection *connection);
 
 extern struct drbd_resource *drbd_create_resource(const char *, struct res_opts *);
 extern void drbd_reclaim_resource(struct rcu_head *rp);
+extern void drbd_req_destroy_lock(struct kref *kref);
 extern struct drbd_resource *drbd_find_resource(const char *name);
 extern void drbd_destroy_resource(struct kref *kref);
 
@@ -1847,6 +1896,7 @@ extern void drbd_destroy_connection(struct kref *kref);
 extern void conn_free_crypto(struct drbd_connection *connection);
 
 /* drbd_req */
+extern void drbd_wake_all_senders(struct drbd_resource *resource);
 extern void do_submit(struct work_struct *ws);
 #ifndef CONFIG_DRBD_TIMING_STATS
 #define __drbd_make_request(d,b,k,j) __drbd_make_request(d,b,j)
@@ -2029,7 +2079,7 @@ extern bool drbd_rs_should_slow_down(struct drbd_peer_device *, sector_t,
 extern int drbd_submit_peer_request(struct drbd_peer_request *);
 extern void drbd_cleanup_after_failed_submit_peer_request(struct drbd_peer_request *peer_req);
 extern void drbd_cleanup_peer_requests_wfa(struct drbd_device *device, struct list_head *cleanup);
-extern int drbd_free_peer_reqs(struct drbd_resource *, struct list_head *, bool is_net_ee);
+extern int drbd_free_peer_reqs(struct drbd_connection *, struct list_head *, bool is_net_ee);
 extern struct drbd_peer_request *drbd_alloc_peer_req(struct drbd_peer_device *, gfp_t) __must_hold(local);
 extern void __drbd_free_peer_req(struct drbd_peer_request *, int);
 #define drbd_free_peer_req(pr) __drbd_free_peer_req(pr, 0)
@@ -2124,6 +2174,7 @@ extern void notify_resource_state(struct sk_buff *,
 				  unsigned int,
 				  struct drbd_resource *,
 				  struct resource_info *,
+				  struct rename_resource_info *,
 				  enum drbd_notification_type);
 extern void notify_device_state(struct sk_buff *,
 				unsigned int,
@@ -2148,6 +2199,11 @@ extern void drbd_broadcast_peer_device_state(struct drbd_peer_device *);
 
 extern sector_t drbd_local_max_size(struct drbd_device *device) __must_hold(local);
 extern int drbd_open_ro_count(struct drbd_resource *resource);
+
+extern void device_state_change_to_info(struct device_info *,
+					struct drbd_device_state_change *);
+extern void peer_device_state_change_to_info(struct peer_device_info *,
+					     struct drbd_peer_device_state_change *);
 /*
  * inline helper functions
  *************************/
@@ -2258,9 +2314,10 @@ static inline void drbd_chk_io_error_(struct drbd_device *device,
 {
 	if (error) {
 		unsigned long flags;
-		spin_lock_irqsave(&device->resource->req_lock, flags);
+		write_lock_irqsave(&device->resource->state_rwlock, flags);
 		__drbd_chk_io_error_(device, forcedetach, where);
-		spin_unlock_irqrestore(&device->resource->req_lock, flags);
+		write_unlock_irqrestore(&device->resource->state_rwlock,
+					flags);
 	}
 }
 
@@ -2395,7 +2452,7 @@ extern int drbd_send_ping(struct drbd_connection *connection);
 extern int drbd_send_ping_ack(struct drbd_connection *connection);
 extern int conn_send_state_req(struct drbd_connection *, int vnr, enum drbd_packet, union drbd_state, union drbd_state);
 extern int conn_send_twopc_request(struct drbd_connection *, int vnr, enum drbd_packet, struct p_twopc_request *);
-extern int drbd_send_peer_ack(struct drbd_connection *, struct drbd_request *);
+extern int drbd_send_peer_ack(struct drbd_connection *, struct drbd_peer_ack *);
 
 static inline void drbd_thread_stop(struct drbd_thread *thi)
 {
@@ -2526,6 +2583,14 @@ static inline bool is_verify_state(struct drbd_peer_device *peer_device,
 	return repl_state == L_VERIFY_S || repl_state == L_VERIFY_T;
 }
 
+static inline bool resync_susp_comb_dep(struct drbd_peer_device *peer_device, enum which_state which)
+{
+	struct drbd_device *device = peer_device->device;
+
+	return peer_device->resync_susp_dependency[which] || peer_device->resync_susp_other_c[which] ||
+		(is_sync_source_state(peer_device, which) && device->disk_state[which] <= D_INCONSISTENT);
+}
+
 /**
  * get_ldev() - Increase the ref count on device->ldev. Returns 0 if there is no ldev
  * @_device:		DRBD device.
@@ -2593,14 +2658,21 @@ static inline void dec_ap_bio(struct drbd_device *device, int rw)
 
 	D_ASSERT(device, ap_bio >= 0);
 
-	/* Check for list_empty outside the lock is ok.  Worst case it queues
-	 * nothing because someone else just now did.  During list_add, both
-	 * resource->req_lock *and* a refcount on ap_bio_cnt[WRITE] are held,
-	 * a list_add cannot race with this code path.
-	 * Checking pending_bitmap_work.n is not correct,
-	 * it has a different lifetime. */
-	if (ap_bio == 0 && rw == WRITE && !list_empty(&device->pending_bitmap_work.q))
-		drbd_queue_pending_bitmap_work(device);
+	if (ap_bio == 0 && rw == WRITE) {
+		/* Check for list_empty outside the lock is ok.  Worst case it queues
+		 * nothing because someone else just now did.  During list_add, a
+		 * refcount on ap_bio_cnt[WRITE] is held, so the bitmap work will be
+		 * queued when that is released if we miss it here.
+		 * Checking pending_bitmap_work.n is not correct,
+		 * it has a different lifetime. */
+		if (!list_empty(&device->pending_bitmap_work.q))
+			drbd_queue_pending_bitmap_work(device);
+
+		/* Barrier may not have been sent because of active application
+		 * writes belonging to unknown epochs. Wake senders now to
+		 * give them a chance to send the barrier. */
+		drbd_wake_all_senders(device->resource);
+	}
 
 	if (ap_bio == 0 || ap_bio == nr_requests-1)
 		wake_up(&device->misc_wait);
@@ -2643,12 +2715,6 @@ static inline u64 drbd_current_uuid(struct drbd_device *device)
 	if (!device->ldev)
 		return 0;
 	return device->ldev->md.current_uuid;
-}
-
-static inline bool verify_can_do_stop_sector(struct drbd_peer_device *peer_device)
-{
-	return peer_device->connection->agreed_pro_version >= 97 &&
-		peer_device->connection->agreed_pro_version != 100;
 }
 
 static inline u64 drbd_bitmap_uuid(struct drbd_peer_device *peer_device)

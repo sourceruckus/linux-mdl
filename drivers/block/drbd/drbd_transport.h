@@ -11,7 +11,7 @@
    So that transport compiled against an older version of this
    header will no longer load in a module that assumes a newer
    version. */
-#define DRBD_TRANSPORT_API_VERSION 16
+#define DRBD_TRANSPORT_API_VERSION 17
 
 /* MSG_MSG_DONTROUTE and MSG_PROBE are not used by DRBD. I.e.
    we can reuse these flags for our purposes */
@@ -183,6 +183,7 @@ struct drbd_transport_ops {
 	int (*recv_pages)(struct drbd_transport *, struct drbd_page_chain_head *, size_t size);
 
 	void (*stats)(struct drbd_transport *, struct drbd_transport_stats *stats);
+	void (*net_conf_change)(struct drbd_transport *, struct net_conf *new_net_conf);
 	void (*set_rcvtimeo)(struct drbd_transport *, enum drbd_stream, long timeout);
 	long (*get_rcvtimeo)(struct drbd_transport *, enum drbd_stream);
 	int (*send_page)(struct drbd_transport *, enum drbd_stream, struct page *,
@@ -238,7 +239,7 @@ extern void drbd_put_listener(struct drbd_path *path);
 extern struct drbd_path *drbd_find_path_by_addr(struct drbd_listener *, struct sockaddr_storage *);
 extern bool drbd_stream_send_timed_out(struct drbd_transport *transport, enum drbd_stream stream);
 extern bool drbd_should_abort_listening(struct drbd_transport *transport);
-extern void drbd_path_event(struct drbd_transport *transport, struct drbd_path *path);
+extern void drbd_path_event(struct drbd_transport *transport, struct drbd_path *path, bool destroyed);
 
 /* drbd_receiver.c*/
 extern struct page *drbd_alloc_pages(struct drbd_transport *, unsigned int, gfp_t);

@@ -2,8 +2,8 @@
 #define _DRBD_WRAPPERS_H
 
 #include <linux/version.h>
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,32)
-# error "At least kernel 2.6.32 (with patches) required"
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,10,0)
+# error "At least kernel 3.10.0 (with patches) required"
 #endif
 
 #include <linux/drbd_compat.h>
@@ -27,6 +27,12 @@
 #define pr_fmt(fmt)	KBUILD_MODNAME ": " fmt
 #endif
 
+#ifndef ALIGN_DOWN
+/* ed067d4a859f linux/kernel.h: Add ALIGN_DOWN macro */
+#define ALIGN_DOWN(x, a)       __ALIGN_KERNEL((x) - ((a) - 1), (a))
+#endif
+
+/* introduced in v3.13-4220-g89a0714106aa */
 #ifndef U32_MAX
 #define U32_MAX ((u32)~0U)
 #endif
@@ -34,217 +40,40 @@
 #define S32_MAX ((s32)(U32_MAX>>1))
 #endif
 
+/* introduced in v3.18-rc3-2-g230fa253df63 */
 #ifndef READ_ONCE
 #define READ_ONCE ACCESS_ONCE
 #endif
 
+/* introduced in v4.3-8058-g71baba4b92dc */
 #ifndef __GFP_RECLAIM
 #define __GFP_RECLAIM __GFP_WAIT
-#endif
-
-#ifndef COMPAT_QUEUE_LIMITS_HAS_DISCARD_ZEROES_DATA
-static inline unsigned int queue_discard_zeroes_data(struct request_queue *q)
-{
-	return 0;
-}
 #endif
 
 #ifndef FMODE_EXCL
 #define FMODE_EXCL 0
 #endif
 
+/* introduced in v4.14-rc8-66-gf54bb2ec02c8 */
 #ifndef lockdep_assert_irqs_disabled
 #define lockdep_assert_irqs_disabled() do { } while (0)
 #endif
 
-#if defined(CONFIG_DYNAMIC_DEBUG)
-#if !defined(dynamic_pr_debug) || !defined(DEFINE_DYNAMIC_DEBUG_METADATA)
-#warning "CONFIG_DYNAMIC_DEBUG is defined, but some related macro is not; disabling dynamic debug"
+/* introduced in v5.0-6417-g2bdde670beed */
+#ifndef DEFINE_DYNAMIC_DEBUG_METADATA
 #define DEFINE_DYNAMIC_DEBUG_METADATA(D, F) const char *D = F
 #define __dynamic_pr_debug(D, F, args...) do { (void)(D); if (0) printk(F, ## args); } while(0)
 #define DYNAMIC_DEBUG_BRANCH(D) false
 #endif
 
+/* introduced in v4.7-11559-g9049fc745300 */
 #ifndef DYNAMIC_DEBUG_BRANCH
 #define DYNAMIC_DEBUG_BRANCH(descriptor) \
 	(unlikely(descriptor.flags & _DPRINTK_FLAGS_PRINT))
 #endif
-#endif
-
-/* see 7eaceac block: remove per-queue plugging */
-#ifdef blk_queue_plugged
-static inline void drbd_plug_device(struct request_queue *q)
-{
-	spin_lock_irq(q->queue_lock);
-
-/* XXX the check on !blk_queue_plugged is redundant,
- * implicitly checked in blk_plug_device */
-
-	if (!blk_queue_plugged(q)) {
-		blk_plug_device(q);
-		del_timer(&q->unplug_timer);
-		/* unplugging should not happen automatically... */
-	}
-	spin_unlock_irq(q->queue_lock);
-}
-#else
-static inline void drbd_plug_device(struct request_queue *q)
-{
-}
-#endif
-
-/* How do we tell the block layer to pass down flush/fua? */
-#ifndef COMPAT_HAVE_BLK_QUEUE_WRITE_CACHE
-static inline void blk_queue_write_cache(struct request_queue *q, bool enabled, bool fua)
-{
-#if defined(REQ_FLUSH) && !defined(REQ_HARDBARRIER)
-/* Linux version 2.6.37 up to 4.7
- * needs blk_queue_flush() to announce driver support */
-	blk_queue_flush(q, (enabled ? REQ_FLUSH : 0) | (fua ? REQ_FUA : 0));
-#else
-/* Older kernels either flag affected bios with BIO_RW_BARRIER, or do not know
- * how to handle this at all. No need to "announce" driver support. */
-#endif
-}
-#endif
 
 #ifndef KREF_INIT
 #define KREF_INIT(N) { ATOMIC_INIT(N) }
-#endif
-
-#ifdef COMPAT_HAVE_POINTER_BACKING_DEV_INFO /* >= v4.11 */
-#define bdi_from_device(device) (device->ldev->backing_bdev->bd_disk->queue->backing_dev_info)
-#else /* < v4.11 */
-#define bdi_rw_congested(BDI) bdi_rw_congested(&BDI)
-#define bdi_congested(BDI, BDI_BITS) bdi_congested(&BDI, (BDI_BITS))
-#define bdi_from_device(device) (&device->ldev->backing_bdev->bd_disk->queue->backing_dev_info)
-#endif
-
-/* history of bioset_create():
- *  v4.13  011067b  blk: replace bioset_create_nobvec() with a flags arg to bioset_create()
- *  +struct bio_set *bioset_create(unsigned int pool_size, unsigned int front_pad, int flags)
- *
- *  v3.18  d8f429e  block: add bioset_create_nobvec()
- *  +struct bio_set *bioset_create(unsigned int pool_size, unsigned int front_pad)
- *  +struct bio_set *bioset_create_nobvec(unsigned int pool_size, unsigned int front_pad)
- *
- *  v3.16  f9c78b2  block: move bio.c and bio-integrity.c from fs/ to block/
- *  +struct bio_set *bioset_create(unsigned int pool_size, unsigned int front_pad)
- *
- *  --- we don't care for older than 2.3.32 ---
- */
-#if defined(COMPAT_HAVE_BIOSET_NEED_BVECS)
-/* all good, "modern" kernel before v4.18 */
-#elif defined(COMPAT_HAVE_BIOSET_CREATE_FRONT_PAD)
-# define bioset_create(pool_size, front_pad, flags) bioset_create(pool_size, front_pad)
-#elif defined(COMPAT_HAVE_BIOSET_INIT)
-/* => v4.18*/
-#else
-# error "drbd compat layer broken"
-#endif
-
-
-#if !(defined(COMPAT_HAVE_RB_AUGMENT_FUNCTIONS) && \
-      defined(AUGMENTED_RBTREE_SYMBOLS_EXPORTED))
-
-/*
- * Make sure the replacements for the augmented rbtree helper functions do not
- * clash with functions the kernel implements but does not export.
- */
-#define rb_augment_f drbd_rb_augment_f
-#define rb_augment_path drbd_rb_augment_path
-#define rb_augment_insert drbd_rb_augment_insert
-#define rb_augment_erase_begin drbd_rb_augment_erase_begin
-#define rb_augment_erase_end drbd_rb_augment_erase_end
-
-typedef void (*rb_augment_f)(struct rb_node *node, void *data);
-
-static inline void rb_augment_path(struct rb_node *node, rb_augment_f func, void *data)
-{
-	struct rb_node *parent;
-
-up:
-	func(node, data);
-	parent = rb_parent(node);
-	if (!parent)
-		return;
-
-	if (node == parent->rb_left && parent->rb_right)
-		func(parent->rb_right, data);
-	else if (parent->rb_left)
-		func(parent->rb_left, data);
-
-	node = parent;
-	goto up;
-}
-
-/*
- * after inserting @node into the tree, update the tree to account for
- * both the new entry and any damage done by rebalance
- */
-static inline void rb_augment_insert(struct rb_node *node, rb_augment_f func, void *data)
-{
-	if (node->rb_left)
-		node = node->rb_left;
-	else if (node->rb_right)
-		node = node->rb_right;
-
-	rb_augment_path(node, func, data);
-}
-
-/*
- * before removing the node, find the deepest node on the rebalance path
- * that will still be there after @node gets removed
- */
-static inline struct rb_node *rb_augment_erase_begin(struct rb_node *node)
-{
-	struct rb_node *deepest;
-
-	if (!node->rb_right && !node->rb_left)
-		deepest = rb_parent(node);
-	else if (!node->rb_right)
-		deepest = node->rb_left;
-	else if (!node->rb_left)
-		deepest = node->rb_right;
-	else {
-		deepest = rb_next(node);
-		if (deepest->rb_right)
-			deepest = deepest->rb_right;
-		else if (rb_parent(deepest) != node)
-			deepest = rb_parent(deepest);
-	}
-
-	return deepest;
-}
-
-/*
- * after removal, update the tree to account for the removed entry
- * and any rebalance damage.
- */
-static inline void rb_augment_erase_end(struct rb_node *node, rb_augment_f func, void *data)
-{
-	if (node)
-		rb_augment_path(node, func, data);
-}
-#endif
-
-#ifndef IDR_GET_NEXT_EXPORTED
-/* Body in compat/idr.c */
-extern void *idr_get_next(struct idr *idp, int *nextidp);
-#endif
-
-/**
- * idr_for_each_entry - iterate over an idr's elements of a given type
- * @idp:     idr handle
- * @entry:   the type * to use as cursor
- * @id:      id entry's key
- */
-/* introduced in v3.1-rc1-39-g9749f30f1a38 */
-#ifndef idr_for_each_entry
-#define idr_for_each_entry(idp, entry, id)				\
-	for (id = 0, entry = (typeof(entry))idr_get_next((idp), &(id)); \
-	     entry != NULL;						\
-	     ++id, entry = (typeof(entry))idr_get_next((idp), &(id)))
 #endif
 
 /* introduced in v4.4-rc2-61-ga55bbd375d18 */
@@ -278,33 +107,6 @@ extern void *idr_get_next(struct idr *idp, int *nextidp);
        nla_parse_nested(tb, maxtype, nla, policy)
 #endif
 
-#ifndef SK_CAN_REUSE
-/* This constant was introduced by Pavel Emelyanov <xemul@parallels.com> on
-   Thu Apr 19 03:39:36 2012 +0000. Before the release of linux-3.5
-   commit 4a17fd52 sock: Introduce named constants for sk_reuse */
-#define SK_CAN_REUSE   1
-#endif
-
-#ifndef COMPAT_HAVE_IDR_ALLOC
-static inline int idr_alloc(struct idr *idr, void *ptr, int start, int end, gfp_t gfp_mask)
-{
-	int rv, got;
-
-	if (!idr_pre_get(idr, gfp_mask))
-		return -ENOMEM;
-	rv = idr_get_new_above(idr, ptr, start, &got);
-	if (rv < 0)
-		return rv;
-
-	if (got >= end) {
-		idr_remove(idr, got);
-		return -ENOSPC;
-	}
-
-	return got;
-}
-#endif
-
 #ifndef BLKDEV_ISSUE_ZEROOUT_EXPORTED
 /* Was introduced with 2.6.34 */
 extern int blkdev_issue_zeroout(struct block_device *bdev, sector_t sector,
@@ -329,30 +131,6 @@ extern int blkdev_issue_zeroout(struct block_device *bdev, sector_t sector,
 #endif
 #endif
 
-
-#if !defined(QUEUE_FLAG_SECDISCARD)
-# define queue_flag_set_unlocked(F, Q)				\
-	({							\
-		if ((F) != -1)					\
-			queue_flag_set_unlocked(F, Q);		\
-	})
-
-# define queue_flag_clear_unlocked(F, Q)			\
-	({							\
-		if ((F) != -1)					\
-			queue_flag_clear_unlocked(F, Q);	\
-	})
-
-# ifndef blk_queue_secdiscard
-#  define blk_queue_secdiscard(q)   (0)
-#  define QUEUE_FLAG_SECDISCARD    (-1)
-# endif
-#endif
-
-#ifndef list_next_rcu
-#define list_next_rcu(list)	(*((struct list_head **)(&(list)->next)))
-#endif
-
 #ifndef COMPAT_HAVE_SIMPLE_POSITIVE
 #include <linux/dcache.h>
 static inline int simple_positive(struct dentry *dentry)
@@ -361,27 +139,11 @@ static inline int simple_positive(struct dentry *dentry)
 }
 #endif
 
-#ifdef blk_queue_plugged
-/* pre 7eaceac block: remove per-queue plugging
- * Code has been converted over to the new explicit on-stack plugging ...
- *
- * provide dummy struct blk_plug and blk_start_plug/blk_finish_plug,
- * so the main code won't be cluttered with ifdef.
- */
-struct blk_plug { };
-#if 0
-static void blk_start_plug(struct blk_plug *plug) {};
-static void blk_finish_plug(struct blk_plug *plug) {};
-#else
-#define blk_start_plug(plug) do { (void)plug; } while (0)
-#define blk_finish_plug(plug) do { } while (0)
-#endif
-#endif
-
 #if !(defined(COMPAT_HAVE_SHASH_DESC_ON_STACK) &&    \
       defined COMPAT_HAVE_SHASH_DESC_ZERO)
 #include <crypto/hash.h>
 
+/* introduced in a0a77af14117 (v3.17-9284) */
 #ifndef COMPAT_HAVE_SHASH_DESC_ON_STACK
 #define SHASH_DESC_ON_STACK(shash, ctx)				  \
 	char __##shash##_desc[sizeof(struct shash_desc) +	  \
@@ -389,6 +151,7 @@ static void blk_finish_plug(struct blk_plug *plug) {};
 	struct shash_desc *shash = (struct shash_desc *)__##shash##_desc
 #endif
 
+/* introduced in e67ffe0af4d4 (v4.5-rc1-24) */
 #ifndef COMPAT_HAVE_SHASH_DESC_ZERO
 #ifndef barrier_data
 #define barrier_data(ptr) barrier()
@@ -400,26 +163,6 @@ static inline void shash_desc_zero(struct shash_desc *desc)
 	barrier_data(desc);
 }
 #endif
-#endif
-
-#ifdef COMPAT_HAVE_ATOMIC_DEC_IF_POSITIVE_LINUX
-#include <linux/atomic.h>
-#else
-static inline int atomic_dec_if_positive(atomic_t *v)
-{
-        int c, old, dec;
-        c = atomic_read(v);
-        for (;;) {
-                dec = c - 1;
-                if (unlikely(dec < 0))
-                        break;
-                old = atomic_cmpxchg((v), c, dec);
-                if (likely(old == c))
-                        break;
-                c = old;
-        }
-        return dec;
-}
 #endif
 
 /* RDMA related */

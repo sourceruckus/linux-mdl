@@ -16,18 +16,6 @@ obj-m += drbd.o drbd_transport_tcp.o
 #override EXTRA_CFLAGS += -DAUGMENTED_RBTREE_SYMBOLS_EXPORTED
 
 
-#ifeq ($(shell grep -e '\<idr_get_next\>' \
-#		   $(objtree)/Module.symvers | wc -l),1)
-#override EXTRA_CFLAGS += -DIDR_GET_NEXT_EXPORTED
-#else
-#compat_objs += drbd-kernel-compat/idr.o
-#endif
-#
-# NOTE: 5.4 - 5.10 look good
-#
-override EXTRA_CFLAGS += -DIDR_GET_NEXT_EXPORTED
-
-
 #ifeq ($(shell grep -e '\<blkdev_issue_zeroout\>' \
 #		   $(objtree)/Module.symvers | wc -l),1)
 #override EXTRA_CFLAGS += -DBLKDEV_ISSUE_ZEROOUT_EXPORTED

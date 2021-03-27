@@ -129,7 +129,9 @@ static void seq_print_one_request(struct seq_file *m, struct drbd_request *req, 
 {
 	/* change anything here, fixup header below! */
 	unsigned int s = req->local_rq_state;
+	unsigned long flags;
 
+	spin_lock_irqsave(&req->rq_lock, flags);
 #define RQ_HDR_1 "epoch\tsector\tsize\trw"
 	seq_printf(m, "0x%x\t%llu\t%u\t%s",
 		req->epoch,
@@ -153,6 +155,7 @@ static void seq_print_one_request(struct seq_file *m, struct drbd_request *req, 
 #endif
 #define RQ_HDR_4 "\tstate\n"
 	seq_print_request_state(m, req);
+	spin_unlock_irqrestore(&req->rq_lock, flags);
 }
 #define RQ_HDR RQ_HDR_1 RQ_HDR_2 RQ_HDR_3 RQ_HDR_4
 
@@ -201,14 +204,14 @@ static void seq_print_waiting_for_AL(struct seq_file *m, struct drbd_resource *r
 		struct drbd_request *req;
 		int n = atomic_read(&device->ap_actlog_cnt);
 		if (n) {
-			spin_lock_irq(&device->resource->req_lock);
+			spin_lock_irq(&device->pending_completion_lock);
 			req = list_first_entry_or_null(&device->pending_master_completion[1],
 				struct drbd_request, req_pending_master_completion);
 			/* if the oldest request does not wait for the activity log
 			 * it is not interesting for us here */
 			if (req && (req->local_rq_state & RQ_IN_ACT_LOG))
 				req = NULL;
-			spin_unlock_irq(&device->resource->req_lock);
+			spin_unlock_irq(&device->pending_completion_lock);
 		}
 		if (n) {
 			seq_printf(m, "%u\t%u\t", device->minor, device->vnr);
@@ -232,7 +235,7 @@ static void seq_print_device_bitmap_io(struct seq_file *m, struct drbd_device *d
 	unsigned long start_jif;
 	unsigned int in_flight;
 	unsigned int flags;
-	spin_lock_irq(&device->resource->req_lock);
+	spin_lock_irq(&device->pending_bmio_lock);
 	ctx = list_first_entry_or_null(&device->pending_bitmap_io, struct drbd_bm_aio_ctx, list);
 	if (ctx && ctx->done)
 		ctx = NULL;
@@ -241,7 +244,7 @@ static void seq_print_device_bitmap_io(struct seq_file *m, struct drbd_device *d
 		in_flight = atomic_read(&ctx->in_flight);
 		flags = ctx->flags;
 	}
-	spin_unlock_irq(&device->resource->req_lock);
+	spin_unlock_irq(&device->pending_bmio_lock);
 	if (ctx) {
 		seq_printf(m, "%u\t%u\t%c\t%u\t%u\n",
 			device->minor, device->vnr,
@@ -315,11 +318,11 @@ static void seq_print_connection_peer_requests(struct seq_file *m,
 	struct drbd_connection *connection, unsigned long jif)
 {
 	seq_puts(m, "minor\tvnr\tsector\tsize\trw\tage\tflags\n");
-	spin_lock_irq(&connection->resource->req_lock);
+	spin_lock_irq(&connection->peer_reqs_lock);
 	seq_print_peer_request(m, connection, &connection->active_ee, jif);
 	seq_print_peer_request(m, connection, &connection->read_ee, jif);
 	seq_print_peer_request(m, connection, &connection->sync_ee, jif);
-	spin_unlock_irq(&connection->resource->req_lock);
+	spin_unlock_irq(&connection->peer_reqs_lock);
 }
 
 static void seq_print_device_peer_flushes(struct seq_file *m,
@@ -359,28 +362,34 @@ static void seq_print_resource_transfer_log_summary(struct seq_file *m,
 	unsigned int show_state = 0;
 
 	seq_puts(m, "n\tdevice\tvnr\t" RQ_HDR);
-	spin_lock_irq(&resource->req_lock);
-	list_for_each_entry(req, &resource->transfer_log, tl_requests) {
+	rcu_read_lock();
+	list_for_each_entry_rcu(req, &resource->transfer_log, tl_requests) {
 		struct drbd_device *device = req->device;
 		struct drbd_peer_device *peer_device;
 		unsigned int tmp = 0;
 		unsigned int s;
+
+		/* don't disable preemption "forever" */
+		if ((count & 0x1ff) == 0x1ff) {
+			struct list_head *next_hdr;
+			/* Only get if the request hasn't already been destroyed. */
+			if (!kref_get_unless_zero(&req->kref))
+				continue;
+			rcu_read_unlock();
+			cond_resched();
+			rcu_read_lock();
+			next_hdr = list_next_rcu(&req->tl_requests);
+			if (kref_put(&req->kref, drbd_req_destroy_lock)) {
+				if (next_hdr == &resource->transfer_log)
+					break;
+				req = list_entry_rcu(next_hdr,
+						     struct drbd_request,
+						     tl_requests);
+			}
+		}
 		++count;
 
-		/* don't disable irq "forever" */
-		if (!(count & 0x1ff)) {
-			struct drbd_request *req_next;
-			kref_get(&req->kref);
-			spin_unlock_irq(&resource->req_lock);
-			cond_resched();
-			spin_lock_irq(&resource->req_lock);
-			req_next = list_next_entry(req, tl_requests);
-			if (kref_put(&req->kref, drbd_req_destroy))
-				req = req_next;
-			if (&req->tl_requests == &resource->transfer_log)
-				break;
-		}
-
+		spin_lock_irq(&req->rq_lock);
 		s = req->local_rq_state;
 
 		/* This is meant to summarize timing issues, to be able to tell
@@ -392,8 +401,8 @@ static void seq_print_resource_transfer_log_summary(struct seq_file *m,
 		if ((s & RQ_LOCAL_MASK) && (s & RQ_LOCAL_PENDING))
 			tmp |= 2;
 
-		for_each_peer_device(peer_device, device) {
-			s = req->net_rq_state[peer_device->node_id];
+		for_each_peer_device_rcu(peer_device, device) {
+			s = READ_ONCE(req->net_rq_state[peer_device->node_id]);
 			if (s & RQ_NET_MASK) {
 				if (!(s & RQ_NET_SENT))
 					tmp |= 4;
@@ -403,6 +412,8 @@ static void seq_print_resource_transfer_log_summary(struct seq_file *m,
 					tmp |= 16;
 			}
 		}
+		spin_unlock_irq(&req->rq_lock);
+
 		if ((tmp & show_state) == tmp)
 			continue;
 		show_state |= tmp;
@@ -411,7 +422,7 @@ static void seq_print_resource_transfer_log_summary(struct seq_file *m,
 		if (show_state == 0x1f)
 			break;
 	}
-	spin_unlock_irq(&resource->req_lock);
+	rcu_read_unlock();
 }
 
 /* TODO: transfer_log and friends should be moved to resource */
@@ -482,12 +493,12 @@ static int resource_state_twopc_show(struct seq_file *m, void *pos)
 	unsigned long jif;
 	struct queued_twopc *q;
 
-	spin_lock_irq(&resource->req_lock);
+	read_lock_irq(&resource->state_rwlock);
 	if (resource->remote_state_change) {
 		twopc = resource->twopc_reply;
 		active = true;
 	}
-	spin_unlock_irq(&resource->req_lock);
+	read_unlock_irq(&resource->state_rwlock);
 
 	seq_printf(m, "v: %u\n\n", 1);
 	if (active) {
@@ -504,13 +515,13 @@ static int resource_state_twopc_show(struct seq_file *m, void *pos)
 			u64 parents = 0;
 
 			seq_puts(m, "  parent list: ");
-			spin_lock_irq(&resource->req_lock);
+			read_lock_irq(&resource->state_rwlock);
 			list_for_each_entry(connection, &resource->twopc_parents, twopc_parent_list) {
 				char *name = rcu_dereference((connection)->transport.net_conf)->name;
 				seq_printf(m, "%s, ", name);
 				parents |= NODE_MASK(connection->peer_node_id);
 			}
-			spin_unlock_irq(&resource->req_lock);
+			read_unlock_irq(&resource->state_rwlock);
 			seq_puts(m, "\n");
 			seq_puts(m, "  parent node mask: ");
 			rcu_read_lock();
@@ -693,6 +704,19 @@ void drbd_debugfs_resource_cleanup(struct drbd_resource *resource)
 	drbd_debugfs_remove(&resource->debugfs_res);
 }
 
+void drbd_debugfs_resource_rename(struct drbd_resource *resource, const char *new_name)
+{
+	struct dentry *new_d;
+
+	new_d = debugfs_rename(drbd_debugfs_resources, resource->debugfs_res,
+				drbd_debugfs_resources, new_name);
+	if (IS_ERR(new_d)) {
+		drbd_err(resource, "failed to rename debugfs entry for resource\n");
+	} else {
+		resource->debugfs_res = new_d;
+	}
+}
+
 static void seq_print_one_timing_detail(struct seq_file *m,
 	const struct drbd_thread_timing_details *tdp,
 	unsigned long jif)
@@ -757,19 +781,19 @@ static int connection_oldest_requests_show(struct seq_file *m, void *ignored)
 	/* BUMP me if you change the file format/content/presentation */
 	seq_printf(m, "v: %u\n\n", 0);
 
-	spin_lock_irq(&connection->resource->req_lock);
-	r1 = connection->todo.req_next;
+	rcu_read_lock();
+	r1 = READ_ONCE(connection->todo.req_next);
 	if (r1)
 		seq_print_minor_vnr_req(m, r1, now, jif);
-	r2 = connection->req_ack_pending;
+	r2 = READ_ONCE(connection->req_ack_pending);
 	if (r2 && r2 != r1) {
 		r1 = r2;
 		seq_print_minor_vnr_req(m, r1, now, jif);
 	}
-	r2 = connection->req_not_net_done;
+	r2 = READ_ONCE(connection->req_not_net_done);
 	if (r2 && r2 != r1)
 		seq_print_minor_vnr_req(m, r2, now, jif);
-	spin_unlock_irq(&connection->resource->req_lock);
+	rcu_read_unlock();
 	return 0;
 }
 
@@ -984,7 +1008,6 @@ static int device_act_log_extents_show(struct seq_file *m, void *ignored)
 static int device_oldest_requests_show(struct seq_file *m, void *ignored)
 {
 	struct drbd_device *device = m->private;
-	struct drbd_resource *resource = device->resource;
 	ktime_t now = ktime_get();
 	unsigned long jif = jiffies;
 	struct drbd_request *r1, *r2;
@@ -994,7 +1017,7 @@ static int device_oldest_requests_show(struct seq_file *m, void *ignored)
 	seq_printf(m, "v: %u\n\n", 0);
 
 	seq_puts(m, RQ_HDR);
-	spin_lock_irq(&resource->req_lock);
+	spin_lock_irq(&device->pending_completion_lock);
 	/* WRITE, then READ */
 	for (i = 1; i >= 0; --i) {
 		r1 = list_first_entry_or_null(&device->pending_master_completion[i],
@@ -1006,22 +1029,21 @@ static int device_oldest_requests_show(struct seq_file *m, void *ignored)
 		if (r2 && r2 != r1)
 			seq_print_one_request(m, r2, now, jif);
 	}
-	spin_unlock_irq(&resource->req_lock);
+	spin_unlock_irq(&device->pending_completion_lock);
 	return 0;
 }
 
 static int device_openers_show(struct seq_file *m, void *ignored)
 {
 	struct drbd_device *device = m->private;
-	struct drbd_resource *resource = device->resource;
 	ktime_t now = ktime_get_real();
 	struct opener *tmp;
 
-	mutex_lock(&resource->open_release);
-	list_for_each_entry(tmp, &device->openers.list, list)
+	spin_lock(&device->openers_lock);
+	list_for_each_entry(tmp, &device->openers, list)
 		seq_printf(m, "%s\t%d\t%lld\n", tmp->comm, tmp->pid,
 			ktime_to_ms(ktime_sub(now, tmp->opened)));
-	mutex_unlock(&resource->open_release);
+	spin_unlock(&device->openers_lock);
 
 	return 0;
 }
@@ -1519,8 +1541,7 @@ static void drbd_syncer_progress(struct drbd_peer_device *pd, struct seq_file *s
 		if (repl_state == L_VERIFY_S ||
 		    repl_state == L_VERIFY_T) {
 			bit_pos = bm_bits - pd->ov_left;
-			if (verify_can_do_stop_sector(pd))
-				stop_sector = pd->ov_stop_sector;
+			stop_sector = pd->ov_stop_sector;
 		} else
 			bit_pos = pd->resync_next_bit;
 		/* Total sectors may be slightly off for oddly
@@ -1716,7 +1737,10 @@ static const struct file_operations drbd_refcounts_fops = {
 static int drbd_compat_show(struct seq_file *m, void *ignored)
 {
 	seq_puts(m, "genl_policy__yes_in_ops\n");
+	seq_puts(m, "set_capacity_and_notify__no_present\n");
 	seq_puts(m, "nla_strscpy__no_present\n");
+	seq_puts(m, "queue_discard_zeroes_data__no_present\n");
+	seq_puts(m, "crypto_tfm_need_key__no_present\n");
 	return 0;
 }
 

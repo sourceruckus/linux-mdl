@@ -75,6 +75,7 @@ static int dtt_connect(struct drbd_transport *transport);
 static int dtt_recv(struct drbd_transport *transport, enum drbd_stream stream, void **buf, size_t size, int flags);
 static int dtt_recv_pages(struct drbd_transport *transport, struct drbd_page_chain_head *chain, size_t size);
 static void dtt_stats(struct drbd_transport *transport, struct drbd_transport_stats *stats);
+static void dtt_net_conf_change(struct drbd_transport *transport, struct net_conf *new_net_conf);
 static void dtt_set_rcvtimeo(struct drbd_transport *transport, enum drbd_stream stream, long timeout);
 static long dtt_get_rcvtimeo(struct drbd_transport *transport, enum drbd_stream stream);
 static int dtt_send_page(struct drbd_transport *transport, enum drbd_stream, struct page *page,
@@ -103,6 +104,7 @@ static struct drbd_transport_ops dtt_ops = {
 	.recv = dtt_recv,
 	.recv_pages = dtt_recv_pages,
 	.stats = dtt_stats,
+	.net_conf_change = dtt_net_conf_change,
 	.set_rcvtimeo = dtt_set_rcvtimeo,
 	.get_rcvtimeo = dtt_get_rcvtimeo,
 	.send_page = dtt_send_page,
@@ -203,8 +205,10 @@ static void dtt_free(struct drbd_transport *transport, enum drbd_tr_free_op free
 	for_each_path_ref(drbd_path, transport) {
 		bool was_established = drbd_path->established;
 		drbd_path->established = false;
-		if (was_established)
-			drbd_path_event(transport, drbd_path);
+		if (free_op == DESTROY_TRANSPORT)
+			drbd_path_event(transport, drbd_path, true);
+		else if (was_established)
+			drbd_path_event(transport, drbd_path, false);
 	}
 
 	if (free_op == DESTROY_TRANSPORT) {
@@ -372,14 +376,23 @@ static void dtt_stats(struct drbd_transport *transport, struct drbd_transport_st
 static void dtt_setbufsize(struct socket *socket, unsigned int snd,
 			   unsigned int rcv)
 {
+	struct sock *sk = socket->sk;
+
 	/* open coded SO_SNDBUF, SO_RCVBUF */
 	if (snd) {
-		socket->sk->sk_sndbuf = snd;
-		socket->sk->sk_userlocks |= SOCK_SNDBUF_LOCK;
+		sk->sk_sndbuf = snd;
+		sk->sk_userlocks |= SOCK_SNDBUF_LOCK;
+		/* Wake up sending tasks if we upped the value. */
+		sk->sk_write_space(sk);
+	} else {
+		sk->sk_userlocks &= ~SOCK_SNDBUF_LOCK;
 	}
+
 	if (rcv) {
-		socket->sk->sk_rcvbuf = rcv;
-		socket->sk->sk_userlocks |= SOCK_RCVBUF_LOCK;
+		sk->sk_rcvbuf = rcv;
+		sk->sk_userlocks |= SOCK_RCVBUF_LOCK;
+	} else {
+		sk->sk_userlocks &= ~SOCK_RCVBUF_LOCK;
 	}
 }
 
@@ -1029,7 +1042,7 @@ randomize:
 
 	TR_ASSERT(transport, first_path == connect_to_path);
 	connect_to_path->path.established = true;
-	drbd_path_event(transport, &connect_to_path->path);
+	drbd_path_event(transport, &connect_to_path->path, false);
 	dtt_put_listeners(transport);
 
 	dsocket->sk->sk_reuse = SK_CAN_REUSE; /* SO_REUSEADDR */
@@ -1084,6 +1097,22 @@ out:
 	}
 
 	return err;
+}
+
+static void dtt_net_conf_change(struct drbd_transport *transport, struct net_conf *new_net_conf)
+{
+	struct drbd_tcp_transport *tcp_transport =
+		container_of(transport, struct drbd_tcp_transport, transport);
+	struct socket *data_socket = tcp_transport->stream[DATA_STREAM];
+	struct socket *control_socket = tcp_transport->stream[CONTROL_STREAM];
+
+	if (data_socket) {
+		dtt_setbufsize(data_socket, new_net_conf->sndbuf_size, new_net_conf->rcvbuf_size);
+	}
+
+	if (control_socket) {
+		dtt_setbufsize(control_socket, new_net_conf->sndbuf_size, new_net_conf->rcvbuf_size);
+	}
 }
 
 static void dtt_set_rcvtimeo(struct drbd_transport *transport, enum drbd_stream stream, long timeout)

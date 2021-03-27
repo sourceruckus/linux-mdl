@@ -86,7 +86,7 @@ static int _drbd_md_sync_page_io(struct drbd_device *device,
 
 	if ((op == REQ_OP_WRITE) && !test_bit(MD_NO_FUA, &device->flags))
 		op_flags |= REQ_FUA | REQ_PREFLUSH;
-	op_flags |= REQ_META | REQ_SYNC | REQ_PRIO;
+	op_flags |= REQ_META | REQ_SYNC;
 
 	device->md_io.done = 0;
 	device->md_io.error = -ENODEV;
@@ -785,9 +785,6 @@ consider_sending_peers_in_sync(struct drbd_peer_device *peer_device, unsigned in
 	struct bm_extent *bm_ext;
 	struct lc_element *e;
 
-	if (peer_device->connection->agreed_pro_version < 110)
-		return;
-
 	if (drbd_try_rs_begin_io(peer_device, BM_EXT_TO_SECT(rs_enr), false))
 		return;
 
@@ -1047,8 +1044,7 @@ static void maybe_schedule_on_disk_bitmap_update(struct drbd_peer_device *peer_d
 						 bool rs_done)
 {
 	if (rs_done) {
-		if (peer_device->connection->agreed_pro_version <= 95 ||
-		    is_sync_target_state(peer_device, NOW))
+		if (is_sync_target_state(peer_device, NOW))
 			set_bit(RS_DONE, &peer_device->flags);
 			/* and also set RS_PROGRESS below */
 
@@ -1284,108 +1280,6 @@ out:
 	put_ldev(device);
 
 	return set;
-}
-
-static
-struct bm_extent *_bme_get(struct drbd_peer_device *peer_device, unsigned int enr)
-{
-	struct drbd_device *device = peer_device->device;
-	struct lc_element *e;
-	struct bm_extent *bm_ext;
-	int wakeup = 0;
-	unsigned long rs_flags;
-
-	spin_lock_irq(&device->al_lock);
-	if (peer_device->resync_locked > peer_device->resync_lru->nr_elements/2) {
-		spin_unlock_irq(&device->al_lock);
-		return NULL;
-	}
-	e = lc_get(peer_device->resync_lru, enr);
-	bm_ext = e ? lc_entry(e, struct bm_extent, lce) : NULL;
-	if (bm_ext) {
-		if (bm_ext->lce.lc_number != enr) {
-			bm_ext->rs_left = bm_e_weight(peer_device, enr);
-			bm_ext->rs_failed = 0;
-			lc_committed(peer_device->resync_lru);
-			wakeup = 1;
-		}
-		if (bm_ext->lce.refcnt == 1)
-			peer_device->resync_locked++;
-		set_bit(BME_NO_WRITES, &bm_ext->flags);
-	}
-	rs_flags = peer_device->resync_lru->flags;
-	spin_unlock_irq(&device->al_lock);
-	if (wakeup)
-		wake_up(&device->al_wait);
-
-	if (!bm_ext) {
-		if (rs_flags & LC_STARVING)
-			drbd_warn(peer_device, "Have to wait for element"
-			     " (resync LRU too small?)\n");
-		BUG_ON(rs_flags & LC_LOCKED);
-	}
-
-	return bm_ext;
-}
-
-static int _is_in_al(struct drbd_device *device, unsigned int enr)
-{
-	int rv;
-
-	spin_lock_irq(&device->al_lock);
-	rv = lc_is_used(device->act_log, enr);
-	spin_unlock_irq(&device->al_lock);
-
-	return rv;
-}
-
-/**
- * drbd_rs_begin_io() - Gets an extent in the resync LRU cache and sets it to BME_LOCKED
- *
- * This functions sleeps on al_wait. Returns 0 on success, -EINTR if interrupted.
- */
-int drbd_rs_begin_io(struct drbd_peer_device *peer_device, sector_t sector)
-{
-	struct drbd_device *device = peer_device->device;
-	unsigned int enr = BM_SECT_TO_EXT(sector);
-	struct bm_extent *bm_ext;
-	int i, sig;
-	bool sa;
-
-retry:
-	sig = wait_event_interruptible(device->al_wait,
-			(bm_ext = _bme_get(peer_device, enr)));
-	if (sig)
-		return -EINTR;
-
-	if (test_bit(BME_LOCKED, &bm_ext->flags))
-		return 0;
-
-	/* step aside only while we are above c-min-rate; unless disabled. */
-	sa = drbd_rs_c_min_rate_throttle(peer_device);
-
-	for (i = 0; i < AL_EXT_PER_BM_SECT; i++) {
-		sig = wait_event_interruptible(device->al_wait,
-					       !_is_in_al(device, enr * AL_EXT_PER_BM_SECT + i) ||
-					       (sa && test_bit(BME_PRIORITY, &bm_ext->flags)));
-
-		if (sig || (sa && test_bit(BME_PRIORITY, &bm_ext->flags))) {
-			spin_lock_irq(&device->al_lock);
-			if (lc_put(peer_device->resync_lru, &bm_ext->lce) == 0) {
-				bm_ext->flags = 0; /* clears BME_NO_WRITES and eventually BME_PRIORITY */
-				peer_device->resync_locked--;
-				wake_up(&device->al_wait);
-			}
-			spin_unlock_irq(&device->al_lock);
-			if (sig)
-				return -EINTR;
-			if (schedule_timeout_interruptible(HZ/10))
-				return -EINTR;
-			goto retry;
-		}
-	}
-	set_bit(BME_LOCKED, &bm_ext->flags);
-	return 0;
 }
 
 /**
