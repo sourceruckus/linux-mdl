@@ -411,7 +411,8 @@ void complete_master_bio(struct drbd_device *device,
 		struct bio_and_error *m)
 {
 	int rw = bio_data_dir(m->bio);
-	m->bio->bi_status = errno_to_blk_status(m->error);
+	if (unlikely(m->error))
+		m->bio->bi_status = errno_to_blk_status(m->error);
 	bio_endio(m->bio);
 	dec_ap_bio(device, rw);
 }
@@ -1146,7 +1147,7 @@ void __req_mod(struct drbd_request *req, enum drbd_req_event what,
 		   allowed to complete this one "out-of-sequence".
 		 */
 		if (!(req->net_rq_state[idx] & RQ_NET_OK)) {
-			mod_rq_state(req, m, peer_device, RQ_COMPLETION_SUSP,
+			mod_rq_state(req, m, peer_device, RQ_NET_SENT|RQ_COMPLETION_SUSP,
 					RQ_NET_QUEUED|RQ_NET_PENDING);
 			break;
 		}
@@ -1525,7 +1526,8 @@ static void drbd_process_discard_or_zeroes_req(struct drbd_request *req, int fla
 {
 	int err = drbd_issue_discard_or_zero_out(req->device,
 				req->i.sector, req->i.size >> 9, flags);
-	req->private_bio->bi_status = err ? BLK_STS_IOERR : BLK_STS_OK;
+	if (err)
+		req->private_bio->bi_status = BLK_STS_IOERR;
 	bio_endio(req->private_bio);
 }
 
@@ -2312,8 +2314,7 @@ static bool drbd_fail_request_early(struct drbd_device *device, struct bio *bio)
 
 blk_qc_t drbd_submit_bio(struct bio *bio)
 {
-	struct request_queue *q = bio->bi_disk->queue;
-	struct drbd_device *device = (struct drbd_device *) q->queuedata;
+	struct drbd_device *device = bio->bi_disk->private_data;
 #ifdef CONFIG_DRBD_TIMING_STATS
 	ktime_t start_kt;
 #endif
@@ -2341,7 +2342,6 @@ blk_qc_t drbd_submit_bio(struct bio *bio)
 	 */
 	if (bio_op(bio) == REQ_OP_READ && bio->bi_iter.bi_size == 0) {
 		WARN_ONCE(1, "size zero read from upper layers");
-		bio->bi_status = BLK_STS_OK;
 		bio_endio(bio);
 		return BLK_QC_T_NONE;
 	}
@@ -2357,8 +2357,19 @@ blk_qc_t drbd_submit_bio(struct bio *bio)
 static unsigned long time_min_in_future(unsigned long now,
 		unsigned long t1, unsigned long t2)
 {
-	t1 = time_after(now, t1) ? now : t1;
-	t2 = time_after(now, t2) ? now : t2;
+	bool t1_in_future = time_after(t1, now);
+	bool t2_in_future = time_after(t2, now);
+
+	/* Ensure that we never return a time in the past. */
+	t1 = t1_in_future ? t1 : now;
+	t2 = t2_in_future ? t2 : now;
+
+	if (!t1_in_future)
+		return t2;
+
+	if (!t2_in_future)
+		return t1;
+
 	return time_after(t1, t2) ? t2 : t1;
 }
 
@@ -2494,8 +2505,26 @@ void request_timer_fn(struct timer_list *t)
 		struct net_conf *nc;
 		struct drbd_request *req;
 		unsigned long ent = 0;
-		unsigned long pre_send_jif = 0;
+		unsigned long pre_send_jif = now;
 		unsigned int ko_count = 0, timeout = 0;
+
+		rcu_read_lock();
+		nc = rcu_dereference(connection->transport.net_conf);
+		if (nc) {
+			/* effective timeout = ko_count * timeout */
+			if (connection->cstate[NOW] == C_CONNECTED) {
+				ko_count = nc->ko_count;
+				timeout = nc->timeout;
+				ent = timeout * HZ/10 * ko_count;
+			}
+		}
+		rcu_read_unlock();
+
+		/* This connection is not established,
+		 * or has the effective timeout disabled.
+		 * no timer restart needed (for this connection). */
+		if (!ent)
+			continue;
 
 		/* maybe the oldest request waiting for the peer is in fact still
 		 * blocking in tcp sendmsg.  That's ok, though, that's handled via the
@@ -2507,39 +2536,26 @@ void request_timer_fn(struct timer_list *t)
 		 * but which is still waiting for an ACK. */
 		req = connection->req_ack_pending;
 
-		/* if we don't have such request (e.g. protocol A)
-		 * check the oldest requests which is still waiting on its epoch
+		/* If we don't have such request (e.g. protocol A)
+		 * check the oldest request which is still waiting on its epoch
 		 * closing barrier ack. */
 		if (!req)
 			req = connection->req_not_net_done;
+		if (req)
+			pre_send_jif = req->pre_send_jif[connection->peer_node_id];
 
-		/* evaluate the oldest peer request only in one timer! */
-		if (req && req->device != device)
-			req = NULL;
-		if (!req)
-			continue;
-
-		rcu_read_lock();
-		nc = rcu_dereference(connection->transport.net_conf);
-		if (nc) {
-			/* effective timeout = ko_count * timeout */
-			if (connection->cstate[NOW] == C_CONNECTED) {
-				ko_count = nc->ko_count;
-				timeout = nc->timeout;
-			}
-		}
-		rcu_read_unlock();
-
-		if (!timeout)
-			continue;
-
-		pre_send_jif = req->pre_send_jif[connection->peer_node_id];
-
-		ent = timeout * HZ/10 * ko_count;
 		et = min_not_zero(et, ent);
 		next_trigger_time = time_min_in_future(now,
 				next_trigger_time, pre_send_jif + ent);
+		/* Restart the timer, even if there are no pending requests at all.
+		 * We currently do not re-arm from the submit path. */
 		restart_timer = true;
+
+		/* We have one timer per "device",
+		 * but the "oldest" request is per "connection".
+		 * Evaluate the oldest peer request only in one timer! */
+		if (req == NULL || req->device != device)
+			continue;
 
 		if (net_timeout_reached(req, peer_device, now, ent, ko_count, timeout)) {
 			dynamic_drbd_dbg(peer_device, "Request at %llus+%u timed out\n",

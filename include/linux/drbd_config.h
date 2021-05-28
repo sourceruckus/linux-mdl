@@ -20,9 +20,9 @@ extern const char *drbd_buildtag(void);
 
 /* End of external module for 2.6.33 stuff */
 
-#define REL_VERSION "9.1.1"
+#define REL_VERSION "9.1.2"
 #define PRO_VERSION_MIN 110
-#define PRO_VERSION_MAX 119
+#define PRO_VERSION_MAX 120
 
 /* Protocol version to use for initial version handshake.
  * This may be lower than PRO_VERSION_MIN because we want to be able to connect

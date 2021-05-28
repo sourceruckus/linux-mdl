@@ -2302,6 +2302,33 @@ static bool any_disk_is_uptodate(struct drbd_device *device)
 	return ret;
 }
 
+/* If we are trying to (re-)establish some connection,
+ * it may be useful to re-try the conditions in drbd_open().
+ * But if we have no connection at all (yet/anymore),
+ * or are disconnected and not trying to (re-)establish,
+ * or are established already, retrying won't help at all.
+ * Asking the same peer(s) the same question
+ * is unlikely to change their answer.
+ * Almost always triggered by udev (and the configured probes) while bringing
+ * the resource "up", just after "new-minor", even before "attach" or any
+ * "peers"/"paths" are configured.
+ */
+static bool connection_state_may_improve_soon(struct drbd_resource *resource)
+{
+	struct drbd_connection *connection;
+	bool ret = false;
+	rcu_read_lock();
+	for_each_connection_rcu(connection, resource) {
+		enum drbd_conn_state cstate = connection->cstate[NOW];
+		if (C_DISCONNECTING < cstate && cstate < C_CONNECTED) {
+			ret = true;
+			break;
+		}
+	}
+	rcu_read_unlock();
+	return ret;
+}
+
 static int try_to_promote(struct drbd_device *device, long timeout, bool ndelay)
 {
 	struct drbd_resource *resource = device->resource;
@@ -2326,7 +2353,7 @@ static int try_to_promote(struct drbd_device *device, long timeout, bool ndelay)
 				timeout);
 			if (timeout <= 0)
 				break;
-		} else if (rv == SS_NO_UP_TO_DATE_DISK) {
+		} else if (rv == SS_NO_UP_TO_DATE_DISK && connection_state_may_improve_soon(resource)) {
 			/* Wait until we get a connection established */
 			timeout = wait_event_interruptible_timeout(resource->state_wait,
 				any_disk_is_uptodate(device), timeout);
@@ -2350,8 +2377,10 @@ static int ro_open_cond(struct drbd_device *device)
 		return -EMEDIUMTYPE;
 	else if (any_disk_is_uptodate(device))
 		return 0;
-	else
+	else if (connection_state_may_improve_soon(resource))
 		return -EAGAIN;
+	else
+		return -ENODATA;
 }
 
 enum ioc_rv {
@@ -3080,6 +3109,7 @@ int set_resource_options(struct drbd_resource *resource, struct res_opts *res_op
 	bool wake_device_misc = false;
 	bool force_state_recalc = false;
 	unsigned long irq_flags;
+	struct res_opts *old_opts = &resource->res_opts;
 
 	if (!zalloc_cpumask_var(&new_cpu_mask, GFP_KERNEL))
 		return -ENOMEM;
@@ -3111,17 +3141,28 @@ int set_resource_options(struct drbd_resource *resource, struct res_opts *res_op
 	if (res_opts->nr_requests < DRBD_NR_REQUESTS_MIN)
 		res_opts->nr_requests = DRBD_NR_REQUESTS_MIN;
 
-	if (resource->res_opts.on_no_quorum == ONQ_SUSPEND_IO &&
-	    res_opts->on_no_quorum == ONQ_IO_ERROR) {
-		/* when changing from suspend-io to io-error, we need
-		 * to wake all waitqueues which are blocking io. we also
-		 * need to cancel all pending requests with an io error. */
+	if (old_opts->quorum != res_opts->quorum ||
+	    old_opts->on_no_quorum != res_opts->on_no_quorum)
 		force_state_recalc = true;
+
+	if (resource->susp_quorum[NOW] &&
+	    (res_opts->quorum != old_opts->quorum ||
+	     (old_opts->on_no_quorum == ONQ_SUSPEND_IO && res_opts->on_no_quorum == ONQ_IO_ERROR))) {
+		struct drbd_device *device;
+		int vnr;
+
+		/* when changing from suspend-io to io-error, or when
+		 * quorum setting get "eased" in any way, and IO was
+		 * frozen due to quorum, it might unfreeze now: */
 		wake_device_misc = true;
 
-		for_each_connection(connection, resource) {
-			tl_walk(connection, COMPLETION_RESUMED);
+		idr_for_each_entry(&resource->devices, device, vnr) {
+			/* unfreezing IO by IO errors, starts a new data generation */
+			if (test_and_clear_bit(NEW_CUR_UUID, &device->flags))
+				drbd_uuid_new_current(device, false);
 		}
+
+		/* IO restarted in thaw_requests_after_quorum_suspend() in drbd_state.c */
 	}
 
 	if (resource->res_opts.nr_requests < res_opts->nr_requests)
@@ -3187,8 +3228,6 @@ struct drbd_resource *drbd_create_resource(const char *name,
 	timer_setup(&resource->repost_up_to_date_timer, repost_up_to_date_fn, 0);
 	sema_init(&resource->state_sem, 1);
 	resource->role[NOW] = R_SECONDARY;
-	if (set_resource_options(resource, res_opts))
-		goto fail_free_name;
 	resource->max_node_id = res_opts->node_id;
 	resource->twopc_reply.initiator_node_id = -1;
 	mutex_init(&resource->conf_update);
@@ -3224,6 +3263,9 @@ struct drbd_resource *drbd_create_resource(const char *name,
 		resource->pp_pool = page;
 	}
 	atomic_set(&resource->pp_vacant, page_pool_count);
+
+	if (set_resource_options(resource, res_opts))
+		goto fail_free_pages;
 
 	list_add_tail_rcu(&resource->resources, &drbd_resources);
 
@@ -3397,9 +3439,6 @@ struct drbd_peer_device *create_peer_device(struct drbd_device *device, struct d
 	}
 
 	timer_setup(&peer_device->start_resync_timer, start_resync_timer_fn, 0);
-
-	INIT_LIST_HEAD(&peer_device->resync_work.list);
-	peer_device->resync_work.cb  = w_resync_timer;
 	timer_setup(&peer_device->resync_timer, resync_timer_fn, 0);
 
 	INIT_LIST_HEAD(&peer_device->propagate_uuids_work.list);
@@ -3514,7 +3553,6 @@ enum drbd_ret_code drbd_create_device(struct drbd_config_context *adm_ctx, unsig
 	if (!q)
 		goto out_no_q;
 	device->rq_queue = q;
-	q->queuedata   = device;
 
 	disk = alloc_disk(1);
 	if (!disk)
@@ -4085,9 +4123,9 @@ void drbd_uuid_set_bitmap(struct drbd_peer_device *peer_device, u64 uuid) __must
 
 	spin_lock_irqsave(&device->ldev->md.uuid_lock, flags);
 	previous_uuid = drbd_bitmap_uuid(peer_device);
+	__drbd_uuid_set_bitmap(peer_device, uuid);
 	if (previous_uuid)
 		_drbd_uuid_push_history(device, previous_uuid);
-	__drbd_uuid_set_bitmap(peer_device, uuid);
 	spin_unlock_irqrestore(&device->ldev->md.uuid_lock, flags);
 }
 
@@ -4794,8 +4832,9 @@ void drbd_uuid_detect_finished_resyncs(struct drbd_peer_device *peer_device) __m
 			int from_node_id;
 
 			if (current_equal) {
-				_drbd_uuid_push_history(device, peer_md[node_id].bitmap_uuid);
+				u64 previous_bitmap_uuid = peer_md[node_id].bitmap_uuid;
 				peer_md[node_id].bitmap_uuid = 0;
+				_drbd_uuid_push_history(device, previous_bitmap_uuid);
 				if (node_id == peer_device->node_id)
 					drbd_print_uuids(peer_device, "updated UUIDs");
 				else if (peer_md[node_id].flags & MDF_HAVE_BITMAP)
@@ -4811,9 +4850,10 @@ void drbd_uuid_detect_finished_resyncs(struct drbd_peer_device *peer_device) __m
 			if (from_node_id != -1 && node_id != from_node_id &&
 			    dagtag_newer(peer_md[from_node_id].bitmap_dagtag,
 					 peer_md[node_id].bitmap_dagtag)) {
-				_drbd_uuid_push_history(device, peer_md[node_id].bitmap_uuid);
+				u64 previous_bitmap_uuid = peer_md[node_id].bitmap_uuid;
 				peer_md[node_id].bitmap_uuid = peer_md[from_node_id].bitmap_uuid;
 				peer_md[node_id].bitmap_dagtag = peer_md[from_node_id].bitmap_dagtag;
+				_drbd_uuid_push_history(device, previous_bitmap_uuid);
 				if (peer_md[node_id].flags & MDF_HAVE_BITMAP &&
 				    peer_md[from_node_id].flags & MDF_HAVE_BITMAP)
 					copy_bitmap(device, from_node_id, node_id);

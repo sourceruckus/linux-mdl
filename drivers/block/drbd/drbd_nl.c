@@ -1480,9 +1480,7 @@ char *ppsize(char *buf, unsigned long long size)
 void drbd_suspend_io(struct drbd_device *device, enum suspend_scope ss)
 {
 	atomic_inc(&device->suspend_cnt);
-	if (drbd_suspended(device))
-		return;
-	wait_event(device->misc_wait,
+	wait_event(device->misc_wait, drbd_suspended(device) ||
 		   (atomic_read(&device->ap_bio_cnt[WRITE]) +
 		    ss == READ_AND_WRITE ? atomic_read(&device->ap_bio_cnt[READ]) : 0) == 0);
 }
@@ -3649,69 +3647,89 @@ struct crypto {
 	struct crypto_shash *integrity_tfm;
 };
 
+static bool needs_key(struct crypto_shash *h)
+{
+	return h && (crypto_shash_get_flags(h) & CRYPTO_TFM_NEED_KEY);
+}
+
+/**
+ * alloc_shash() - Allocate a keyed or unkeyed shash algorithm
+ * @tfm: Destination crypto_shash
+ * @tfm_name: Which algorithm to use
+ * @err_alg: The error code to return on allocation failure
+ * @type: The functionality that the hash is used for
+ * @must_unkeyed: If set, a check is included which ensures that the algorithm
+ * 	     does not require a key
+ * @reply_skb: for sending detailed error description to user-space
+ */
 static int
-alloc_shash(struct crypto_shash **tfm, char *tfm_name, int err_alg)
+alloc_shash(struct crypto_shash **tfm, char *tfm_name, const char *type, bool must_unkeyed,
+	    struct sk_buff *reply_skb)
 {
 	if (!tfm_name[0])
-		return NO_ERROR;
+		return 0;
 
 	*tfm = crypto_alloc_shash(tfm_name, 0, 0);
 	if (IS_ERR(*tfm)) {
+		drbd_msg_sprintf_info(reply_skb, "failed to allocate %s for %s\n", tfm_name, type);
 		*tfm = NULL;
-		return err_alg;
+		return -EINVAL;
 	}
 
-	return NO_ERROR;
+	if (must_unkeyed && needs_key(*tfm)) {
+		drbd_msg_sprintf_info(reply_skb,
+				      "may not use %s for %s. It requires an unkeyed algorithm\n",
+				      tfm_name, type);
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 static enum drbd_ret_code
-alloc_crypto(struct crypto *crypto, struct net_conf *new_net_conf)
+alloc_crypto(struct crypto *crypto, struct net_conf *new_net_conf, struct sk_buff *reply_skb)
 {
 	char hmac_name[CRYPTO_MAX_ALG_NAME];
 	int digest_size = 0;
-	enum drbd_ret_code rv;
+	int err;
 
-	rv = alloc_shash(&crypto->csums_tfm, new_net_conf->csums_alg,
-			 ERR_CSUMS_ALG);
-	if (rv != NO_ERROR)
-		return rv;
-	rv = alloc_shash(&crypto->verify_tfm, new_net_conf->verify_alg,
-			 ERR_VERIFY_ALG);
-	if (rv != NO_ERROR)
-		return rv;
-	rv = alloc_shash(&crypto->integrity_tfm, new_net_conf->integrity_alg,
-			 ERR_INTEGRITY_ALG);
-	if (rv != NO_ERROR)
-		return rv;
+	err = alloc_shash(&crypto->csums_tfm, new_net_conf->csums_alg,
+			  "csums", true, reply_skb);
+	if (err)
+		return ERR_CSUMS_ALG;
+
+	err = alloc_shash(&crypto->verify_tfm, new_net_conf->verify_alg,
+			  "verify", true, reply_skb);
+	if (err)
+		return ERR_VERIFY_ALG;
+
+	err = alloc_shash(&crypto->integrity_tfm, new_net_conf->integrity_alg,
+			  "integrity", true, reply_skb);
+	if (err)
+		return ERR_INTEGRITY_ALG;
+
 	if (crypto->integrity_tfm) {
 		const int max_digest_size = sizeof(((struct drbd_connection*)0)->scratch_buffer.d.before);
 		digest_size = crypto_shash_digestsize(crypto->integrity_tfm);
 		if (digest_size > max_digest_size) {
-			pr_notice("we currently support only digest sizes <= %d bits, but digest size of %s is %d bits\n",
+			drbd_msg_sprintf_info(reply_skb,
+				"we currently support only digest sizes <= %d bits, but digest size of %s is %d bits\n",
 				max_digest_size * 8, new_net_conf->integrity_alg, digest_size * 8);
 			return ERR_INTEGRITY_ALG;
 		}
 	}
-	if (crypto->verify_tfm) {
-		/* HACK: try to set a dummy key. if it succeeds, that's bad: we only want algorithms that don't support keys */
-		u8 dummy_key[] = {
-			'a'
-		};
-		int setkey_res = crypto_shash_setkey(crypto->verify_tfm,
-						     dummy_key, 1);
-		if (setkey_res != -ENOSYS) {
-			pr_err("may not use a keyed alorithm for verify (tried to use %s, but it requires a key)\n", new_net_conf->verify_alg);
-			return ERR_INTEGRITY_ALG;
-		}}
+
 	if (new_net_conf->cram_hmac_alg[0] != 0) {
 		snprintf(hmac_name, CRYPTO_MAX_ALG_NAME, "hmac(%s)",
 			 new_net_conf->cram_hmac_alg);
 
-		rv = alloc_shash(&crypto->cram_hmac_tfm, hmac_name,
-				 ERR_AUTH_ALG);
+		err = alloc_shash(&crypto->cram_hmac_tfm, hmac_name,
+				  "hmac", false, reply_skb);
+		if (err)
+			return ERR_AUTH_ALG;
 	}
 
-	return rv;
+	return NO_ERROR;
 }
 
 static void free_crypto(struct crypto *crypto)
@@ -3789,7 +3807,7 @@ int drbd_adm_net_opts(struct sk_buff *skb, struct genl_info *info)
 		goto fail;
 	}
 
-	retcode = alloc_crypto(&crypto, new_net_conf);
+	retcode = alloc_crypto(&crypto, new_net_conf, adm_ctx.reply_skb);
 	if (retcode != NO_ERROR)
 		goto fail;
 
@@ -4130,7 +4148,7 @@ static int adm_new_connection(struct drbd_connection **ret_conn,
 	if (retcode != NO_ERROR)
 		goto fail_free_connection;
 
-	retcode = alloc_crypto(&crypto, new_net_conf);
+	retcode = alloc_crypto(&crypto, new_net_conf, adm_ctx->reply_skb);
 	if (retcode != NO_ERROR)
 		goto fail_free_connection;
 
@@ -5039,6 +5057,10 @@ int drbd_adm_invalidate(struct sk_buff *skb, struct genl_info *info)
 	struct drbd_resource *resource;
 	struct drbd_device *device;
 	int retcode = 0; /* enum drbd_ret_code rsp. enum drbd_state_rv */
+	struct invalidate_parms inv = {
+		.sync_from_peer_node_id = -1,
+		.reset_bitmap = DRBD_INVALIDATE_RESET_BITMAP_DEF,
+	};
 
 	retcode = drbd_adm_prepare(&adm_ctx, skb, info, DRBD_ADM_NEED_MINOR);
 	if (!adm_ctx.reply_skb)
@@ -5056,10 +5078,8 @@ int drbd_adm_invalidate(struct sk_buff *skb, struct genl_info *info)
 	mutex_lock(&resource->adm_mutex);
 
 	if (info->attrs[DRBD_NLA_INVALIDATE_PARMS]) {
-		struct invalidate_parms inv = {};
 		int err;
 
-		inv.sync_from_peer_node_id = -1;
 		err = invalidate_parms_from_attrs(&inv, info);
 		if (err) {
 			retcode = ERR_MANDATORY_TAG;
@@ -5072,6 +5092,14 @@ int drbd_adm_invalidate(struct sk_buff *skb, struct genl_info *info)
 				drbd_connection_by_node_id(resource, inv.sync_from_peer_node_id);
 			sync_from_peer_device = conn_peer_device(connection, device->vnr);
 		}
+
+		if (!inv.reset_bitmap && sync_from_peer_device &&
+		    sync_from_peer_device->connection->agreed_pro_version < 120) {
+			retcode = ERR_APV_TOO_LOW;
+			drbd_msg_put_info(adm_ctx.reply_skb,
+					  "Need protocol level 120 to initiate bitmap based resync");
+			goto out_no_resume;
+		}
 	}
 
 	/* If there is still bitmap IO pending, probably because of a previous
@@ -5081,7 +5109,12 @@ int drbd_adm_invalidate(struct sk_buff *skb, struct genl_info *info)
 	wait_event(device->misc_wait, !atomic_read(&device->pending_bitmap_work.n));
 
 	if (sync_from_peer_device) {
-		retcode = invalidate_resync(sync_from_peer_device);
+		if (inv.reset_bitmap) {
+			retcode = invalidate_resync(sync_from_peer_device);
+		} else {
+			retcode = change_repl_state(sync_from_peer_device, L_WF_BITMAP_T,
+					CS_VERBOSE | CS_CLUSTER_WIDE | CS_WAIT_COMPLETE | CS_SERIALIZE);
+		}
 	} else {
 		int retry = 3;
 		do {
@@ -5091,7 +5124,20 @@ int drbd_adm_invalidate(struct sk_buff *skb, struct genl_info *info)
 				struct drbd_peer_device *peer_device;
 
 				peer_device = conn_peer_device(connection, device->vnr);
-				retcode = invalidate_resync(peer_device);
+				if (!peer_device)
+					continue;
+
+				if (inv.reset_bitmap) {
+					retcode = invalidate_resync(peer_device);
+				} else {
+					if (connection->agreed_pro_version < 120) {
+						retcode = ERR_APV_TOO_LOW;
+						continue;
+					}
+					retcode = change_repl_state(peer_device, L_WF_BITMAP_T,
+								CS_VERBOSE | CS_CLUSTER_WIDE |
+								CS_WAIT_COMPLETE | CS_SERIALIZE);
+				}
 				if (retcode >= SS_SUCCESS)
 					goto out;
 			}
@@ -5121,6 +5167,35 @@ static int drbd_bmio_set_susp_al(struct drbd_device *device, struct drbd_peer_de
 	return rv;
 }
 
+static int full_sync_from_peer(struct drbd_peer_device *peer_device)
+{
+	struct drbd_device *device = peer_device->device;
+	struct drbd_resource *resource = device->resource;
+	int retcode; /* enum drbd_ret_code rsp. enum drbd_state_rv */
+
+	retcode = stable_change_repl_state(peer_device, L_STARTING_SYNC_S, CS_SERIALIZE);
+	if (retcode < SS_SUCCESS) {
+		if (retcode == SS_NEED_CONNECTION && resource->role[NOW] == R_PRIMARY) {
+			/* The peer will get a resync upon connect anyways.
+			 * Just make that into a full resync. */
+			retcode = change_peer_disk_state(peer_device, D_INCONSISTENT,
+							 CS_VERBOSE | CS_WAIT_COMPLETE | CS_SERIALIZE);
+			if (retcode >= SS_SUCCESS) {
+				if (drbd_bitmap_io(device, &drbd_bmio_set_susp_al,
+						   "set_n_write from invalidate_peer",
+						   BM_LOCK_CLEAR | BM_LOCK_BULK, peer_device))
+					retcode = ERR_IO_MD_DISK;
+			}
+		} else {
+			retcode = stable_change_repl_state(peer_device, L_STARTING_SYNC_S,
+							   CS_VERBOSE | CS_SERIALIZE);
+		}
+	}
+
+	return retcode;
+}
+
+
 int drbd_adm_invalidate_peer(struct sk_buff *skb, struct genl_info *info)
 {
 	struct drbd_config_context adm_ctx;
@@ -5128,6 +5203,9 @@ int drbd_adm_invalidate_peer(struct sk_buff *skb, struct genl_info *info)
 	struct drbd_resource *resource;
 	struct drbd_device *device;
 	int retcode; /* enum drbd_ret_code rsp. enum drbd_state_rv */
+	struct invalidate_peer_parms inv = {
+		.p_reset_bitmap = DRBD_INVALIDATE_RESET_BITMAP_DEF,
+	};
 
 	retcode = drbd_adm_prepare(&adm_ctx, skb, info, DRBD_ADM_NEED_PEER_DEVICE);
 	if (!adm_ctx.reply_skb)
@@ -5144,29 +5222,36 @@ int drbd_adm_invalidate_peer(struct sk_buff *skb, struct genl_info *info)
 
 	mutex_lock(&resource->adm_mutex);
 
+	if (info->attrs[DRBD_NLA_INVAL_PEER_PARAMS]) {
+		int err;
+
+		err = invalidate_peer_parms_from_attrs(&inv, info);
+		if (err) {
+			retcode = ERR_MANDATORY_TAG;
+			drbd_msg_put_info(adm_ctx.reply_skb, from_attrs_err_to_txt(err));
+			goto out_unlock;
+		}
+		if (!inv.p_reset_bitmap && peer_device->connection->agreed_pro_version < 120) {
+			retcode = ERR_APV_TOO_LOW;
+			drbd_msg_put_info(adm_ctx.reply_skb,
+					  "Need protocol level 120 to initiate bitmap based resync");
+			goto out_unlock;
+		}
+	}
+
 	drbd_suspend_io(device, READ_AND_WRITE);
 	wait_event(device->misc_wait, !atomic_read(&device->pending_bitmap_work.n));
 	drbd_flush_workqueue(&peer_device->connection->sender_work);
-	retcode = stable_change_repl_state(peer_device, L_STARTING_SYNC_S, CS_SERIALIZE);
 
-	if (retcode < SS_SUCCESS) {
-		if (retcode == SS_NEED_CONNECTION && resource->role[NOW] == R_PRIMARY) {
-			/* The peer will get a resync upon connect anyways.
-			 * Just make that into a full resync. */
-			retcode = change_peer_disk_state(peer_device, D_INCONSISTENT,
-							 CS_VERBOSE | CS_WAIT_COMPLETE | CS_SERIALIZE);
-			if (retcode >= SS_SUCCESS) {
-				if (drbd_bitmap_io(adm_ctx.device, &drbd_bmio_set_susp_al,
-						   "set_n_write from invalidate_peer",
-						   BM_LOCK_CLEAR | BM_LOCK_BULK, peer_device))
-					retcode = ERR_IO_MD_DISK;
-			}
-		} else
-			retcode = stable_change_repl_state(peer_device, L_STARTING_SYNC_S,
-							   CS_VERBOSE | CS_SERIALIZE);
+	if (inv.p_reset_bitmap) {
+		retcode = full_sync_from_peer(peer_device);
+	} else {
+		retcode = change_repl_state(peer_device, L_WF_BITMAP_S,
+				CS_VERBOSE | CS_CLUSTER_WIDE | CS_WAIT_COMPLETE | CS_SERIALIZE);
 	}
 	drbd_resume_io(device);
 
+out_unlock:
 	mutex_unlock(&resource->adm_mutex);
 	put_ldev(device);
 out:
@@ -5276,8 +5361,7 @@ int drbd_adm_resume_io(struct sk_buff *skb, struct genl_info *info)
 	for_each_connection(connection, resource)
 		__change_io_susp_fencing(connection, false);
 
-	if (resource->res_opts.on_no_quorum == ONQ_SUSPEND_IO)
-		__change_have_quorum(device, true);
+	__change_io_susp_quorum(resource, false);
 	retcode = end_state_change(resource, &irq_flags);
 	if (retcode == SS_SUCCESS) {
 		struct drbd_peer_device *peer_device;
@@ -6152,7 +6236,7 @@ static void resource_to_info(struct resource_info *info,
 	info->res_susp = resource->susp_user[NOW];
 	info->res_susp_nod = resource->susp_nod[NOW];
 	info->res_susp_fen = is_suspended_fen(resource, NOW);
-	info->res_susp_quorum = is_suspended_quorum(resource, NOW);
+	info->res_susp_quorum = resource->susp_quorum[NOW];
 }
 
 int drbd_adm_new_resource(struct sk_buff *skb, struct genl_info *info)
@@ -6432,7 +6516,9 @@ int drbd_adm_down(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	for_each_connection_ref(connection, im, resource) {
-		retcode = conn_try_disconnect(connection, 0, adm_ctx.reply_skb);
+		retcode = SS_SUCCESS;
+		if (connection->cstate[NOW] > C_STANDALONE)
+			retcode = conn_try_disconnect(connection, 0, adm_ctx.reply_skb);
 		if (retcode >= SS_SUCCESS) {
 			mutex_lock(&resource->conf_update);
 			del_connection(connection);

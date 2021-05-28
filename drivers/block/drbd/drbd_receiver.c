@@ -395,9 +395,7 @@ static void rs_sectors_came_in(struct drbd_peer_device *peer_device, int size)
 
 	/* In case resync runs faster than anticipated, run the resync_work early */
 	if (rs_sect_in >= peer_device->rs_in_flight)
-		drbd_queue_work_if_unqueued(
-			&peer_device->connection->sender_work,
-			&peer_device->resync_work);
+		drbd_device_post_work(peer_device->device, MAKE_RESYNC_REQUEST);
 }
 
 static void reclaim_finished_net_peer_reqs(struct drbd_connection *connection,
@@ -3237,7 +3235,7 @@ bool drbd_rs_should_slow_down(struct drbd_peer_device *peer_device, sector_t sec
 bool drbd_rs_c_min_rate_throttle(struct drbd_peer_device *peer_device)
 {
 	struct drbd_device *device = peer_device->device;
-	struct hd_struct *part = &device->ldev->backing_bdev->bd_contains->bd_disk->part0;
+	struct gendisk *disk = device->ldev->backing_bdev->bd_disk;
 	unsigned long db, dt, dbdt;
 	unsigned int c_min_rate;
 	int curr_events;
@@ -3250,8 +3248,7 @@ bool drbd_rs_c_min_rate_throttle(struct drbd_peer_device *peer_device)
 	if (c_min_rate == 0)
 		return false;
 
-	curr_events = (int)part_stat_read(part, sectors[0])
-		+ (int)part_stat_read(part, sectors[1])
+	curr_events = (int)part_stat_read_accum(&disk->part0, sectors)
 		- atomic_read(&device->rs_sect_ev);
 
 	if (atomic_read(&device->ap_actlog_cnt) || curr_events - peer_device->rs_last_events > 64) {
@@ -3905,6 +3902,13 @@ static enum sync_strategy drbd_uuid_compare(struct drbd_peer_device *peer_device
 			return SYNC_TARGET_USE_BITMAP;
 		}
 
+		if (connection->agreed_pro_version >= 120) {
+			*rule = RULE_RECONNECTED;
+			if (peer_device->uuid_flags & UUID_FLAG_RECONNECT &&
+			    local_uuid_flags & UUID_FLAG_RECONNECT)
+				return NO_SYNC;
+		}
+
 		*rule = RULE_LOST_QUORUM;
 		if (peer_device->uuid_flags & UUID_FLAG_PRIMARY_LOST_QUORUM &&
 		    !test_bit(PRIMARY_LOST_QUORUM, &device->flags))
@@ -3920,11 +3924,12 @@ static enum sync_strategy drbd_uuid_compare(struct drbd_peer_device *peer_device
 				SYNC_SOURCE_IF_BOTH_FAILED :
 				SYNC_TARGET_IF_BOTH_FAILED;
 
-		*rule = RULE_RECONNECTED;
-		/* This is a safety net for the following two clauses */
-		if (peer_device->uuid_flags & UUID_FLAG_RECONNECT &&
-		    local_uuid_flags & UUID_FLAG_RECONNECT)
-			return NO_SYNC;
+		if (connection->agreed_pro_version < 120) {
+			*rule = RULE_RECONNECTED;
+			if (peer_device->uuid_flags & UUID_FLAG_RECONNECT &&
+			    local_uuid_flags & UUID_FLAG_RECONNECT)
+				return NO_SYNC;
+		}
 
 		/* Peer crashed as primary, I survived, resync from me */
 		if (peer_device->uuid_flags & UUID_FLAG_CRASHED_PRIMARY &&
@@ -5546,6 +5551,8 @@ static union drbd_state convert_state(union drbd_state peer_state)
 
 		[L_STARTING_SYNC_S] = L_STARTING_SYNC_T,
 		[L_STARTING_SYNC_T] = L_STARTING_SYNC_S,
+		[L_WF_BITMAP_S] = L_WF_BITMAP_T,
+		[L_WF_BITMAP_T] = L_WF_BITMAP_S,
 		[C_DISCONNECTING] = C_TEAR_DOWN, /* C_NETWORK_FAILURE, */
 		[C_CONNECTING] = C_CONNECTING,
 		[L_VERIFY_S]       = L_VERIFY_T,
@@ -7899,6 +7906,13 @@ static void peer_device_disconnected(struct drbd_peer_device *peer_device)
 	/* need to do it again, drbd_finish_peer_reqs() may have populated it
 	 * again via drbd_try_clear_on_disk_bm(). */
 	drbd_rs_cancel_all(peer_device);
+
+	if (get_ldev(device)) {
+		/* Avoid holding a different resync because this one looks like it is
+		 * still active. */
+		drbd_rs_controller_reset(peer_device);
+		put_ldev(device);
+	}
 
 	peer_device->uuids_received = false;
 
