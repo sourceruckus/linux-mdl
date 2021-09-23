@@ -13,6 +13,9 @@
 #include "drbd_transport.h"
 #include "drbd_dax_pmem.h"
 
+#ifdef COMPAT_CAN_INCLUDE_VERMAGIC_H
+#include <linux/vermagic.h>
+#endif
 
 /**********************************************************************
  * Whenever you change the file format, remember to bump the version. *
@@ -1697,6 +1700,11 @@ static int drbd_version_show(struct seq_file *m, void *ignored)
 	seq_printf(m, "API_VERSION=%u\n", GENL_MAGIC_VERSION);
 	seq_printf(m, "PRO_VERSION_MIN=%u\n", PRO_VERSION_MIN);
 	seq_printf(m, "PRO_VERSION_MAX=%u\n", PRO_VERSION_MAX);
+#ifdef UTS_RELEASE
+	/* the UTS_RELEASE string of the prepared kernel source tree this
+	 * module was built against */
+	seq_printf(m, "UTS_RELEASE=%s\n", UTS_RELEASE);
+#endif
 	return 0;
 }
 

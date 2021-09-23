@@ -7,5 +7,5 @@
 
 const char *drbd_buildtag(void)
 {
-	return "GIT-hash: a60cffa380085d75c5f62b6bcb500c5b43ca801e";
+	return "GIT-hash: bc157732ca77eae4033c99f1985cfdb38e52a355";
 }

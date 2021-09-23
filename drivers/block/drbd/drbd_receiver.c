@@ -273,7 +273,7 @@ static struct drbd_epoch *previous_epoch(struct drbd_connection *connection, str
  */
 static struct page *page_chain_del(struct page **head, int count)
 {
-	struct page *page, *tmp = NULL, *rv_head, *rv_tail;
+	struct page *page, *tmp, *rv_head, *rv_tail;
 	int n;
 
 	BUG_ON(!count);
@@ -298,6 +298,8 @@ static struct page *page_chain_del(struct page **head, int count)
 		rv_tail = page;
 		/* adjustment of head */
 		page = cmpxchg(head, rv_head, tmp);
+		if (page == NULL)
+			return NULL;  /* someone else took all of them */
 	} while (page != rv_head);
 
 	/* add end of list marker for the returned list */
@@ -321,8 +323,10 @@ static struct page *page_chain_tail(struct page *page, int *len)
 {
 	struct page *tmp;
 	int i = 1;
-	while ((tmp = page_chain_next(page)))
-		++i, page = tmp;
+	while ((tmp = page_chain_next(page))) {
+		++i;
+		page = tmp;
+	}
 	if (len)
 		*len = i;
 	return page;
@@ -395,7 +399,9 @@ static void rs_sectors_came_in(struct drbd_peer_device *peer_device, int size)
 
 	/* In case resync runs faster than anticipated, run the resync_work early */
 	if (rs_sect_in >= peer_device->rs_in_flight)
-		drbd_device_post_work(peer_device->device, MAKE_RESYNC_REQUEST);
+		drbd_queue_work_if_unqueued(
+			&peer_device->connection->sender_work,
+			&peer_device->resync_work);
 }
 
 static void reclaim_finished_net_peer_reqs(struct drbd_connection *connection,
@@ -430,7 +436,7 @@ static void drbd_reclaim_net_peer_reqs(struct drbd_connection *connection)
 
 /**
  * drbd_alloc_pages() - Returns @number pages, retries forever (or until signalled)
- * @device:	DRBD device.
+ * @transport:	DRBD transport.
  * @number:	number of pages requested
  * @gfp_mask:	how to allocate and whether to loop until we succeed
  *
@@ -1501,9 +1507,8 @@ max_allowed_wo(struct drbd_backing_dev *bdev, enum write_ordering_e wo)
 	return wo;
 }
 
-/**
+/*
  * drbd_bump_write_ordering() - Fall back to an other write ordering method
- * @resource:	DRBD resource.
  * @wo:		Write ordering method to try.
  */
 void drbd_bump_write_ordering(struct drbd_resource *resource, struct drbd_backing_dev *bdev,
@@ -3566,7 +3571,7 @@ fail:
 	return err;
 }
 
-/**
+/*
  * drbd_asb_recover_0p  -  Recover after split-brain with no remaining primaries
  */
 static enum sync_strategy drbd_asb_recover_0p(struct drbd_peer_device *peer_device) __must_hold(local)
@@ -3650,7 +3655,7 @@ static enum sync_strategy drbd_asb_recover_0p(struct drbd_peer_device *peer_devi
 	return rv;
 }
 
-/**
+/*
  * drbd_asb_recover_1p  -  Recover after split-brain with one remaining primary
  */
 static enum sync_strategy drbd_asb_recover_1p(struct drbd_peer_device *peer_device) __must_hold(local)
@@ -3710,7 +3715,7 @@ static enum sync_strategy drbd_asb_recover_1p(struct drbd_peer_device *peer_devi
 	return rv;
 }
 
-/**
+/*
  * drbd_asb_recover_2p  -  Recover after split-brain with two remaining primaries
  */
 static enum sync_strategy drbd_asb_recover_2p(struct drbd_peer_device *peer_device) __must_hold(local)
@@ -4343,7 +4348,6 @@ static enum drbd_repl_state drbd_sync_handshake(struct drbd_peer_device *peer_de
 {
 	struct drbd_device *device = peer_device->device;
 	struct drbd_connection *connection = peer_device->connection;
-	enum drbd_disk_state disk_state;
 	struct net_conf *nc;
 	enum sync_strategy strategy;
 	enum sync_rule rule;
@@ -4353,10 +4357,6 @@ static enum drbd_repl_state drbd_sync_handshake(struct drbd_peer_device *peer_de
 	int required_protocol;
 
 	strategy = drbd_handshake(peer_device, &rule, &peer_node_id, true);
-
-	disk_state = device->disk_state[NOW];
-	if (disk_state == D_NEGOTIATING)
-		disk_state = disk_state_from_md(device);
 
 	if (strategy == RETRY_CONNECT)
 		return -1; /* retry connect */
@@ -7104,7 +7104,7 @@ static int receive_sync_uuid(struct drbd_connection *connection, struct packet_i
 	return 0;
 }
 
-/**
+/*
  * receive_bitmap_plain
  *
  * Return 0 when done, 1 when another iteration is needed, and a negative error
@@ -7157,7 +7157,7 @@ static int dcbp_get_pad_bits(struct p_compressed_bm *p)
 	return (p->encoding >> 4) & 0x7;
 }
 
-/**
+/*
  * recv_bm_rle_bits
  *
  * Return 0 when done, 1 when another iteration is needed, and a negative error
@@ -7226,7 +7226,7 @@ recv_bm_rle_bits(struct drbd_peer_device *peer_device,
 	return (s != c->bm_bits);
 }
 
-/**
+/*
  * decode_bitmap_c
  *
  * Return 0 when done, 1 when another iteration is needed, and a negative error
@@ -7442,14 +7442,12 @@ static int receive_UnplugRemote(struct drbd_connection *connection, struct packe
 static int receive_out_of_sync(struct drbd_connection *connection, struct packet_info *pi)
 {
 	struct drbd_peer_device *peer_device;
-	struct drbd_device *device;
 	struct p_block_desc *p = pi->data;
 	sector_t sector;
 
 	peer_device = conn_peer_device(connection, pi->vnr);
 	if (!peer_device)
 		return -EIO;
-	device = peer_device->device;
 
 	sector = be64_to_cpu(p->sector);
 
@@ -7906,13 +7904,6 @@ static void peer_device_disconnected(struct drbd_peer_device *peer_device)
 	/* need to do it again, drbd_finish_peer_reqs() may have populated it
 	 * again via drbd_try_clear_on_disk_bm(). */
 	drbd_rs_cancel_all(peer_device);
-
-	if (get_ldev(device)) {
-		/* Avoid holding a different resync because this one looks like it is
-		 * still active. */
-		drbd_rs_controller_reset(peer_device);
-		put_ldev(device);
-	}
 
 	peer_device->uuids_received = false;
 

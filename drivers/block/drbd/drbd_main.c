@@ -134,6 +134,8 @@ module_param_named(protocol_version_min, drbd_protocol_version_min, drbd_protoco
  */
 struct idr drbd_devices;
 struct list_head drbd_resources;
+DEFINE_SPINLOCK(drbd_devices_lock);
+DEFINE_MUTEX(resources_mutex);
 
 struct kmem_cache *drbd_request_cache;
 struct kmem_cache *drbd_ee_cache;	/* peer requests */
@@ -151,14 +153,6 @@ static const struct block_device_operations drbd_ops = {
 	.open		= drbd_open,
 	.release	= drbd_release,
 };
-
-struct bio *bio_alloc_drbd(gfp_t gfp_mask)
-{
-	if (!bioset_initialized(&drbd_md_io_bio_set))
-		return bio_alloc(gfp_mask, 1);
-
-	return bio_alloc_bioset(gfp_mask, 1, &drbd_md_io_bio_set);
-}
 
 #ifdef __CHECKER__
 /* When checking with sparse, and this is an inline function, sparse will
@@ -719,7 +713,7 @@ void _drbd_thread_stop(struct drbd_thread *thi, int restart, int wait)
 }
 
 #ifdef CONFIG_SMP
-/**
+/*
  * drbd_calc_cpu_mask() - Generate CPU masks, spread over all CPUs
  *
  * Forces all threads of a resource onto the same CPU. This is beneficial for
@@ -757,7 +751,6 @@ static void drbd_calc_cpu_mask(cpumask_var_t *cpu_mask)
 
 /**
  * drbd_thread_current_set_cpu() - modifies the cpu mask of the _current_ thread
- * @device:	DRBD device.
  * @thi:	drbd_thread object
  *
  * call in the "main loop" of _all_ threads, no need for any mutex, current won't die
@@ -817,7 +810,7 @@ bool drbd_device_stable(struct drbd_device *device, u64 *authoritative_ptr)
 	return device_stable;
 }
 
-/**
+/*
  * drbd_header_size  -  size of a packet header
  *
  * The header size is a multiple of 8, so any payload following the header is
@@ -1740,7 +1733,7 @@ static int fill_bitmap_rle_bits(struct drbd_peer_device *peer_device,
 	return len;
 }
 
-/**
+/*
  * send_bitmap_rle_or_plain
  *
  * Return 0 when done, 1 when another iteration is needed, and a negative error
@@ -3439,6 +3432,9 @@ struct drbd_peer_device *create_peer_device(struct drbd_device *device, struct d
 	}
 
 	timer_setup(&peer_device->start_resync_timer, start_resync_timer_fn, 0);
+
+	INIT_LIST_HEAD(&peer_device->resync_work.list);
+	peer_device->resync_work.cb  = w_resync_timer;
 	timer_setup(&peer_device->resync_timer, resync_timer_fn, 0);
 
 	INIT_LIST_HEAD(&peer_device->propagate_uuids_work.list);
@@ -3603,7 +3599,9 @@ enum drbd_ret_code drbd_create_device(struct drbd_config_context *adm_ctx, unsig
 
 	locked = true;
 	write_lock_irq(&resource->state_rwlock);
+	spin_lock(&drbd_devices_lock);
 	id = idr_alloc(&drbd_devices, device, minor, minor + 1, GFP_NOWAIT);
+	spin_unlock(&drbd_devices_lock);
 	if (id < 0) {
 		if (id == -ENOSPC)
 			err = ERR_MINOR_OR_VOLUME_EXISTS;
@@ -3677,7 +3675,9 @@ out_remove_peer_device:
 	kref_debug_put(&device->kref_debug, 1);
 
 out_idr_remove_minor:
+	spin_lock(&drbd_devices_lock);
 	idr_remove(&drbd_devices, minor);
+	spin_unlock(&drbd_devices_lock);
 	kref_debug_put(&device->kref_debug, 1);
 out_no_minor_idr:
 	if (locked)
@@ -3725,7 +3725,9 @@ void drbd_unregister_device(struct drbd_device *device)
 		idr_remove(&connection->peer_devices, device->vnr);
 	}
 	idr_remove(&resource->devices, device->vnr);
-	idr_remove(&drbd_devices, device_to_minor(device));
+	spin_lock(&drbd_devices_lock);
+	idr_remove(&drbd_devices, device->minor);
+	spin_unlock(&drbd_devices_lock);
 	write_unlock_irq(&resource->state_rwlock);
 
 	for_each_peer_device(peer_device, device)
@@ -3849,7 +3851,6 @@ static int __init drbd_init(void)
 	drbd_proc = NULL; /* play safe for drbd_cleanup */
 	idr_init(&drbd_devices);
 
-	mutex_init(&resources_mutex);
 	INIT_LIST_HEAD(&drbd_resources);
 
 	err = drbd_genl_register();
@@ -5345,7 +5346,7 @@ _drbd_insert_fault(struct drbd_device *device, unsigned int type)
 
 	unsigned int ret = (
 		(drbd_fault_devs == 0 ||
-			((1 << device_to_minor(device)) & drbd_fault_devs) != 0) &&
+			((1 << device->minor) & drbd_fault_devs) != 0) &&
 		(((_drbd_fault_random(&rrs) % 100) + 1) <= drbd_fault_rate));
 
 	if (ret) {

@@ -138,7 +138,7 @@ drbd_insert_fault(struct drbd_device *device, unsigned int type) {
 	(typecheck(struct drbd_device*, x) && \
 	  ((x) ? (((x)->magic ^ DRBD_MAGIC) == (long)(x)) : 0))
 
-extern struct idr drbd_devices; /* RCU, updates: genl_lock() */
+extern struct idr drbd_devices; /* RCU, updates: drbd_devices_lock */
 extern struct list_head drbd_resources; /* RCU, updates: resources_mutex */
 extern struct mutex resources_mutex;
 
@@ -573,7 +573,6 @@ enum device_flag {
         DESTROY_DISK,           /* tell worker to close backing devices and destroy related structures. */
 	MD_SYNC,		/* tell worker to call drbd_md_sync() */
 	MAKE_NEW_CUR_UUID,	/* tell worker to ping peers and eventually write new current uuid */
-	MAKE_RESYNC_REQUEST,	/* tell worker to send resync requests */
 
 	STABLE_RESYNC,		/* One peer_device finished the resync stable! */
 	READ_BALANCE_RR,
@@ -1195,6 +1194,7 @@ struct drbd_peer_device {
 	bool resync_susp_peer[2];
 	bool resync_susp_dependency[2];
 	bool resync_susp_other_c[2];
+	bool resync_active[2];
 	enum drbd_repl_state negotiation_result; /* To find disk state after attach */
 	unsigned int send_cnt;
 	unsigned int recv_cnt;
@@ -1214,6 +1214,7 @@ struct drbd_peer_device {
 	enum drbd_repl_state start_resync_side;
 	enum drbd_repl_state last_repl_state; /* What we received from the peer */
 	struct timer_list start_resync_timer;
+	struct drbd_work resync_work;
 	struct timer_list resync_timer;
 	struct drbd_work propagate_uuids_work;
 
@@ -1539,11 +1540,6 @@ conn_peer_device(struct drbd_connection *connection, int volume_number)
 	     peer_device;						\
 	     peer_device = __drbd_next_peer_device_ref(&m, peer_device, device))
 
-static inline unsigned int device_to_minor(struct drbd_device *device)
-{
-	return device->minor;
-}
-
 /*
  * function declarations
  *************************/
@@ -1868,8 +1864,6 @@ extern mempool_t drbd_md_io_page_pool;
 /* We also need to make sure we get a bio
  * when we need it for housekeeping purposes */
 extern struct bio_set drbd_md_io_bio_set;
-/* to allocate from that set */
-extern struct bio *bio_alloc_drbd(gfp_t gfp_mask);
 
 /* And a bio_set for cloning */
 extern struct bio_set drbd_io_bio_set;
@@ -1998,6 +1992,7 @@ extern int w_e_end_rsdata_req(struct drbd_work *, int);
 extern int w_e_end_csum_rs_req(struct drbd_work *, int);
 extern int w_e_end_ov_reply(struct drbd_work *, int);
 extern int w_e_end_ov_req(struct drbd_work *, int);
+extern int w_resync_timer(struct drbd_work *, int);
 extern int w_send_dblock(struct drbd_work *, int);
 extern int w_send_read_req(struct drbd_work *, int);
 extern int w_e_reissue(struct drbd_work *, int);
@@ -2555,27 +2550,38 @@ static inline int __sub_unacked(struct drbd_peer_device *peer_device, int n)
 	return atomic_sub_return(n, &peer_device->unacked_cnt);
 }
 
+static inline bool repl_is_sync_target(enum drbd_repl_state repl_state)
+{
+	return repl_state == L_SYNC_TARGET || repl_state == L_PAUSED_SYNC_T;
+}
+
+static inline bool repl_is_sync_source(enum drbd_repl_state repl_state)
+{
+	return repl_state == L_SYNC_SOURCE || repl_state == L_PAUSED_SYNC_S;
+}
+
+static inline bool repl_is_sync(enum drbd_repl_state repl_state)
+{
+	return repl_is_sync_source(repl_state) ||
+		repl_is_sync_target(repl_state);
+}
+
 static inline bool is_sync_target_state(struct drbd_peer_device *peer_device,
 					enum which_state which)
 {
-	enum drbd_repl_state repl_state = peer_device->repl_state[which];
-
-	return repl_state == L_SYNC_TARGET || repl_state == L_PAUSED_SYNC_T;
+	return repl_is_sync_target(peer_device->repl_state[which]);
 }
 
 static inline bool is_sync_source_state(struct drbd_peer_device *peer_device,
 					enum which_state which)
 {
-	enum drbd_repl_state repl_state = peer_device->repl_state[which];
-
-	return repl_state == L_SYNC_SOURCE || repl_state == L_PAUSED_SYNC_S;
+	return repl_is_sync_source(peer_device->repl_state[which]);
 }
 
 static inline bool is_sync_state(struct drbd_peer_device *peer_device,
 				 enum which_state which)
 {
-	return is_sync_source_state(peer_device, which) ||
-		is_sync_target_state(peer_device, which);
+	return repl_is_sync(peer_device->repl_state[which]);
 }
 
 static inline bool is_verify_state(struct drbd_peer_device *peer_device,
