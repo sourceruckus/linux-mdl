@@ -92,11 +92,14 @@ subdir = include/os/linux/kernel
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
 am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/always-compiler-options.m4 \
+	$(top_srcdir)/config/always-cppcheck.m4 \
 	$(top_srcdir)/config/always-python.m4 \
 	$(top_srcdir)/config/always-pyzfs.m4 \
 	$(top_srcdir)/config/always-sed.m4 \
+	$(top_srcdir)/config/always-shellcheck.m4 \
 	$(top_srcdir)/config/always-system.m4 \
 	$(top_srcdir)/config/ax_code_coverage.m4 \
+	$(top_srcdir)/config/ax_count_cpus.m4 \
 	$(top_srcdir)/config/ax_python_devel.m4 \
 	$(top_srcdir)/config/ax_restore_flags.m4 \
 	$(top_srcdir)/config/ax_save_flags.m4 \
@@ -111,6 +114,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-automount.m4 \
 	$(top_srcdir)/config/kernel-bdi.m4 \
 	$(top_srcdir)/config/kernel-bio.m4 \
+	$(top_srcdir)/config/kernel-bio_max_segs.m4 \
 	$(top_srcdir)/config/kernel-blk-queue.m4 \
 	$(top_srcdir)/config/kernel-blkdev.m4 \
 	$(top_srcdir)/config/kernel-block-device-operations.m4 \
@@ -132,12 +136,14 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-fpu.m4 \
 	$(top_srcdir)/config/kernel-fst-mount.m4 \
 	$(top_srcdir)/config/kernel-fsync.m4 \
+	$(top_srcdir)/config/kernel-generic_fillattr.m4 \
 	$(top_srcdir)/config/kernel-generic_io_acct.m4 \
 	$(top_srcdir)/config/kernel-generic_readlink.m4 \
 	$(top_srcdir)/config/kernel-get-disk-ro.m4 \
 	$(top_srcdir)/config/kernel-get-link.m4 \
 	$(top_srcdir)/config/kernel-global_page_state.m4 \
 	$(top_srcdir)/config/kernel-group-info.m4 \
+	$(top_srcdir)/config/kernel-hotplug.m4 \
 	$(top_srcdir)/config/kernel-in-compat-syscall.m4 \
 	$(top_srcdir)/config/kernel-inode-create.m4 \
 	$(top_srcdir)/config/kernel-inode-getattr.m4 \
@@ -158,7 +164,8 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-lseek-execute.m4 \
 	$(top_srcdir)/config/kernel-make-request-fn.m4 \
 	$(top_srcdir)/config/kernel-misc-minor.m4 \
-	$(top_srcdir)/config/kernel-mkdir-umode-t.m4 \
+	$(top_srcdir)/config/kernel-mkdir.m4 \
+	$(top_srcdir)/config/kernel-mknod.m4 \
 	$(top_srcdir)/config/kernel-mod-param.m4 \
 	$(top_srcdir)/config/kernel-objtool.m4 \
 	$(top_srcdir)/config/kernel-pde-data.m4 \
@@ -176,7 +183,12 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-sget-args.m4 \
 	$(top_srcdir)/config/kernel-show-options.m4 \
 	$(top_srcdir)/config/kernel-shrink.m4 \
+	$(top_srcdir)/config/kernel-siginfo.m4 \
+	$(top_srcdir)/config/kernel-signal-stop.m4 \
+	$(top_srcdir)/config/kernel-special-state.m4 \
+	$(top_srcdir)/config/kernel-stdarg.m4 \
 	$(top_srcdir)/config/kernel-super-userns.m4 \
+	$(top_srcdir)/config/kernel-symlink.m4 \
 	$(top_srcdir)/config/kernel-timer.m4 \
 	$(top_srcdir)/config/kernel-tmpfile.m4 \
 	$(top_srcdir)/config/kernel-totalhigh_pages.m4 \
@@ -190,6 +202,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-vfs-iov_iter.m4 \
 	$(top_srcdir)/config/kernel-vfs-iterate.m4 \
 	$(top_srcdir)/config/kernel-vfs-rw-iterate.m4 \
+	$(top_srcdir)/config/kernel-vfs-set_page_dirty.m4 \
 	$(top_srcdir)/config/kernel-wait.m4 \
 	$(top_srcdir)/config/kernel-xattr-handler.m4 \
 	$(top_srcdir)/config/kernel-zlib.m4 \
@@ -209,6 +222,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/user-dracut.m4 \
 	$(top_srcdir)/config/user-gettext.m4 \
 	$(top_srcdir)/config/user-libaio.m4 \
+	$(top_srcdir)/config/user-libatomic.m4 \
 	$(top_srcdir)/config/user-libblkid.m4 \
 	$(top_srcdir)/config/user-libcrypto.m4 \
 	$(top_srcdir)/config/user-libexec.m4 \
@@ -315,6 +329,9 @@ am__relativize = \
   reldir="$$dir2"
 ACLOCAL = @ACLOCAL@
 ALIEN = @ALIEN@
+ALIEN_MAJOR = @ALIEN_MAJOR@
+ALIEN_MINOR = @ALIEN_MINOR@
+ALIEN_POINT = @ALIEN_POINT@
 ALIEN_VERSION = @ALIEN_VERSION@
 AMTAR = @AMTAR@
 AM_DEFAULT_VERBOSITY = @AM_DEFAULT_VERBOSITY@
@@ -333,6 +350,7 @@ CCASDEPMODE = @CCASDEPMODE@
 CCASFLAGS = @CCASFLAGS@
 CCDEPMODE = @CCDEPMODE@
 CFLAGS = @CFLAGS@
+CHECKBASHISMS = @CHECKBASHISMS@
 CODE_COVERAGE_CFLAGS = @CODE_COVERAGE_CFLAGS@
 CODE_COVERAGE_CPPFLAGS = @CODE_COVERAGE_CPPFLAGS@
 CODE_COVERAGE_CXXFLAGS = @CODE_COVERAGE_CXXFLAGS@
@@ -340,7 +358,9 @@ CODE_COVERAGE_ENABLED = @CODE_COVERAGE_ENABLED@
 CODE_COVERAGE_LDFLAGS = @CODE_COVERAGE_LDFLAGS@
 CODE_COVERAGE_LIBS = @CODE_COVERAGE_LIBS@
 CPP = @CPP@
+CPPCHECK = @CPPCHECK@
 CPPFLAGS = @CPPFLAGS@
+CPU_COUNT = @CPU_COUNT@
 CYGPATH_W = @CYGPATH_W@
 DEBUGINFO_ZFS = @DEBUGINFO_ZFS@
 DEBUG_CFLAGS = @DEBUG_CFLAGS@
@@ -401,6 +421,7 @@ LDFLAGS = @LDFLAGS@
 LIBAIO_CFLAGS = @LIBAIO_CFLAGS@
 LIBAIO_LIBS = @LIBAIO_LIBS@
 LIBAIO_PC = @LIBAIO_PC@
+LIBATOMIC_LIBS = @LIBATOMIC_LIBS@
 LIBBLKID_CFLAGS = @LIBBLKID_CFLAGS@
 LIBBLKID_LIBS = @LIBBLKID_LIBS@
 LIBBLKID_PC = @LIBBLKID_PC@
@@ -495,6 +516,7 @@ RPM_VERSION = @RPM_VERSION@
 SED = @SED@
 SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
+SHELLCHECK = @SHELLCHECK@
 SRPM_DEFINE_COMMON = @SRPM_DEFINE_COMMON@
 SRPM_DEFINE_DKMS = @SRPM_DEFINE_DKMS@
 SRPM_DEFINE_KMOD = @SRPM_DEFINE_KMOD@
@@ -505,6 +527,8 @@ TEST_JOBS = @TEST_JOBS@
 USE_NLS = @USE_NLS@
 VENDOR = @VENDOR@
 VERSION = @VERSION@
+WITH_DEBUG = @WITH_DEBUG@
+WITH_INVARIANTS = @WITH_INVARIANTS@
 XGETTEXT = @XGETTEXT@
 XGETTEXT_015 = @XGETTEXT_015@
 XGETTEXT_EXTRA_OPTIONS = @XGETTEXT_EXTRA_OPTIONS@

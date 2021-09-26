@@ -93,11 +93,14 @@ subdir = include/sys
 ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
 am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/always-compiler-options.m4 \
+	$(top_srcdir)/config/always-cppcheck.m4 \
 	$(top_srcdir)/config/always-python.m4 \
 	$(top_srcdir)/config/always-pyzfs.m4 \
 	$(top_srcdir)/config/always-sed.m4 \
+	$(top_srcdir)/config/always-shellcheck.m4 \
 	$(top_srcdir)/config/always-system.m4 \
 	$(top_srcdir)/config/ax_code_coverage.m4 \
+	$(top_srcdir)/config/ax_count_cpus.m4 \
 	$(top_srcdir)/config/ax_python_devel.m4 \
 	$(top_srcdir)/config/ax_restore_flags.m4 \
 	$(top_srcdir)/config/ax_save_flags.m4 \
@@ -112,6 +115,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-automount.m4 \
 	$(top_srcdir)/config/kernel-bdi.m4 \
 	$(top_srcdir)/config/kernel-bio.m4 \
+	$(top_srcdir)/config/kernel-bio_max_segs.m4 \
 	$(top_srcdir)/config/kernel-blk-queue.m4 \
 	$(top_srcdir)/config/kernel-blkdev.m4 \
 	$(top_srcdir)/config/kernel-block-device-operations.m4 \
@@ -133,12 +137,14 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-fpu.m4 \
 	$(top_srcdir)/config/kernel-fst-mount.m4 \
 	$(top_srcdir)/config/kernel-fsync.m4 \
+	$(top_srcdir)/config/kernel-generic_fillattr.m4 \
 	$(top_srcdir)/config/kernel-generic_io_acct.m4 \
 	$(top_srcdir)/config/kernel-generic_readlink.m4 \
 	$(top_srcdir)/config/kernel-get-disk-ro.m4 \
 	$(top_srcdir)/config/kernel-get-link.m4 \
 	$(top_srcdir)/config/kernel-global_page_state.m4 \
 	$(top_srcdir)/config/kernel-group-info.m4 \
+	$(top_srcdir)/config/kernel-hotplug.m4 \
 	$(top_srcdir)/config/kernel-in-compat-syscall.m4 \
 	$(top_srcdir)/config/kernel-inode-create.m4 \
 	$(top_srcdir)/config/kernel-inode-getattr.m4 \
@@ -159,7 +165,8 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-lseek-execute.m4 \
 	$(top_srcdir)/config/kernel-make-request-fn.m4 \
 	$(top_srcdir)/config/kernel-misc-minor.m4 \
-	$(top_srcdir)/config/kernel-mkdir-umode-t.m4 \
+	$(top_srcdir)/config/kernel-mkdir.m4 \
+	$(top_srcdir)/config/kernel-mknod.m4 \
 	$(top_srcdir)/config/kernel-mod-param.m4 \
 	$(top_srcdir)/config/kernel-objtool.m4 \
 	$(top_srcdir)/config/kernel-pde-data.m4 \
@@ -177,7 +184,12 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-sget-args.m4 \
 	$(top_srcdir)/config/kernel-show-options.m4 \
 	$(top_srcdir)/config/kernel-shrink.m4 \
+	$(top_srcdir)/config/kernel-siginfo.m4 \
+	$(top_srcdir)/config/kernel-signal-stop.m4 \
+	$(top_srcdir)/config/kernel-special-state.m4 \
+	$(top_srcdir)/config/kernel-stdarg.m4 \
 	$(top_srcdir)/config/kernel-super-userns.m4 \
+	$(top_srcdir)/config/kernel-symlink.m4 \
 	$(top_srcdir)/config/kernel-timer.m4 \
 	$(top_srcdir)/config/kernel-tmpfile.m4 \
 	$(top_srcdir)/config/kernel-totalhigh_pages.m4 \
@@ -191,6 +203,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-vfs-iov_iter.m4 \
 	$(top_srcdir)/config/kernel-vfs-iterate.m4 \
 	$(top_srcdir)/config/kernel-vfs-rw-iterate.m4 \
+	$(top_srcdir)/config/kernel-vfs-set_page_dirty.m4 \
 	$(top_srcdir)/config/kernel-wait.m4 \
 	$(top_srcdir)/config/kernel-xattr-handler.m4 \
 	$(top_srcdir)/config/kernel-zlib.m4 \
@@ -210,6 +223,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/user-dracut.m4 \
 	$(top_srcdir)/config/user-gettext.m4 \
 	$(top_srcdir)/config/user-libaio.m4 \
+	$(top_srcdir)/config/user-libatomic.m4 \
 	$(top_srcdir)/config/user-libblkid.m4 \
 	$(top_srcdir)/config/user-libcrypto.m4 \
 	$(top_srcdir)/config/user-libexec.m4 \
@@ -275,18 +289,19 @@ am__kernel_HEADERS_DIST = abd.h abd_impl.h aggsum.h arc.h arc_impl.h \
 	space_reftree.h spa.h spa_impl.h spa_checksum.h sysevent.h \
 	txg.h txg_impl.h u8_textprep_data.h u8_textprep.h uberblock.h \
 	uberblock_impl.h uio_impl.h unique.h uuid.h vdev_disk.h \
-	vdev_file.h vdev.h vdev_impl.h vdev_indirect_births.h \
-	vdev_indirect_mapping.h vdev_initialize.h vdev_raidz.h \
-	vdev_raidz_impl.h vdev_rebuild.h vdev_removal.h vdev_trim.h \
-	xvattr.h zap.h zap_impl.h zap_leaf.h zcp.h zcp_global.h \
-	zcp_iter.h zcp_prop.h zcp_set.h zfeature.h zfs_acl.h \
-	zfs_bootenv.h zfs_context.h zfs_debug.h zfs_delay.h zfs_file.h \
-	zfs_fuid.h zfs_project.h zfs_quota.h zfs_racct.h \
-	zfs_ratelimit.h zfs_refcount.h zfs_rlock.h zfs_sa.h zfs_stat.h \
-	zfs_sysfs.h zfs_vfsops.h zfs_vnops.h zfs_znode.h zil.h \
-	zil_impl.h zio_checksum.h zio_compress.h zio_crypt.h zio.h \
-	zio_impl.h zio_priority.h zrlock.h zthr.h zfs_ioctl.h \
-	zfs_ioctl_impl.h zfs_onexit.h zvol.h zvol_impl.h
+	vdev_file.h vdev.h vdev_draid.h vdev_impl.h \
+	vdev_indirect_births.h vdev_indirect_mapping.h \
+	vdev_initialize.h vdev_raidz.h vdev_raidz_impl.h \
+	vdev_rebuild.h vdev_removal.h vdev_trim.h xvattr.h zap.h \
+	zap_impl.h zap_leaf.h zcp.h zcp_global.h zcp_iter.h zcp_prop.h \
+	zcp_set.h zfeature.h zfs_acl.h zfs_bootenv.h zfs_context.h \
+	zfs_debug.h zfs_delay.h zfs_file.h zfs_fuid.h zfs_project.h \
+	zfs_quota.h zfs_racct.h zfs_ratelimit.h zfs_refcount.h \
+	zfs_rlock.h zfs_sa.h zfs_stat.h zfs_sysfs.h zfs_vfsops.h \
+	zfs_vnops.h zfs_znode.h zil.h zil_impl.h zio_checksum.h \
+	zio_compress.h zio_crypt.h zio.h zio_impl.h zio_priority.h \
+	zrlock.h zthr.h zfs_ioctl.h zfs_ioctl_impl.h zfs_onexit.h \
+	zvol.h zvol_impl.h
 am__vpath_adj_setup = srcdirstrip=`echo "$(srcdir)" | sed 's|.|.|g'`;
 am__vpath_adj = case $$p in \
     $(srcdir)/*) f=`echo "$$p" | sed "s|^$$srcdirstrip/||"`;; \
@@ -330,17 +345,18 @@ am__libzfs_HEADERS_DIST = abd.h abd_impl.h aggsum.h arc.h arc_impl.h \
 	space_reftree.h spa.h spa_impl.h spa_checksum.h sysevent.h \
 	txg.h txg_impl.h u8_textprep_data.h u8_textprep.h uberblock.h \
 	uberblock_impl.h uio_impl.h unique.h uuid.h vdev_disk.h \
-	vdev_file.h vdev.h vdev_impl.h vdev_indirect_births.h \
-	vdev_indirect_mapping.h vdev_initialize.h vdev_raidz.h \
-	vdev_raidz_impl.h vdev_rebuild.h vdev_removal.h vdev_trim.h \
-	xvattr.h zap.h zap_impl.h zap_leaf.h zcp.h zcp_global.h \
-	zcp_iter.h zcp_prop.h zcp_set.h zfeature.h zfs_acl.h \
-	zfs_bootenv.h zfs_context.h zfs_debug.h zfs_delay.h zfs_file.h \
-	zfs_fuid.h zfs_project.h zfs_quota.h zfs_racct.h \
-	zfs_ratelimit.h zfs_refcount.h zfs_rlock.h zfs_sa.h zfs_stat.h \
-	zfs_sysfs.h zfs_vfsops.h zfs_vnops.h zfs_znode.h zil.h \
-	zil_impl.h zio_checksum.h zio_compress.h zio_crypt.h zio.h \
-	zio_impl.h zio_priority.h zrlock.h zthr.h
+	vdev_file.h vdev.h vdev_draid.h vdev_impl.h \
+	vdev_indirect_births.h vdev_indirect_mapping.h \
+	vdev_initialize.h vdev_raidz.h vdev_raidz_impl.h \
+	vdev_rebuild.h vdev_removal.h vdev_trim.h xvattr.h zap.h \
+	zap_impl.h zap_leaf.h zcp.h zcp_global.h zcp_iter.h zcp_prop.h \
+	zcp_set.h zfeature.h zfs_acl.h zfs_bootenv.h zfs_context.h \
+	zfs_debug.h zfs_delay.h zfs_file.h zfs_fuid.h zfs_project.h \
+	zfs_quota.h zfs_racct.h zfs_ratelimit.h zfs_refcount.h \
+	zfs_rlock.h zfs_sa.h zfs_stat.h zfs_sysfs.h zfs_vfsops.h \
+	zfs_vnops.h zfs_znode.h zil.h zil_impl.h zio_checksum.h \
+	zio_compress.h zio_crypt.h zio.h zio_impl.h zio_priority.h \
+	zrlock.h zthr.h
 HEADERS = $(kernel_HEADERS) $(libzfs_HEADERS)
 RECURSIVE_CLEAN_TARGETS = mostlyclean-recursive clean-recursive	\
   distclean-recursive maintainer-clean-recursive
@@ -399,6 +415,9 @@ am__relativize = \
   reldir="$$dir2"
 ACLOCAL = ${SHELL} /scrap/zfs/config/missing aclocal-1.15
 ALIEN = alien
+ALIEN_MAJOR = 8
+ALIEN_MINOR = 95
+ALIEN_POINT = 
 ALIEN_VERSION = 8.95
 AMTAR = $${TAR-tar}
 AM_DEFAULT_VERBOSITY = 0
@@ -417,6 +436,7 @@ CCASDEPMODE = depmode=gcc3
 CCASFLAGS = -g -O2
 CCDEPMODE = depmode=gcc3
 CFLAGS = -g -O2
+CHECKBASHISMS = 
 CODE_COVERAGE_CFLAGS = 
 CODE_COVERAGE_CPPFLAGS = 
 CODE_COVERAGE_CXXFLAGS = 
@@ -424,7 +444,9 @@ CODE_COVERAGE_ENABLED = no
 CODE_COVERAGE_LDFLAGS = 
 CODE_COVERAGE_LIBS = 
 CPP = gcc -E
+CPPCHECK = 
 CPPFLAGS = 
+CPU_COUNT = 16
 CYGPATH_W = echo
 DEBUGINFO_ZFS = _without_debuginfo
 DEBUG_CFLAGS = 
@@ -485,6 +507,7 @@ LDFLAGS =
 LIBAIO_CFLAGS = 
 LIBAIO_LIBS =  -laio
 LIBAIO_PC = 
+LIBATOMIC_LIBS = 
 LIBBLKID_CFLAGS = -I/usr/include/blkid -I/usr/include/uuid
 LIBBLKID_LIBS = -lblkid
 LIBBLKID_PC = blkid
@@ -509,7 +532,7 @@ LIBUUID_PC = uuid
 LINUX = /scrap/linux-mdl-5.10
 LINUX_OBJ = /scrap/linux-mdl-5.10
 LINUX_SYMBOLS = NONE
-LINUX_VERSION = 5.10.22-mdl+
+LINUX_VERSION = 5.10.68-mdl+
 LIPO = 
 LN_S = ln -s
 LTLIBICONV = -liconv
@@ -539,10 +562,10 @@ OTOOL64 =
 PACKAGE = zfs
 PACKAGE_BUGREPORT = 
 PACKAGE_NAME = zfs
-PACKAGE_STRING = zfs 2.0.4-mdl
+PACKAGE_STRING = zfs 2.1.1
 PACKAGE_TARNAME = zfs
 PACKAGE_URL = 
-PACKAGE_VERSION = 2.0.4-mdl
+PACKAGE_VERSION = 2.1.1
 PATH_SEPARATOR = :
 PKG_CONFIG = /usr/bin/pkg-config
 PKG_CONFIG_LIBDIR = 
@@ -579,6 +602,7 @@ RPM_VERSION = 4.14.1
 SED = /bin/sed
 SET_MAKE = 
 SHELL = /bin/bash
+SHELLCHECK = 
 SRPM_DEFINE_COMMON = --define "build_src_rpm 1"
 SRPM_DEFINE_DKMS = 
 SRPM_DEFINE_KMOD = 
@@ -588,17 +612,19 @@ TARGET_CPU = x86_64
 TEST_JOBS = 16
 USE_NLS = yes
 VENDOR = ubuntu
-VERSION = 2.0.4-mdl
+VERSION = 2.1.1
+WITH_DEBUG = 
+WITH_INVARIANTS = 
 XGETTEXT = /usr/bin/xgettext
 XGETTEXT_015 = /usr/bin/xgettext
 XGETTEXT_EXTRA_OPTIONS = 
 ZFS_CONFIG = all
 ZFS_INIT_SYSTEMD = systemd
 ZFS_INIT_SYSV = init.d
-ZFS_META_ALIAS = zfs-2.0.4-mdl-1
+ZFS_META_ALIAS = zfs-2.1.1-1
 ZFS_META_AUTHOR = OpenZFS
 ZFS_META_DATA = 
-ZFS_META_KVER_MAX = 5.11
+ZFS_META_KVER_MAX = 5.14
 ZFS_META_KVER_MIN = 3.10
 ZFS_META_LICENSE = CDDL
 ZFS_META_LT_AGE = 
@@ -606,7 +632,7 @@ ZFS_META_LT_CURRENT =
 ZFS_META_LT_REVISION = 
 ZFS_META_NAME = zfs
 ZFS_META_RELEASE = 1
-ZFS_META_VERSION = 2.0.4-mdl
+ZFS_META_VERSION = 2.1.1
 ZFS_MODULE_LOAD = modules-load.d
 ZLIB_CFLAGS = 
 ZLIB_LIBS = -lz
@@ -773,6 +799,7 @@ COMMON_H = \
 	vdev_disk.h \
 	vdev_file.h \
 	vdev.h \
+	vdev_draid.h \
 	vdev_impl.h \
 	vdev_indirect_births.h \
 	vdev_indirect_mapping.h \

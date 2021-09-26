@@ -40,6 +40,7 @@
 #include <sys/zil.h>
 #include <sys/zfs_project.h>
 #include <vm/vm_object.h>
+#include <sys/uio.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -53,6 +54,7 @@ extern "C" {
 #define	ZNODE_OS_FIELDS                 \
 	struct zfsvfs	*z_zfsvfs;      \
 	vnode_t		*z_vnode;       \
+	char		*z_cached_symlink;	\
 	uint64_t		z_uid;          \
 	uint64_t		z_gid;          \
 	uint64_t		z_gen;          \
@@ -117,24 +119,25 @@ extern minor_t zfsdev_minor_alloc(void);
 #define	Z_ISDIR(type) ((type) == VDIR)
 
 #define	zn_has_cached_data(zp)	vn_has_cached_data(ZTOV(zp))
-#define	zn_rlimit_fsize(zp, uio, td)	vn_rlimit_fsize(ZTOV(zp), (uio), (td))
+#define	zn_rlimit_fsize(zp, uio) \
+    vn_rlimit_fsize(ZTOV(zp), GET_UIO_STRUCT(uio), zfs_uio_td(uio))
 
 /* Called on entry to each ZFS vnode and vfs operation  */
 #define	ZFS_ENTER(zfsvfs) \
 	{ \
-		rrm_enter_read(&(zfsvfs)->z_teardown_lock, FTAG); \
-		if ((zfsvfs)->z_unmounted) { \
-			ZFS_EXIT(zfsvfs); \
+		ZFS_TEARDOWN_ENTER_READ((zfsvfs), FTAG); \
+		if (__predict_false((zfsvfs)->z_unmounted)) { \
+			ZFS_TEARDOWN_EXIT_READ(zfsvfs, FTAG); \
 			return (EIO); \
 		} \
 	}
 
 /* Must be called before exiting the vop */
-#define	ZFS_EXIT(zfsvfs) rrm_exit(&(zfsvfs)->z_teardown_lock, FTAG)
+#define	ZFS_EXIT(zfsvfs) ZFS_TEARDOWN_EXIT_READ(zfsvfs, FTAG)
 
 /* Verifies the znode is valid */
 #define	ZFS_VERIFY_ZP(zp) \
-	if ((zp)->z_sa_hdl == NULL) { \
+	if (__predict_false((zp)->z_sa_hdl == NULL)) { \
 		ZFS_EXIT((zp)->z_zfsvfs); \
 		return (EIO); \
 	} \
@@ -173,13 +176,11 @@ extern void	zfs_tstamp_update_setup_ext(struct znode *,
     uint_t, uint64_t [2], uint64_t [2], boolean_t have_tx);
 extern void zfs_znode_free(struct znode *);
 
-extern zil_get_data_t zfs_get_data;
 extern zil_replay_func_t *zfs_replay_vector[TX_MAX_TYPE];
 extern int zfsfstype;
 
 extern int zfs_znode_parent_and_name(struct znode *zp, struct znode **dzpp,
     char *buf);
-extern void	zfs_inode_update(struct znode *);
 #ifdef	__cplusplus
 }
 #endif
