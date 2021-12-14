@@ -1,0 +1,77 @@
+#!/bin/bash
+
+set -e
+
+
+usage()
+{
+    echo "import upstream DRBD module sources into kernel tree"
+    echo
+    echo "usage: $(basename $0) [--help] <path-to-drbd-src>"
+}
+
+
+DRBDDIR=
+while [ $# -gt 0 ] ; do
+    case $1 in
+        --help)
+            usage
+            exit 0
+            ;;
+        *)
+            if [ -z "$DRBDDIR" ] ; then
+                DRBDDIR=$1
+            else
+                echo "Unknown option or parameter \"$1\""
+                echo
+                usage
+                exit 1
+            fi
+            ;;
+    esac
+
+    shift
+done
+
+
+# initial import
+cp -v $DRBDDIR/drbd/*.[ch] .
+rm -v compat*.h
+cp -v $DRBDDIR/drbd/Kconfig .
+cp -v $DRBDDIR/drbd/Kbuild Makefile
+rm -v drbd_strings.c # which was a symlink
+rm -v lru_cache.c # we use mainline
+cp -v $DRBDDIR/drbd/linux/drbd*.h ../../../include/linux/
+cp -v $DRBDDIR/drbd/drbd-headers/drbd*.[ch] .
+cp -v $DRBDDIR/drbd/drbd-headers/linux/*.h ../../../include/linux/
+cp -v $DRBDDIR/drbd/drbd-kernel-compat/drbd_wrappers.[ch] .
+cp -v $DRBDDIR/drbd/compat.h ../../../include/linux/drbd_compat.h
+
+# Then, since we renamed compat.h->drbd_compat.h, we have to sed some changes
+# into a few files:
+sed -i 's|#include "compat.h"|#include <linux/drbd_compat.h>|' \
+    ../../../include/linux/drbd_config.h \
+    ../../../include/linux/genl_magic_struct.h \
+    drbd_int.h drbd_wrappers.h
+
+# And finally, we have to tweak a couple of include statements to work nicely
+# now that we've actually split headers out into their propper locations:
+sed -i 's|#include <kref_debug.h>|#include "kref_debug.h"|' \
+    drbd_kref_debug.h
+
+sed -i 's|#include <drbd_transport.h>|#include "drbd_transport.h"|' \
+    drbd_proc.c \
+    drbd_transport.c \
+    drbd_transport_tcp.c
+
+sed -i 's|#include <drbd_int.h>|#include "drbd_int.h"|' \
+    drbd_transport.c
+
+sed -i 's|#include <drbd_protocol.h>|#include "drbd_protocol.h"|' \
+    drbd_transport_tcp.c
+
+# Then generate drbd_buildtag.c w/ SHA of git tree.
+SHA=$(GIT_DIR=$DRBDDIR/.git git rev-parse HEAD)
+sed "s|__GIT_HASH__|$SHA|" drbd_buildtag.c.in > drbd_buildtag.c
+
+exit 0
