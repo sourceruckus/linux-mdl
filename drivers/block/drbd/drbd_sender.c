@@ -92,15 +92,18 @@ static void drbd_endio_read_sec_final(struct drbd_peer_request *peer_req) __rele
 	struct drbd_peer_device *peer_device = peer_req->peer_device;
 	struct drbd_device *device = peer_device->device;
 	struct drbd_connection *connection = peer_device->connection;
+	bool io_error;
 
 	spin_lock_irqsave(&connection->peer_reqs_lock, flags);
 	device->read_cnt += peer_req->i.size >> 9;
 	list_del(&peer_req->w.list);
 	if (list_empty(&connection->read_ee))
 		wake_up(&connection->ee_wait);
-	if (test_bit(__EE_WAS_ERROR, &peer_req->flags))
-		__drbd_chk_io_error(device, DRBD_READ_ERROR);
+	io_error = test_bit(__EE_WAS_ERROR, &peer_req->flags);
 	spin_unlock_irqrestore(&connection->peer_reqs_lock, flags);
+
+	if (io_error)
+		drbd_handle_io_error(device, DRBD_READ_ERROR);
 
 	drbd_queue_work(&connection->sender_work, &peer_req->w);
 	put_ldev(device);
@@ -154,6 +157,7 @@ void drbd_endio_write_sec_final(struct drbd_peer_request *peer_req) __releases(l
                 if (!__test_and_set_bit(__EE_SEND_WRITE_ACK, &peer_req->flags))
                         inc_unacked(peer_device);
                 drbd_set_out_of_sync(peer_device, peer_req->i.sector, peer_req->i.size);
+		drbd_handle_io_error(device, DRBD_WRITE_ERROR);
         }
 
 	spin_lock_irqsave(&connection->peer_reqs_lock, flags);
@@ -173,11 +177,6 @@ void drbd_endio_write_sec_final(struct drbd_peer_request *peer_req) __releases(l
 		do_wake = list_empty(&connection->sync_ee);
 	else
 		do_wake = atomic_dec_and_test(&connection->active_ee_cnt);
-
-	/* FIXME do we want to detach for failed REQ_OP_DISCARD?
-	 * ((peer_req->flags & (EE_WAS_ERROR|EE_TRIM)) == EE_WAS_ERROR) */
-	if (peer_req->flags & EE_WAS_ERROR)
-		__drbd_chk_io_error(device, DRBD_WRITE_ERROR);
 
 	if (connection->cstate[NOW] == C_CONNECTED)
 		queue_work(connection->ack_sender, &connection->send_acks_work);
@@ -301,6 +300,12 @@ void drbd_request_endio(struct bio *bio)
 
 	bio_put(req->private_bio);
 	req->private_bio = ERR_PTR(blk_status_to_errno(status));
+
+	/* it is legal to fail read-ahead, no drbd_handle_io_error for READ_AHEAD_COMPLETED_WITH_ERROR */
+	if (what == WRITE_COMPLETED_WITH_ERROR)
+		drbd_handle_io_error(device, DRBD_WRITE_ERROR);
+	else if (what == READ_COMPLETED_WITH_ERROR)
+		drbd_handle_io_error(device, DRBD_READ_ERROR);
 
 	/* not req_mod(), we need irqsave here! */
 	read_lock_irqsave(&device->resource->state_rwlock, flags);
@@ -753,6 +758,8 @@ static int make_resync_request(struct drbd_peer_device *peer_device, int cancel)
 	 * just because the first reply came "fast", ... */
 	peer_device->rs_in_flight += number * BM_SECT_PER_BIT;
 
+	peer_device->last_resync_next_bit = peer_device->resync_next_bit;
+
 	for (i = 0; i < number; i++) {
 		bool send_buffer_ok = true;
 		/* Stop generating RS requests, when half of the send buffer is filled */
@@ -968,7 +975,8 @@ static int w_resync_finished(struct drbd_work *w, int cancel)
 		container_of(w, struct drbd_peer_device_work, w),
 		struct resync_finished_work, pdw);
 
-	drbd_resync_finished(rfw->pdw.peer_device, rfw->new_peer_disk_state);
+	if (!cancel)
+		drbd_resync_finished(rfw->pdw.peer_device, rfw->new_peer_disk_state);
 	kfree(rfw);
 
 	return 0;
@@ -1093,8 +1101,8 @@ static void after_reconciliation_resync(struct drbd_connection *connection)
 
 	if (lost_peer) {
 		if (lost_peer->cstate[NOW] < C_CONNECTED)
-			lost_peer->last_dagtag_sector =
-				connection->after_reconciliation.dagtag_sector;
+			atomic64_set(&lost_peer->last_dagtag_sector,
+				connection->after_reconciliation.dagtag_sector);
 
 		kref_put(&lost_peer->kref, drbd_destroy_connection);
 	}
@@ -1133,7 +1141,24 @@ found:
 	drbd_start_resync(peer_device, L_SYNC_TARGET);
 }
 
-int drbd_resync_finished(struct drbd_peer_device *peer_device,
+static void queue_resync_finished(struct drbd_peer_device *peer_device, enum drbd_disk_state new_peer_disk_state)
+{
+	struct drbd_connection *connection = peer_device->connection;
+	struct resync_finished_work *rfw;
+
+	rfw = kmalloc(sizeof(*rfw), GFP_ATOMIC);
+	if (!rfw) {
+		drbd_err(peer_device, "Warn failed to kmalloc(dw).\n");
+		return;
+	}
+
+	rfw->pdw.w.cb = w_resync_finished;
+	rfw->pdw.peer_device = peer_device;
+	rfw->new_peer_disk_state = new_peer_disk_state;
+	drbd_queue_work(&connection->sender_work, &rfw->pdw.w);
+}
+
+void drbd_resync_finished(struct drbd_peer_device *peer_device,
 			 enum drbd_disk_state new_peer_disk_state)
 {
 	struct drbd_device *device = peer_device->device;
@@ -1152,33 +1177,25 @@ int drbd_resync_finished(struct drbd_peer_device *peer_device,
 	if (repl_state[NOW] == L_SYNC_SOURCE || repl_state[NOW] == L_PAUSED_SYNC_S) {
 		/* Make sure all queued w_update_peers()/consider_sending_peers_in_sync()
 		   executed before killing the resync_lru with drbd_rs_del_all() */
-		if (current == device->resource->worker.task)
-			goto queue_on_sender_workq;
-		else
+		if (current == device->resource->worker.task) {
+			queue_resync_finished(peer_device, new_peer_disk_state);
+			return;
+		} else {
 			drbd_flush_workqueue(&device->resource->work);
+		}
 	}
 
 	/* Remove all elements from the resync LRU. Since future actions
 	 * might set bits in the (main) bitmap, then the entries in the
 	 * resync LRU would be wrong. */
 	if (drbd_rs_del_all(peer_device)) {
-		struct resync_finished_work *rfw;
-
 		/* In case this is not possible now, most probably because
 		 * there are P_RS_DATA_REPLY Packets lingering on the sender's
 		 * queue (or even the read operations for those packets
 		 * is not finished by now).   Retry in 100ms. */
 		schedule_timeout_interruptible(HZ / 10);
-	queue_on_sender_workq:
-		rfw = kmalloc(sizeof(*rfw), GFP_ATOMIC);
-		if (rfw) {
-			rfw->pdw.w.cb = w_resync_finished;
-			rfw->pdw.peer_device = peer_device;
-			rfw->new_peer_disk_state = new_peer_disk_state;
-			drbd_queue_work(&connection->sender_work, &rfw->pdw.w);
-			return 1;
-		}
-		drbd_err(peer_device, "Warn failed to kmalloc(dw).\n");
+		queue_resync_finished(peer_device, new_peer_disk_state);
+		return;
 	}
 
 	dt = (jiffies - peer_device->rs_start - peer_device->rs_paused) / HZ;
@@ -1281,7 +1298,7 @@ int drbd_resync_finished(struct drbd_peer_device *peer_device,
 			if (device->disk_state[NEW] == D_UP_TO_DATE)
 				target_m = __cancel_other_resyncs(device);
 
-			if (stable_resync && peer_device->uuids_received) {
+			if (stable_resync && test_bit(UUIDS_RECEIVED, &peer_device->flags)) {
 				const int node_id = device->resource->res_opts.node_id;
 				int i;
 
@@ -1297,7 +1314,7 @@ int drbd_resync_finished(struct drbd_peer_device *peer_device,
 					peer_device->history_uuids[i] =
 						drbd_history_uuid(device, i);
 			} else {
-				if (!peer_device->uuids_received)
+				if (!test_bit(UUIDS_RECEIVED, &peer_device->flags))
 					drbd_err(peer_device, "BUG: uuids were not received!\n");
 
 				if (test_bit(UNSTABLE_RESYNC, &peer_device->flags))
@@ -1364,8 +1381,6 @@ out:
 
 	if (try_to_get_resynced_from_primary_flag)
 		try_to_get_resynced_from_primary(device);
-
-	return 1;
 }
 
 /* helper */
@@ -1445,10 +1460,68 @@ static bool all_zero(struct drbd_peer_request *peer_req)
 	return true;
 }
 
+static int drbd_rs_reply(struct drbd_peer_device *peer_device, struct drbd_peer_request *peer_req)
+{
+	struct drbd_connection *connection = peer_device->connection;
+	struct drbd_device *device = peer_device->device;
+	int err;
+	bool eq = false;
+
+	if (peer_req->flags & EE_HAS_DIGEST) {
+		struct digest_info *di = peer_req->digest;
+		int digest_size;
+		void *digest = NULL;
+
+		/* quick hack to try to avoid a race against reconfiguration.
+		 * a real fix would be much more involved,
+		 * introducing more locking mechanisms */
+		if (connection->csums_tfm) {
+			digest_size = crypto_shash_digestsize(connection->csums_tfm);
+			D_ASSERT(device, digest_size == di->digest_size);
+			digest = kmalloc(digest_size, GFP_NOIO);
+			if (digest) {
+				drbd_csum_pages(connection->csums_tfm, peer_req->page_chain.head, digest);
+				eq = !memcmp(digest, di->digest, digest_size);
+				kfree(digest);
+			}
+		}
+
+		peer_req->flags &= ~EE_HAS_DIGEST; /* This peer request no longer has a digest pointer */
+		kfree(di);
+		peer_req->block_id = ID_SYNCER; /* By setting block_id, digest pointer becomes invalid! */
+	}
+
+	if (eq) {
+		drbd_set_in_sync(peer_device, peer_req->i.sector, peer_req->i.size);
+		/* rs_same_csums unit is BM_BLOCK_SIZE */
+		peer_device->rs_same_csum += peer_req->i.size >> BM_BLOCK_SHIFT;
+		err = drbd_send_ack(peer_device, P_RS_IS_IN_SYNC, peer_req);
+	} else {
+		inc_rs_pending(peer_device);
+		/* If we send back as P_RS_DEALLOCATED,
+		 * this is overestimating "in-flight" accounting.
+		 * But needed to be properly balanced with
+		 * the atomic_sub() in got_BlockAck. */
+		atomic_add(peer_req->i.size >> 9, &connection->rs_in_flight);
+		if (peer_req->flags & EE_RS_THIN_REQ && all_zero(peer_req)) {
+			err = drbd_send_rs_deallocated(peer_device, peer_req);
+		} else {
+			err = drbd_send_block(peer_device, P_RS_DATA_REPLY, peer_req);
+		}
+	}
+
+	return err;
+}
+
 /**
- * w_e_end_rsdata_req() - Worker callback to send a P_RS_DATA_REPLY packet in response to a P_RS_DATA_REQUEST
+ * w_e_end_rsdata_req() - Reply to a resync request.
  * @w:		work object.
- * @cancel:	The connection will be closed anyways
+ * @cancel:	The connection is being closed
+ *
+ * Worker callback to send P_RS_DATA_REPLY or a related packet after completing
+ * a resync read.
+ *
+ * Return: Error code or 0 on success.
  */
 int w_e_end_rsdata_req(struct drbd_work *w, int cancel)
 {
@@ -1458,37 +1531,26 @@ int w_e_end_rsdata_req(struct drbd_work *w, int cancel)
 	struct drbd_device *device = peer_device->device;
 	int err;
 
+	if (get_ldev(device)) {
+		drbd_rs_complete_io(peer_device, peer_req->i.sector);
+		put_ldev(device);
+	}
+
 	if (unlikely(cancel)) {
 		drbd_free_peer_req(peer_req);
 		dec_unacked(peer_device);
 		return 0;
 	}
 
-	if (get_ldev_if_state(device, D_DETACHING)) {
-		drbd_rs_complete_io(peer_device, peer_req->i.sector);
-		put_ldev(device);
-	}
-
 	if (peer_device->repl_state[NOW] == L_AHEAD) {
 		err = drbd_send_ack(peer_device, P_RS_CANCEL, peer_req);
 	} else if (likely((peer_req->flags & EE_WAS_ERROR) == 0)) {
 		if (likely(peer_device->disk_state[NOW] >= D_INCONSISTENT)) {
-			inc_rs_pending(peer_device);
-			/* If we send back as P_RS_DATA_REPLY,
-			 * this is overestimating "in-flight" accounting.
-			 * But needed to be properly balanced with
-			 * the atomic_sub() in got_BlockAck.
-			 * TODO: to fix that, we'd need a protocol bump. */
-			atomic_add(peer_req->i.size >> 9, &connection->rs_in_flight);
-			if (peer_req->flags & EE_RS_THIN_REQ && all_zero(peer_req)) {
-				err = drbd_send_rs_deallocated(peer_device, peer_req);
-			} else {
-				err = drbd_send_block(peer_device, P_RS_DATA_REPLY, peer_req);
-			}
+			err = drbd_rs_reply(peer_device, peer_req);
 		} else {
 			if (drbd_ratelimit())
-				drbd_err(peer_device, "Not sending RSDataReply, "
-				    "partner DISKLESS!\n");
+				drbd_err(peer_device, "Not sending resync reply, "
+						"partner DISKLESS!\n");
 			err = 0;
 		}
 	} else {
@@ -1503,76 +1565,10 @@ int w_e_end_rsdata_req(struct drbd_work *w, int cancel)
 	}
 
 	dec_unacked(peer_device);
-
-	move_to_net_ee_or_free(peer_device->connection, peer_req);
-
-	if (unlikely(err))
-		drbd_err(peer_device, "drbd_send_block() failed\n");
-	return err;
-}
-
-int w_e_end_csum_rs_req(struct drbd_work *w, int cancel)
-{
-	struct drbd_peer_request *peer_req = container_of(w, struct drbd_peer_request, w);
-	struct drbd_peer_device *peer_device = peer_req->peer_device;
-	struct drbd_device *device = peer_device->device;
-	struct digest_info *di;
-	int digest_size;
-	void *digest = NULL;
-	int err, eq = 0;
-
-	if (unlikely(cancel)) {
-		drbd_free_peer_req(peer_req);
-		dec_unacked(peer_device);
-		return 0;
-	}
-
-	if (get_ldev(device)) {
-		drbd_rs_complete_io(peer_device, peer_req->i.sector);
-		put_ldev(device);
-	}
-
-	di = peer_req->digest;
-
-	if (likely((peer_req->flags & EE_WAS_ERROR) == 0)) {
-		/* quick hack to try to avoid a race against reconfiguration.
-		 * a real fix would be much more involved,
-		 * introducing more locking mechanisms */
-		if (peer_device->connection->csums_tfm) {
-			digest_size = crypto_shash_digestsize(peer_device->connection->csums_tfm);
-			D_ASSERT(device, digest_size == di->digest_size);
-			digest = kmalloc(digest_size, GFP_NOIO);
-			if (digest) {
-				drbd_csum_pages(peer_device->connection->csums_tfm, peer_req->page_chain.head, digest);
-				eq = !memcmp(digest, di->digest, digest_size);
-				kfree(digest);
-			}
-		}
-
-		if (eq) {
-			drbd_set_in_sync(peer_device, peer_req->i.sector, peer_req->i.size);
-			/* rs_same_csums unit is BM_BLOCK_SIZE */
-			peer_device->rs_same_csum += peer_req->i.size >> BM_BLOCK_SHIFT;
-			err = drbd_send_ack(peer_device, P_RS_IS_IN_SYNC, peer_req);
-		} else {
-			inc_rs_pending(peer_device);
-			peer_req->block_id = ID_SYNCER; /* By setting block_id, digest pointer becomes invalid! */
-			peer_req->flags &= ~EE_HAS_DIGEST; /* This peer request no longer has a digest pointer */
-			kfree(di);
-			atomic_add(peer_req->i.size >> 9, &peer_device->connection->rs_in_flight);
-			err = drbd_send_block(peer_device, P_RS_DATA_REPLY, peer_req);
-		}
-	} else {
-		err = drbd_send_ack(peer_device, P_NEG_RS_DREPLY, peer_req);
-		if (drbd_ratelimit())
-			drbd_err(device, "Sending NegDReply. I guess it gets messy.\n");
-	}
-
-	dec_unacked(peer_device);
-	move_to_net_ee_or_free(peer_device->connection, peer_req);
+	move_to_net_ee_or_free(connection, peer_req);
 
 	if (unlikely(err))
-		drbd_err(device, "drbd_send_block/ack() failed\n");
+		drbd_err(peer_device, "Sending resync reply failed\n");
 	return err;
 }
 
@@ -1649,17 +1645,44 @@ void verify_progress(struct drbd_peer_device *peer_device,
 		drbd_peer_device_post_work(peer_device, RS_DONE);
 }
 
+static bool digest_equal(struct drbd_peer_request *peer_req)
+{
+	struct drbd_peer_device *peer_device = peer_req->peer_device;
+	struct drbd_device *device = peer_device->device;
+	struct digest_info *di;
+	void *digest;
+	int digest_size;
+	bool eq = false;
+
+	di = peer_req->digest;
+
+	digest_size = crypto_shash_digestsize(peer_device->connection->verify_tfm);
+	digest = kmalloc(digest_size, GFP_NOIO);
+	if (digest) {
+		drbd_csum_pages(peer_device->connection->verify_tfm, peer_req->page_chain.head, digest);
+
+		D_ASSERT(device, digest_size == di->digest_size);
+		eq = !memcmp(digest, di->digest, digest_size);
+		kfree(digest);
+	}
+
+	return eq;
+}
+
 int w_e_end_ov_reply(struct drbd_work *w, int cancel)
 {
 	struct drbd_peer_request *peer_req = container_of(w, struct drbd_peer_request, w);
 	struct drbd_peer_device *peer_device = peer_req->peer_device;
 	struct drbd_device *device = peer_device->device;
-	struct digest_info *di;
-	void *digest;
 	sector_t sector = peer_req->i.sector;
 	unsigned int size = peer_req->i.size;
-	int digest_size;
-	int err, eq = 0;
+	u64 block_id;
+	int err;
+
+	if (get_ldev(device)) {
+		drbd_rs_complete_io(peer_device, peer_req->i.sector);
+		put_ldev(device);
+	}
 
 	if (unlikely(cancel)) {
 		drbd_free_peer_req(peer_req);
@@ -1667,25 +1690,12 @@ int w_e_end_ov_reply(struct drbd_work *w, int cancel)
 		return 0;
 	}
 
-	/* after "cancel", because after drbd_disconnect/drbd_rs_cancel_all
-	 * the resync lru has been cleaned up already */
-	if (get_ldev(device)) {
-		drbd_rs_complete_io(peer_device, peer_req->i.sector);
-		put_ldev(device);
-	}
-
-	di = peer_req->digest;
-
-	if (likely((peer_req->flags & EE_WAS_ERROR) == 0)) {
-		digest_size = crypto_shash_digestsize(peer_device->connection->verify_tfm);
-		digest = kmalloc(digest_size, GFP_NOIO);
-		if (digest) {
-			drbd_csum_pages(peer_device->connection->verify_tfm, peer_req->page_chain.head, digest);
-
-			D_ASSERT(device, digest_size == di->digest_size);
-			eq = !memcmp(digest, di->digest, digest_size);
-			kfree(digest);
-		}
+	if (likely((peer_req->flags & EE_WAS_ERROR) == 0) && digest_equal(peer_req)) {
+		block_id = ID_IN_SYNC;
+		ov_out_of_sync_print(peer_device);
+	} else {
+		block_id = ID_OUT_OF_SYNC;
+		drbd_ov_out_of_sync_found(peer_device, sector, size);
 	}
 
 	/* Free peer_req and pages before send.
@@ -1694,13 +1704,9 @@ int w_e_end_ov_reply(struct drbd_work *w, int cancel)
 	 * congestion as well, because our receiver blocks in
 	 * drbd_alloc_pages due to pp_in_use > max_buffers. */
 	drbd_free_peer_req(peer_req);
-	if (!eq)
-		drbd_ov_out_of_sync_found(peer_device, sector, size);
-	else
-		ov_out_of_sync_print(peer_device);
+	peer_req = NULL;
 
-	err = drbd_send_ack_ex(peer_device, P_OV_RESULT, sector, size,
-			       eq ? ID_IN_SYNC : ID_OUT_OF_SYNC);
+	err = drbd_send_ack_ex(peer_device, P_OV_RESULT, sector, size, block_id);
 
 	dec_unacked(peer_device);
 
@@ -2204,11 +2210,11 @@ static void update_on_disk_bitmap(struct drbd_peer_device *peer_device, bool res
 		if (is_verify_state(peer_device, NOW)) {
 			ov_out_of_sync_print(peer_device);
 			ov_skipped_print(peer_device);
-		} else
-			resync_done = is_sync_state(peer_device, NOW);
+			drbd_resync_finished(peer_device, D_MASK);
+		} else if (is_sync_state(peer_device, NOW)) {
+			drbd_resync_finished(peer_device, D_MASK);
+		}
 	}
-	if (resync_done)
-		drbd_resync_finished(peer_device, D_MASK);
 
 	/* update timestamp, in case it took a while to write out stuff */
 	peer_device->rs_last_writeout = jiffies;
@@ -2270,11 +2276,11 @@ static void go_diskless(struct drbd_device *device)
 				for_each_peer_device_rcu(peer_device, device)
 					drbd_md_set_peer_flag(peer_device, MDF_PEER_FULL_SYNC);
 				rcu_read_unlock();
-				drbd_md_sync_if_dirty(device);
 			}
 		}
 	}
 
+	drbd_md_sync_if_dirty(device);
 	change_disk_state(device, D_DISKLESS, CS_HARD, NULL);
 }
 
@@ -2821,7 +2827,7 @@ static bool is_write_in_flight(struct drbd_peer_device *peer_device, struct drbd
 	drbd_for_each_overlap(i, &device->write_requests, sector, size) {
 		if (i == in)
 			continue;
-		if (!i->local)
+		if (i->type != INTERVAL_LOCAL_WRITE)
 			continue;
 		/* don't care for i->completed, in DRBD_PROT_A we
 		 * are more interested in RQ_NET_DONE instead */

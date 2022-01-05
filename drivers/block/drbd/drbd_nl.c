@@ -741,7 +741,7 @@ static bool initial_states_pending(struct drbd_connection *connection)
 	rcu_read_lock();
 	idr_for_each_entry(&connection->peer_devices, peer_device, vnr) {
 		if (test_bit(INITIAL_STATE_SENT, &peer_device->flags) &&
-		    !test_bit(INITIAL_STATE_PROCESSED, &peer_device->flags)) {
+		    peer_device->repl_state[NOW] == L_OFF) {
 			pending = true;
 			break;
 		}
@@ -2065,7 +2065,7 @@ static void decide_on_write_same_support(struct drbd_device *device,
 			drbd_warn(device, "logical block sizes do not match (me:%u, peer:%u); this may cause problems.\n",
 				me_lbs, peer_lbs);
 			if (can_do) {
-				drbd_dbg(device, "logical block size mismatch: WRITE_SAME disabled.\n");
+				dynamic_drbd_dbg(device, "logical block size mismatch: WRITE_SAME disabled.\n");
 				can_do = false;
 			}
 			me_lbs = max(me_lbs, me_lbs_b);
@@ -2086,7 +2086,7 @@ static void decide_on_write_same_support(struct drbd_device *device,
 		if (can_do && !o->write_same_capable) {
 			/* If we introduce an open-coded write-same loop on the receiving side,
 			 * the peer would present itself as "capable". */
-			drbd_dbg(device, "WRITE_SAME disabled (peer device not capable)\n");
+			dynamic_drbd_dbg(device, "WRITE_SAME disabled (peer device not capable)\n");
 			can_do = false;
 		}
 	}
@@ -3342,15 +3342,12 @@ int drbd_adm_attach(struct sk_buff *skb, struct genl_info *info)
 	}
 	}
 
-	if (drbd_md_test_flag(device->ldev, MDF_CRASHED_PRIMARY))
-		set_bit(CRASHED_PRIMARY, &device->flags);
-	else
-		clear_bit(CRASHED_PRIMARY, &device->flags);
-
-	if (drbd_md_test_flag(device->ldev, MDF_PRIMARY_IND) &&
+	if (drbd_md_test_flag(device->ldev, MDF_CRASHED_PRIMARY) &&
 	    !(resource->role[NOW] == R_PRIMARY && resource->susp_nod[NOW]) &&
 	    !device->exposed_data_uuid && !test_bit(NEW_CUR_UUID, &device->flags))
 		set_bit(CRASHED_PRIMARY, &device->flags);
+	else
+		clear_bit(CRASHED_PRIMARY, &device->flags);
 
 	if (drbd_md_test_flag(device->ldev, MDF_PRIMARY_LOST_QUORUM) &&
 	    !device->have_quorum[NOW])
@@ -3897,6 +3894,7 @@ int drbd_adm_peer_device_opts(struct sk_buff *skb, struct genl_info *info)
 	struct peer_device_conf *old_peer_device_conf, *new_peer_device_conf = NULL;
 	struct fifo_buffer *old_plan = NULL;
 	struct drbd_device *device;
+	bool notify = false;
 	int err;
 
 	retcode = drbd_adm_prepare(&adm_ctx, skb, info, DRBD_ADM_NEED_PEER_DEVICE);
@@ -3940,13 +3938,24 @@ int drbd_adm_peer_device_opts(struct sk_buff *skb, struct genl_info *info)
 				  "Former intentional diskless peer got bitmap slot %d\n",
 				  peer_device->bitmap_index);
 			drbd_md_sync(device);
+			notify = true;
 		}
 	}
 
 	if (old_peer_device_conf->bitmap && !new_peer_device_conf->bitmap) {
+		enum drbd_disk_state pdsk = peer_device->disk_state[NOW];
+		enum drbd_disk_state disk = device->disk_state[NOW];
+		if (!(disk == D_DISKLESS || pdsk == D_DISKLESS || pdsk == D_UNKNOWN)) {
+			drbd_msg_put_info(adm_ctx.reply_skb,
+					  "Can not drop the bitmap when both sides have a disk");
+			retcode = ERR_INVALID_REQUEST;
+			goto fail_ret_set;
+		}
 		err = free_bitmap_index(device, peer_device->node_id, MDF_NODE_EXISTS);
-		if (!err)
+		if (!err) {
 			peer_device->bitmap_index = -1;
+			notify = true;
+		}
 	}
 
 	if (!expect(peer_device, new_peer_device_conf->resync_rate >= 1))
@@ -3974,6 +3983,8 @@ fail_ret_set:
 
 	mutex_unlock(&adm_ctx.resource->conf_update);
 	mutex_unlock(&adm_ctx.resource->adm_mutex);
+	if (notify)
+		drbd_broadcast_peer_device_state(peer_device);
 	drbd_adm_finish(&adm_ctx, info, retcode);
 	return 0;
 
@@ -6160,9 +6171,9 @@ int drbd_adm_new_c_uuid(struct sk_buff *skb, struct genl_info *info)
 		}
 		for_each_peer_device(peer_device, device) {
 			if (NODE_MASK(peer_device->node_id) & nodes) {
+				_drbd_uuid_set_bitmap(peer_device, 0);
 				if (NODE_MASK(peer_device->node_id) & diskful)
 					drbd_send_uuids(peer_device, UUID_FLAG_SKIP_INITIAL_SYNC, 0);
-				_drbd_uuid_set_bitmap(peer_device, 0);
 				drbd_print_uuids(peer_device, "cleared bitmap UUID");
 			}
 		}
@@ -6468,7 +6479,6 @@ static int adm_del_resource(struct drbd_resource *resource)
 	drbd_debugfs_resource_cleanup(resource);
 	mutex_unlock(&resources_mutex);
 
-	del_timer_sync(&resource->queued_twopc_timer);
 	del_timer_sync(&resource->twopc_timer);
 	del_timer_sync(&resource->peer_ack_timer);
 	del_timer_sync(&resource->repost_up_to_date_timer);

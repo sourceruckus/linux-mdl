@@ -227,8 +227,6 @@ enum drbd_stream;
 
 #include "drbd_interval.h"
 
-extern int drbd_wait_misc(struct drbd_device *, struct drbd_peer_device *, struct drbd_interval *);
-
 extern void lock_all_resources(void);
 extern void unlock_all_resources(void);
 
@@ -498,9 +496,6 @@ enum {
 	/* This ee has a pointer to a digest instead of a block id */
 	__EE_HAS_DIGEST,
 
-	/* Conflicting local requests need to be restarted after this request */
-	__EE_RESTART_REQUESTS,
-
 	/* The peer wants a write ACK for this (wire proto C) */
 	__EE_SEND_WRITE_ACK,
 
@@ -511,15 +506,8 @@ enum {
 	/* has this been submitted, or does it still wait for something else? */
 	__EE_SUBMITTED,
 
-	/* this is/was a write request */
-	__EE_WRITE,
-
 	/* this is/was a write same request */
 	__EE_WRITE_SAME,
-
-	/* this originates from application on peer
-	 * (not some resync or verify or other DRBD internal request) */
-	__EE_APPLICATION,
 
 	/* If it contains only 0 bytes, send back P_RS_DEALLOCATED */
 	__EE_RS_THIN_REQ,
@@ -535,13 +523,10 @@ enum {
 #define EE_RESUBMITTED         (1<<__EE_RESUBMITTED)
 #define EE_WAS_ERROR           (1<<__EE_WAS_ERROR)
 #define EE_HAS_DIGEST          (1<<__EE_HAS_DIGEST)
-#define EE_RESTART_REQUESTS	(1<<__EE_RESTART_REQUESTS)
 #define EE_SEND_WRITE_ACK	(1<<__EE_SEND_WRITE_ACK)
 #define EE_IN_INTERVAL_TREE	(1<<__EE_IN_INTERVAL_TREE)
 #define EE_SUBMITTED		(1<<__EE_SUBMITTED)
-#define EE_WRITE		(1<<__EE_WRITE)
 #define EE_WRITE_SAME		(1<<__EE_WRITE_SAME)
-#define EE_APPLICATION		(1<<__EE_APPLICATION)
 #define EE_RS_THIN_REQ		(1<<__EE_RS_THIN_REQ)
 #define EE_IN_ACTLOG		(1<<__EE_IN_ACTLOG)
 
@@ -597,7 +582,6 @@ enum peer_device_flag {
 	USE_DEGR_WFC_T,		/* degr-wfc-timeout instead of wfc-timeout. */
 	INITIAL_STATE_SENT,
 	INITIAL_STATE_RECEIVED,
-	INITIAL_STATE_PROCESSED,
 	RECONCILIATION_RESYNC,
 	UNSTABLE_RESYNC,	/* Sync source went unstable during resync. */
 	SEND_STATE_AFTER_AHEAD,
@@ -612,6 +596,8 @@ enum peer_device_flag {
 	RS_PEER_MISSED_END,     /* Peer (which was SyncSource) did not got P_UUIDS110 after resync */
 	SYNC_SRC_CRASHED_PRI,   /* Source of this resync was a crashed primary */
 	HAVE_SIZES,		/* Cleared when connection gets lost; set when sizes received */
+	UUIDS_RECEIVED,		/* Have recent UUIDs from the peer */
+	CURRENT_UUID_RECEIVED,	/* Got a p_current_uuid packet */
 };
 
 /* We could make these currently hardcoded constants configurable
@@ -941,10 +927,6 @@ struct drbd_resource {
 		u64 diskful_primary_nodes;/* added in commit phase */
 		u64 new_size;             /* added in commit phase */
 	} twopc_resize;
-	struct list_head queued_twopc;
-	spinlock_t queued_twopc_lock;
-	struct timer_list queued_twopc_timer;
-	struct queued_twopc *starting_queued_twopc;
 
 	enum drbd_role role[2];
 	bool susp_user[2];			/* IO suspended by user */
@@ -1066,7 +1048,7 @@ struct drbd_connection {
 	struct drbd_thread ack_receiver;
 	struct workqueue_struct *ack_sender;
 	struct work_struct peer_ack_work;
-	u64 last_dagtag_sector;
+	atomic64_t last_dagtag_sector;
 
 	atomic_t active_ee_cnt;
 	spinlock_t peer_reqs_lock;
@@ -1227,6 +1209,7 @@ struct drbd_peer_device {
 	enum drbd_disk_state resync_finished_pdsk; /* Finished while starting resync */
 	int resync_again; /* decided to resync again while resync running */
 	unsigned long resync_next_bit; /* bitmap bit to search from for next resync request */
+	unsigned long last_resync_next_bit; /* value of resync_next_bit before last set of resync requests */
 	struct mutex resync_next_bit_mutex;
 
 	atomic_t ap_pending_cnt; /* AP data packets on the wire, ack expected */
@@ -1286,7 +1269,6 @@ struct drbd_peer_device {
 	u64 dirty_bits;
 	u64 uuid_flags;
 	u64 uuid_node_mask; /* might be authoritative_nodes or weak_nodes */
-	bool uuids_received;
 
 	unsigned long comm_bm_set; /* communicated number of set bits. */
 	u64 comm_current_uuid; /* communicated current UUID */
@@ -1349,6 +1331,7 @@ struct drbd_device {
 	struct dentry *debugfs_vol_ed_gen_id;
 	struct dentry *debugfs_vol_openers;
 	struct dentry *debugfs_vol_md_io;
+	struct dentry *debugfs_vol_interval_tree;
 #ifdef CONFIG_DRBD_TIMING_STATS
 	struct dentry *debugfs_vol_req_timing;
 #endif
@@ -1901,6 +1884,16 @@ extern void do_submit(struct work_struct *ws);
 extern void __drbd_make_request(struct drbd_device *, struct bio *, ktime_t, unsigned long);
 extern blk_qc_t drbd_submit_bio(struct bio *bio);
 
+enum drbd_force_detach_flags {
+	DRBD_READ_ERROR,
+	DRBD_WRITE_ERROR,
+	DRBD_META_IO_ERROR,
+	DRBD_FORCE_DETACH,
+};
+#define drbd_handle_io_error(m,f) drbd_handle_io_error_(m,f, __func__)
+extern void drbd_handle_io_error_(struct drbd_device *device,
+	enum drbd_force_detach_flags df, const char *where);
+
 /* drbd_nl.c */
 enum suspend_scope {
 	READ_AND_WRITE,
@@ -1946,7 +1939,7 @@ extern bool drbd_stable_sync_source_present(struct drbd_peer_device *, enum whic
 extern void drbd_start_resync(struct drbd_peer_device *, enum drbd_repl_state);
 extern void resume_next_sg(struct drbd_device *device);
 extern void suspend_other_sg(struct drbd_device *device);
-extern int drbd_resync_finished(struct drbd_peer_device *, enum drbd_disk_state);
+extern void drbd_resync_finished(struct drbd_peer_device *, enum drbd_disk_state);
 extern void verify_progress(struct drbd_peer_device *peer_device,
 		const sector_t sector, const unsigned int size);
 /* maybe rather drbd_main.c ? */
@@ -1989,7 +1982,6 @@ extern void drbd_csum_pages(struct crypto_shash *, struct page *, void *);
 /* worker callbacks */
 extern int w_e_end_data_req(struct drbd_work *, int);
 extern int w_e_end_rsdata_req(struct drbd_work *, int);
-extern int w_e_end_csum_rs_req(struct drbd_work *, int);
 extern int w_e_end_ov_reply(struct drbd_work *, int);
 extern int w_e_end_ov_req(struct drbd_work *, int);
 extern int w_resync_timer(struct drbd_work *, int);
@@ -2050,15 +2042,6 @@ struct drbd_peer_request_details {
 	uint32_t digest_size;
 };
 
-struct queued_twopc {
-	struct drbd_work w;
-	unsigned long start_jif;
-	struct drbd_connection *connection;
-	struct twopc_reply reply;
-	struct packet_info packet_info;
-	struct p_twopc_request packet_data;
-};
-
 extern int drbd_issue_discard_or_zero_out(struct drbd_device *device,
 		sector_t start, unsigned int nr_sectors, int flags);
 extern int drbd_send_ack(struct drbd_peer_device *, enum drbd_packet,
@@ -2074,7 +2057,7 @@ extern bool drbd_rs_c_min_rate_throttle(struct drbd_peer_device *);
 extern bool drbd_rs_should_slow_down(struct drbd_peer_device *, sector_t,
 				     bool throttle_if_app_is_waiting);
 extern int drbd_submit_peer_request(struct drbd_peer_request *);
-extern void drbd_cleanup_after_failed_submit_peer_request(struct drbd_peer_request *peer_req);
+extern void drbd_cleanup_after_failed_submit_peer_write(struct drbd_peer_request *peer_req);
 extern void drbd_cleanup_peer_requests_wfa(struct drbd_device *device, struct list_head *cleanup);
 extern int drbd_free_peer_reqs(struct drbd_connection *, struct list_head *, bool is_net_ee);
 extern struct drbd_peer_request *drbd_alloc_peer_req(struct drbd_peer_device *, gfp_t) __must_hold(local);
@@ -2089,8 +2072,6 @@ extern void abort_connect(struct drbd_connection *);
 extern void apply_unacked_peer_requests(struct drbd_connection *connection);
 extern struct drbd_connection *drbd_connection_by_node_id(struct drbd_resource *, int);
 extern struct drbd_connection *drbd_get_connection_by_node_id(struct drbd_resource *, int);
-extern void queue_queued_twopc(struct drbd_resource *resource);
-extern void queued_twopc_timer_fn(struct timer_list *t);
 extern bool drbd_have_local_disk(struct drbd_resource *resource);
 extern enum drbd_state_rv drbd_support_2pc_resize(struct drbd_resource *resource);
 extern enum determine_dev_size
@@ -2228,94 +2209,6 @@ static inline int combined_conn_state(struct drbd_peer_device *peer_device, enum
 		return repl_state;
 	else
 		return peer_device->connection->cstate[which];
-}
-
-enum drbd_force_detach_flags {
-	DRBD_READ_ERROR,
-	DRBD_WRITE_ERROR,
-	DRBD_META_IO_ERROR,
-	DRBD_FORCE_DETACH,
-};
-
-#define __drbd_chk_io_error(m,f) __drbd_chk_io_error_(m,f, __func__)
-static inline void __drbd_chk_io_error_(struct drbd_device *device,
-					enum drbd_force_detach_flags df,
-					const char *where)
-{
-	enum drbd_io_error_p ep;
-
-	rcu_read_lock();
-	ep = rcu_dereference(device->ldev->disk_conf)->on_io_error;
-	rcu_read_unlock();
-	switch (ep) {
-	case EP_PASS_ON: /* FIXME would this be better named "Ignore"? */
-		if (df == DRBD_READ_ERROR ||  df == DRBD_WRITE_ERROR) {
-			if (drbd_ratelimit())
-				drbd_err(device, "Local IO failed in %s.\n", where);
-			if (device->disk_state[NOW] > D_INCONSISTENT) {
-				begin_state_change_locked(device->resource, CS_HARD);
-				__change_disk_state(device, D_INCONSISTENT);
-				end_state_change_locked(device->resource);
-			}
-			break;
-		}
-		fallthrough;	/* for DRBD_META_IO_ERROR or DRBD_FORCE_DETACH */
-	case EP_DETACH:
-	case EP_CALL_HELPER:
-		/* Remember whether we saw a READ or WRITE error.
-		 *
-		 * Recovery of the affected area for WRITE failure is covered
-		 * by the activity log.
-		 * READ errors may fall outside that area though. Certain READ
-		 * errors can be "healed" by writing good data to the affected
-		 * blocks, which triggers block re-allocation in lower layers.
-		 *
-		 * If we can not write the bitmap after a READ error,
-		 * we may need to trigger a full sync (see w_go_diskless()).
-		 *
-		 * Force-detach is not really an IO error, but rather a
-		 * desperate measure to try to deal with a completely
-		 * unresponsive lower level IO stack.
-		 * Still it should be treated as a WRITE error.
-		 *
-		 * Meta IO error is always WRITE error:
-		 * we read meta data only once during attach,
-		 * which will fail in case of errors.
-		 */
-		if (df == DRBD_READ_ERROR)
-			set_bit(WAS_READ_ERROR, &device->flags);
-		if (df == DRBD_FORCE_DETACH)
-			set_bit(FORCE_DETACH, &device->flags);
-		if (device->disk_state[NOW] > D_FAILED) {
-			begin_state_change_locked(device->resource, CS_HARD);
-			__change_disk_state(device, D_FAILED);
-			end_state_change_locked(device->resource);
-			drbd_err(device,
-				"Local IO failed in %s. Detaching...\n", where);
-		}
-		break;
-	}
-}
-
-/**
- * drbd_chk_io_error: Handle the on_io_error setting, should be called from all io completion handlers
- * @device:	 DRBD device.
- * @error:	 Error code passed to the IO completion callback
- * @forcedetach: Force detach. I.e. the error happened while accessing the meta data
- *
- * See also drbd_main.c:after_state_ch() if (os.disk > D_FAILED && ns.disk == D_FAILED)
- */
-#define drbd_chk_io_error(m,e,f) drbd_chk_io_error_(m,e,f, __func__)
-static inline void drbd_chk_io_error_(struct drbd_device *device,
-	int error, enum drbd_force_detach_flags forcedetach, const char *where)
-{
-	if (error) {
-		unsigned long flags;
-		write_lock_irqsave(&device->resource->state_rwlock, flags);
-		__drbd_chk_io_error_(device, forcedetach, where);
-		write_unlock_irqrestore(&device->resource->state_rwlock,
-					flags);
-	}
 }
 
 /**

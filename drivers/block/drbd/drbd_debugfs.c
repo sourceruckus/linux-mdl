@@ -277,12 +277,12 @@ static void seq_print_peer_request_flags(struct seq_file *m, struct drbd_peer_re
 	char sep = ' ';
 
 	__seq_print_rq_state_bit(m, f & EE_SUBMITTED, &sep, "submitted", "preparing");
-	__seq_print_rq_state_bit(m, f & EE_APPLICATION, &sep, "application", "internal");
+	__seq_print_rq_state_bit(m, drbd_interval_is_application(&peer_req->i), &sep, "application", "internal");
 	seq_print_rq_state_bit(m, f & EE_IS_BARRIER, &sep, "barr");
 	seq_print_rq_state_bit(m, f & EE_SEND_WRITE_ACK, &sep, "C");
 	seq_print_rq_state_bit(m, f & EE_MAY_SET_IN_SYNC, &sep, "set-in-sync");
 	seq_print_rq_state_bit(m, f & EE_SET_OUT_OF_SYNC, &sep, "set-out-of-sync");
-	seq_print_rq_state_bit(m, (f & (EE_IN_ACTLOG|EE_WRITE)) == EE_WRITE, &sep, "blocked-on-al");
+	seq_print_rq_state_bit(m, drbd_interval_is_write(&peer_req->i) && !(f & EE_IN_ACTLOG), &sep, "blocked-on-al");
 	seq_print_rq_state_bit(m, f & EE_TRIM, &sep, "trim");
 	seq_print_rq_state_bit(m, f & EE_ZEROOUT, &sep, "zero-out");
 	seq_print_rq_state_bit(m, f & EE_WRITE_SAME, &sep, "write-same");
@@ -307,7 +307,7 @@ static void seq_print_peer_request(struct seq_file *m,
 
 		seq_printf(m, "%llu\t%u\t%c\t%u\t",
 			(unsigned long long)peer_req->i.sector, peer_req->i.size >> 9,
-			(peer_req->flags & EE_WRITE) ? 'W' : 'R',
+			drbd_interval_is_write(&peer_req->i) ? 'W' : 'R',
 			jiffies_to_msecs(jif - peer_req->submit_jif));
 		seq_print_peer_request_flags(m, peer_req);
 		if (peer_req->flags & EE_SUBMITTED)
@@ -494,7 +494,6 @@ static int resource_state_twopc_show(struct seq_file *m, void *pos)
 	struct twopc_reply twopc;
 	bool active = false;
 	unsigned long jif;
-	struct queued_twopc *q;
 
 	read_lock_irq(&resource->state_rwlock);
 	if (resource->remote_state_change) {
@@ -576,19 +575,6 @@ static int resource_state_twopc_show(struct seq_file *m, void *pos)
 	} else {
 		seq_puts(m, "No ongoing two phase state transaction\n");
 	}
-
-	spin_lock_irq(&resource->queued_twopc_lock);
-	if (list_empty(&resource->queued_twopc)) {
-		spin_unlock_irq(&resource->queued_twopc_lock);
-		return 0;
-	}
-	seq_puts(m, "\n Queued for later execution:\n");
-	list_for_each_entry(q, &resource->queued_twopc, w.list) {
-		jif = jiffies - q->start_jif;
-		seq_printf(m, "  tid: %u, initiator_node_id: %d, since: %d ms\n",
-			   q->reply.tid, q->reply.initiator_node_id, jiffies_to_msecs(jif));
-	}
-	spin_unlock_irq(&resource->queued_twopc_lock);
 
 	return 0;
 }
@@ -870,7 +856,7 @@ static int connection_debug_show(struct seq_file *m, void *ignored)
 	seq_printf(m, "  last_peer_acked_dagtag: %llu (%lld)\n", ull2, (long long)(ull2 - ull1));
 	ull2 = connection->send.current_dagtag_sector;
 	seq_printf(m, " send.current_dagtag_sec: %llu (%lld)\n", ull2, (long long)(ull2 - ull1));
-	ull2 = connection->last_dagtag_sector;
+	ull2 = atomic64_read(&connection->last_dagtag_sector);
 	seq_printf(m, "      last_dagtag_sector: %llu\n", ull2);
 
 	in_flight = atomic_read(&connection->ap_in_flight);
@@ -1063,6 +1049,40 @@ static int device_md_io_show(struct seq_file *m, void *ignored)
 	return 0;
 }
 
+static void seq_printf_interval_tree(struct seq_file *m, struct rb_root *root)
+{
+	struct rb_node *node;
+
+	node = rb_first(root);
+	while (node) {
+		struct drbd_interval *i = rb_entry(node, struct drbd_interval, rb);
+		char sep = ' ';
+
+		seq_printf(m, "%llus+%u", (unsigned long long) i->sector, i->size);
+		__seq_print_rq_state_bit(m, i->type == INTERVAL_LOCAL_WRITE, &sep, "local", "peer");
+		seq_print_rq_state_bit(m, test_bit(INTERVAL_WAITING, &i->flags), &sep, "waiting");
+		seq_print_rq_state_bit(m, test_bit(INTERVAL_COMPLETED, &i->flags), &sep, "completed");
+		seq_putc(m, '\n');
+
+		node = rb_next(node);
+	}
+}
+
+static int device_interval_tree_show(struct seq_file *m, void *ignored)
+{
+	struct drbd_device *device = m->private;
+
+	spin_lock_irq(&device->interval_lock);
+	seq_puts(m, "Write requests:\n");
+	seq_printf_interval_tree(m, &device->write_requests);
+	seq_putc(m, '\n');
+	seq_puts(m, "Read requests:\n");
+	seq_printf_interval_tree(m, &device->read_requests);
+	spin_unlock_irq(&device->interval_lock);
+
+	return 0;
+}
+
 static int device_data_gen_id_show(struct seq_file *m, void *ignored)
 {
 	struct drbd_device *device = m->private;
@@ -1239,6 +1259,7 @@ drbd_debugfs_device_attr(io_frozen)
 drbd_debugfs_device_attr(ed_gen_id)
 drbd_debugfs_device_attr(openers)
 drbd_debugfs_device_attr(md_io)
+drbd_debugfs_device_attr(interval_tree)
 #ifdef CONFIG_DRBD_TIMING_STATS
 __drbd_debugfs_device_attr(req_timing, device_req_timing_write)
 #endif
@@ -1278,6 +1299,7 @@ void drbd_debugfs_device_add(struct drbd_device *device)
 	vol_dcf(ed_gen_id);
 	vol_dcf(openers);
 	vol_dcf(md_io);
+	vol_dcf(interval_tree);
 #ifdef CONFIG_DRBD_TIMING_STATS
 	drbd_dcf(device->debugfs_vol, device, req_timing, 0600);
 #endif
@@ -1306,6 +1328,7 @@ void drbd_debugfs_device_cleanup(struct drbd_device *device)
 	drbd_debugfs_remove(&device->debugfs_vol_ed_gen_id);
 	drbd_debugfs_remove(&device->debugfs_vol_openers);
 	drbd_debugfs_remove(&device->debugfs_vol_md_io);
+	drbd_debugfs_remove(&device->debugfs_vol_interval_tree);
 #ifdef CONFIG_DRBD_TIMING_STATS
 	drbd_debugfs_remove(&device->debugfs_vol_req_timing);
 #endif
@@ -1745,6 +1768,7 @@ static const struct file_operations drbd_refcounts_fops = {
 static int drbd_compat_show(struct seq_file *m, void *ignored)
 {
 	seq_puts(m, "bio_bi_bdev__no_present\n");
+	seq_puts(m, "blk_alloc_disk__no_present\n");
 	seq_puts(m, "genl_policy__yes_in_ops\n");
 	seq_puts(m, "set_capacity_and_notify__no_present\n");
 	seq_puts(m, "nla_strscpy__no_present\n");

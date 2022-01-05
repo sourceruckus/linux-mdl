@@ -40,8 +40,7 @@ static struct drbd_request *drbd_req_new(struct drbd_device *device, struct bio 
 	drbd_clear_interval(&req->i);
 	req->i.sector = bio_src->bi_iter.bi_sector;
 	req->i.size = bio_src->bi_iter.bi_size;
-	req->i.local = true;
-	req->i.waiting = false;
+	req->i.type = bio_data_dir(bio_src) == WRITE ? INTERVAL_LOCAL_WRITE : INTERVAL_LOCAL_READ;
 
 	INIT_LIST_HEAD(&req->tl_requests);
 	INIT_LIST_HEAD(&req->list);
@@ -193,7 +192,7 @@ static void drbd_remove_request_interval(struct rb_root *root,
 	spin_unlock(&device->interval_lock);
 
 	/* Wake up any processes waiting for this request to complete.  */
-	if (i->waiting)
+	if (test_bit(INTERVAL_WAITING, &i->flags))
 		wake_up(&device->misc_wait);
 }
 
@@ -545,8 +544,8 @@ void drbd_req_complete(struct drbd_request *req, struct bio_and_error *m)
 		 * write-acks in protocol != C during resync.
 		 * But we mark it as "complete", so it won't be counted as
 		 * conflict in a multi-primary setup. */
-		req->i.completed = true;
-		if (req->i.waiting)
+		set_bit(INTERVAL_COMPLETED, &req->i.flags);
+		if (test_bit(INTERVAL_WAITING, &req->i.flags))
 			wake_up(&device->misc_wait);
 		spin_unlock_irqrestore(&device->interval_lock, flags);
 	}
@@ -817,7 +816,7 @@ static void mod_rq_state(struct drbd_request *req, struct bio_and_error *m,
 	/* potentially complete and destroy */
 
 	/* If we made progress, retry conflicting peer requests, if any. */
-	if (req->i.waiting)
+	if (test_bit(INTERVAL_WAITING, &req->i.flags))
 		wake_up(&req->device->misc_wait);
 
 	drbd_req_put_completion_ref(req, m, c_put);
@@ -935,17 +934,14 @@ void __req_mod(struct drbd_request *req, enum drbd_req_event what,
 
 	case WRITE_COMPLETED_WITH_ERROR:
 		drbd_report_io_error(device, req);
-		__drbd_chk_io_error(device, DRBD_WRITE_ERROR);
 		mod_rq_state(req, m, peer_device, RQ_LOCAL_PENDING, RQ_LOCAL_COMPLETED);
 		break;
 
 	case READ_COMPLETED_WITH_ERROR:
 		drbd_set_all_out_of_sync(device, req->i.sector, req->i.size);
 		drbd_report_io_error(device, req);
-		__drbd_chk_io_error(device, DRBD_READ_ERROR);
 		fallthrough;
 	case READ_AHEAD_COMPLETED_WITH_ERROR:
-		/* it is legal to fail read-ahead, no __drbd_chk_io_error in that case. */
 		mod_rq_state(req, m, peer_device, RQ_LOCAL_PENDING, RQ_LOCAL_COMPLETED);
 		break;
 
@@ -1067,19 +1063,6 @@ void __req_mod(struct drbd_request *req, enum drbd_req_event what,
 				RQ_NET_DONE);
 		break;
 
-	case DISCARD_WRITE:
-		/* for discarded conflicting writes of multiple primaries,
-		 * there is no need to keep anything in the tl, potential
-		 * node crashes are covered by the activity log.
-		 *
-		 * If this request had been marked as RQ_POSTPONED before,
-		 * it will actually not be discarded, but "restarted",
-		 * resubmitted from the retry worker context. */
-		D_ASSERT(device, req->net_rq_state[idx] & RQ_NET_PENDING);
-		D_ASSERT(device, req->net_rq_state[idx] & RQ_EXP_WRITE_ACK);
-		mod_rq_state(req, m, peer_device, RQ_NET_PENDING, RQ_NET_DONE|RQ_NET_OK);
-		break;
-
 	case WRITE_ACKED_BY_PEER_AND_SIS:
 		spin_lock_irqsave(&req->rq_lock, flags);
 		req->net_rq_state[idx] |= RQ_NET_SIS;
@@ -1100,21 +1083,6 @@ void __req_mod(struct drbd_request *req, enum drbd_req_event what,
 		 * protocol != C */
 	ack_common:
 		mod_rq_state(req, m, peer_device, RQ_NET_PENDING, RQ_NET_OK);
-		break;
-
-	case POSTPONE_WRITE:
-		D_ASSERT(device, req->net_rq_state[idx] & RQ_EXP_WRITE_ACK);
-		/* If this node has already detected the write conflict, the
-		 * worker will be waiting on misc_wait.  Wake it up once this
-		 * request has completed locally.
-		 */
-		D_ASSERT(device, req->net_rq_state[idx] & RQ_NET_PENDING);
-		req->local_rq_state |= RQ_POSTPONED;
-		if (req->i.waiting)
-			wake_up(&req->device->misc_wait);
-		/* Do not clear RQ_NET_PENDING. This request will make further
-		 * progress via restart_conflicting_writes() or
-		 * fail_postponed_requests(). Hopefully. */
 		break;
 
 	case NEG_ACKED:
@@ -1291,7 +1259,7 @@ static void complete_conflicting_writes(struct drbd_request *req)
 	for (;;) {
 		drbd_for_each_overlap(i, &device->write_requests, sector, size) {
 			/* Ignore, if already completed to upper layers. */
-			if (i->completed)
+			if (test_bit(INTERVAL_COMPLETED, &i->flags))
 				continue;
 			/* Handle the first found overlap.  After the schedule
 			 * we have to restart the tree walk. */
@@ -1302,12 +1270,12 @@ static void complete_conflicting_writes(struct drbd_request *req)
 
 		/* Indicate to wake up device->misc_wait on progress.  */
 		prepare_to_wait(&device->misc_wait, &wait, TASK_UNINTERRUPTIBLE);
-		i->waiting = true;
-		spin_unlock_irq(&device->interval_lock);
+		set_bit(INTERVAL_WAITING, &i->flags);
+		spin_unlock(&device->interval_lock);
 		read_unlock_irq(&resource->state_rwlock);
 		schedule();
 		read_lock_irq(&resource->state_rwlock);
-		spin_lock_irq(&device->interval_lock);
+		spin_lock(&device->interval_lock);
 	}
 	finish_wait(&device->misc_wait, &wait);
 }
@@ -2079,7 +2047,7 @@ static void __drbd_submit_peer_request(struct drbd_peer_request *peer_req)
 	err = drbd_submit_peer_request(peer_req);
 
 	if (err)
-		drbd_cleanup_after_failed_submit_peer_request(peer_req);
+		drbd_cleanup_after_failed_submit_peer_write(peer_req);
 }
 
 static void submit_fast_path(struct drbd_device *device, struct waiting_for_act_log *wfa)
@@ -2487,14 +2455,14 @@ static bool net_timeout_reached(struct drbd_request *net_req,
 void request_timer_fn(struct timer_list *t)
 {
 	struct drbd_device *device = from_timer(device, t, request_timer);
+	struct drbd_resource *resource = device->resource;
 	struct drbd_connection *connection;
 	struct drbd_request *req_read, *req_write;
-	unsigned long oldest_submit_jif;
-	unsigned long dt = 0;
-	unsigned long et = 0;
-	unsigned long now = jiffies;
-	unsigned long next_trigger_time = now;
-	bool restart_timer = false;
+	unsigned long oldest_submit_jif, irq_flags;
+	unsigned long dt = 0, et = 0, now = jiffies, next_trigger_time = now;
+	bool restart_timer = false, io_error = false;
+	unsigned long timeout_peers = 0;
+	int node_id;
 
 	rcu_read_lock();
 	if (get_ldev(device)) { /* implicit state.disk >= D_INCONSISTENT */
@@ -2504,7 +2472,7 @@ void request_timer_fn(struct timer_list *t)
 	rcu_read_unlock();
 
 	/* FIXME right now, this basically does a full transfer log walk *every time* */
-	read_lock_irq(&device->resource->state_rwlock);
+	read_lock_irq(&resource->state_rwlock);
 	if (dt) {
 		unsigned long write_pre_submit_jif, read_pre_submit_jif;
 
@@ -2532,12 +2500,10 @@ void request_timer_fn(struct timer_list *t)
 		}
 
 		if (time_after(now, oldest_submit_jif + dt) &&
-		    !time_in_range(now, device->last_reattach_jif, device->last_reattach_jif + dt)) {
-			drbd_warn(device, "Local backing device failed to meet the disk-timeout\n");
-			__drbd_chk_io_error(device, DRBD_FORCE_DETACH);
-		}
+		    !time_in_range(now, device->last_reattach_jif, device->last_reattach_jif + dt))
+			io_error = true;
 	}
-	for_each_connection(connection, device->resource) {
+	for_each_connection(connection, resource) {
 		struct drbd_peer_device *peer_device = conn_peer_device(connection, device->vnr);
 		struct net_conf *nc;
 		struct drbd_request *req;
@@ -2598,15 +2564,98 @@ void request_timer_fn(struct timer_list *t)
 			dynamic_drbd_dbg(peer_device, "Request at %llus+%u timed out\n",
 					(unsigned long long) req->i.sector,
 					req->i.size);
-			begin_state_change_locked(device->resource, CS_VERBOSE | CS_HARD);
-			__change_cstate(connection, C_TIMEOUT);
-			end_state_change_locked(device->resource);
+			timeout_peers |= NODE_MASK(connection->peer_node_id);
 		}
 	}
-	read_unlock_irq(&device->resource->state_rwlock);
+	read_unlock_irq(&resource->state_rwlock);
+
+	if (io_error) {
+		drbd_warn(device, "Local backing device failed to meet the disk-timeout\n");
+		drbd_handle_io_error(device, DRBD_FORCE_DETACH);
+	}
+
+	BUILD_BUG_ON(sizeof(timeout_peers) * 8 < DRBD_NODE_ID_MAX);
+	for_each_set_bit(node_id, &timeout_peers, DRBD_NODE_ID_MAX) {
+		connection = drbd_get_connection_by_node_id(resource, node_id);
+		if (!connection)
+			continue;
+		begin_state_change(resource, &irq_flags, CS_VERBOSE | CS_HARD);
+		__change_cstate(connection, C_TIMEOUT);
+		end_state_change(resource, &irq_flags);
+		kref_put(&connection->kref, drbd_destroy_connection);
+	}
 
 	if (restart_timer) {
 		next_trigger_time = time_min_in_future(now, next_trigger_time, now + et);
 		mod_timer(&device->request_timer, next_trigger_time);
 	}
+}
+
+/**
+ * drbd_handle_io_error_: Handle the on_io_error setting, should be called from all io completion handlers
+ * @device: DRBD device.
+ * @df:     Detach flags indicating the kind of IO that failed.
+ * @where:  Calling function name.
+ */
+void drbd_handle_io_error_(struct drbd_device *device,
+	enum drbd_force_detach_flags df, const char *where)
+{
+	unsigned long flags;
+	enum drbd_io_error_p ep;
+
+	write_lock_irqsave(&device->resource->state_rwlock, flags);
+
+	rcu_read_lock();
+	ep = rcu_dereference(device->ldev->disk_conf)->on_io_error;
+	rcu_read_unlock();
+	switch (ep) {
+	case EP_PASS_ON: /* FIXME would this be better named "Ignore"? */
+		if (df == DRBD_READ_ERROR ||  df == DRBD_WRITE_ERROR) {
+			if (drbd_ratelimit())
+				drbd_err(device, "Local IO failed in %s.\n", where);
+			if (device->disk_state[NOW] > D_INCONSISTENT) {
+				begin_state_change_locked(device->resource, CS_HARD);
+				__change_disk_state(device, D_INCONSISTENT);
+				end_state_change_locked(device->resource);
+			}
+			break;
+		}
+		fallthrough;	/* for DRBD_META_IO_ERROR or DRBD_FORCE_DETACH */
+	case EP_DETACH:
+	case EP_CALL_HELPER:
+		/* Remember whether we saw a READ or WRITE error.
+		 *
+		 * Recovery of the affected area for WRITE failure is covered
+		 * by the activity log.
+		 * READ errors may fall outside that area though. Certain READ
+		 * errors can be "healed" by writing good data to the affected
+		 * blocks, which triggers block re-allocation in lower layers.
+		 *
+		 * If we can not write the bitmap after a READ error,
+		 * we may need to trigger a full sync (see w_go_diskless()).
+		 *
+		 * Force-detach is not really an IO error, but rather a
+		 * desperate measure to try to deal with a completely
+		 * unresponsive lower level IO stack.
+		 * Still it should be treated as a WRITE error.
+		 *
+		 * Meta IO error is always WRITE error:
+		 * we read meta data only once during attach,
+		 * which will fail in case of errors.
+		 */
+		if (df == DRBD_READ_ERROR)
+			set_bit(WAS_READ_ERROR, &device->flags);
+		if (df == DRBD_FORCE_DETACH)
+			set_bit(FORCE_DETACH, &device->flags);
+		if (device->disk_state[NOW] > D_FAILED) {
+			begin_state_change_locked(device->resource, CS_HARD);
+			__change_disk_state(device, D_FAILED);
+			end_state_change_locked(device->resource);
+			drbd_err(device,
+				"Local IO failed in %s. Detaching...\n", where);
+		}
+		break;
+	}
+
+	write_unlock_irqrestore(&device->resource->state_rwlock, flags);
 }

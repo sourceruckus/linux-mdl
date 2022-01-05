@@ -40,8 +40,11 @@ void *drbd_md_get_buffer(struct drbd_device *device, const char *intent)
 	if (t == 0)
 		drbd_err(device, "Waited 10 Seconds for md_buffer! BUG?\n");
 
-	if (r)
+	if (r) {
+		drbd_err(device, "Failed to get md_buffer for %s, currently in use by %s\n",
+			 intent, device->md_io.current_use);
 		return NULL;
+	}
 
 	device->md_io.current_use = intent;
 	device->md_io.start_jif = jiffies;
@@ -71,7 +74,7 @@ void wait_until_done_or_force_detached(struct drbd_device *device, struct drbd_b
 			*done || test_bit(FORCE_DETACH, &device->flags), dt);
 	if (dt == 0) {
 		drbd_err(device, "meta-data IO operation timed out\n");
-		drbd_chk_io_error(device, 1, DRBD_FORCE_DETACH);
+		drbd_handle_io_error(device, DRBD_FORCE_DETACH);
 	}
 }
 
@@ -140,7 +143,7 @@ int drbd_md_sync_page_io(struct drbd_device *device, struct drbd_backing_dev *bd
 		return -EIO;
 	}
 
-	drbd_dbg(device, "meta_data io: %s [%d]:%s(,%llus,%s) %pS\n",
+	dynamic_drbd_dbg(device, "meta_data io: %s [%d]:%s(,%llus,%s) %pS\n",
 	     current->comm, current->pid, __func__,
 	     (unsigned long long)sector, (op == REQ_OP_WRITE) ? "WRITE" : "READ",
 	     (void*)_RET_IP_ );
@@ -437,7 +440,7 @@ static int __al_write_transaction(struct drbd_device *device, struct al_transact
 			ktime_aggregate_delta(device, start_kt, al_mid_kt);
 			if (drbd_md_sync_page_io(device, device->ldev, sector, REQ_OP_WRITE)) {
 				err = -EIO;
-				drbd_chk_io_error(device, 1, DRBD_META_IO_ERROR);
+				drbd_handle_io_error(device, DRBD_META_IO_ERROR);
 			} else {
 				device->al_tr_number++;
 				device->al_writ_cnt++;
@@ -1049,21 +1052,20 @@ static bool lazy_bitmap_update_due(struct drbd_peer_device *peer_device)
 }
 
 static void maybe_schedule_on_disk_bitmap_update(struct drbd_peer_device *peer_device,
-						 bool rs_done)
+						 bool rs_done, bool is_sync_target)
 {
 	if (rs_done) {
-		if (is_sync_target_state(peer_device, NOW))
+		if (is_sync_target)
 			set_bit(RS_DONE, &peer_device->flags);
-			/* and also set RS_PROGRESS below */
 
-		/* Else: rather wait for explicit notification via receive_state,
-		 * to avoid uuids-rotated-too-fast causing full resync
-		 * in next handshake, in case the replication link breaks
-		 * at the most unfortunate time... */
-	} else if (!lazy_bitmap_update_due(peer_device))
-		return;
+		/* If sync source: rather wait for explicit notification via
+		 * receive_state, to avoid uuids-rotated-too-fast causing full
+		 * resync in next handshake, in case the replication link
+		 * breaks at the most unfortunate time... */
+	}
 
-	drbd_peer_device_post_work(peer_device, RS_LAZY_BM_WRITE);
+	if (rs_done || lazy_bitmap_update_due(peer_device))
+		drbd_peer_device_post_work(peer_device, RS_LAZY_BM_WRITE);
 }
 
 
@@ -1110,11 +1112,26 @@ static int update_sync_bits(struct drbd_peer_device *peer_device,
 	}
 	if (count) {
 		if (mode == SET_IN_SYNC) {
-			unsigned long still_to_go = drbd_bm_total_weight(peer_device);
-			bool rs_is_done = (still_to_go <= peer_device->rs_failed);
+			bool is_sync_target, rs_is_done;
+			unsigned long still_to_go;
+
+			is_sync_target = is_sync_target_state(peer_device, NOW);
+			/* Evaluate is_sync_target_state before getting the bm
+			 * total weight. We only want to finish a sync if we
+			 * were in a sync target state and then clear the last
+			 * bits.
+			 *
+			 * Use an explicit read barrier to ensure that the
+			 * state is read before the bitmap is checked. The
+			 * corresponding release is implied when the bitmap is
+			 * unlocked after it is received.
+			 */
+			smp_rmb();
+			still_to_go = drbd_bm_total_weight(peer_device);
+			rs_is_done = (still_to_go <= peer_device->rs_failed);
 			drbd_advance_rs_marks(peer_device, still_to_go);
 			if (cleared || rs_is_done)
-				maybe_schedule_on_disk_bitmap_update(peer_device, rs_is_done);
+				maybe_schedule_on_disk_bitmap_update(peer_device, rs_is_done, is_sync_target);
 		} else if (mode == RECORD_RS_FAILED) {
 			peer_device->rs_failed += count;
 		} else /* if (mode == SET_OUT_OF_SYNC) */ {
