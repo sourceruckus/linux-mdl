@@ -77,6 +77,9 @@
 /* bdev_check_media_change() exists */
 #define HAVE_BDEV_CHECK_MEDIA_CHANGE 1
 
+/* block_device_operations->submit_bio() returns void */
+/* #undef HAVE_BDEV_SUBMIT_BIO_RETURNS_VOID */
+
 /* bdev_whole() is available */
 /* #undef HAVE_BDEV_WHOLE */
 
@@ -104,8 +107,14 @@
 /* bio_set_dev() GPL-only */
 /* #undef HAVE_BIO_SET_DEV_GPL_ONLY */
 
+/* bio_set_dev() is a macro */
+#define HAVE_BIO_SET_DEV_MACRO 1
+
 /* bio_set_op_attrs is available */
 #define HAVE_BIO_SET_OP_ATTRS 1
+
+/* blkdev_get_by_path() handles ERESTARTSYS */
+#define HAVE_BLKDEV_GET_ERESTARTSYS 1
 
 /* blkdev_reread_part() exists */
 /* #undef HAVE_BLKDEV_REREAD_PART */
@@ -291,6 +300,9 @@
 /* Define if you have the iconv() function and it works. */
 /* #undef HAVE_ICONV */
 
+/* Define if compiler supports -Wimplicit-fallthrough */
+#define HAVE_IMPLICIT_FALLTHROUGH 1
+
 /* yes */
 #define HAVE_INODE_LOCK_SHARED 1
 
@@ -345,6 +357,9 @@
 /* iov_iter_revert() is available */
 #define HAVE_IOV_ITER_REVERT 1
 
+/* iov_iter_type() is available */
+#define HAVE_IOV_ITER_TYPE 1
+
 /* iov_iter types are available */
 #define HAVE_IOV_ITER_TYPES 1
 
@@ -362,6 +377,9 @@
 
 /* kernel fpu internal */
 /* #undef HAVE_KERNEL_FPU_INTERNAL */
+
+/* kernel has asm/fpu/xcr.h */
+#define HAVE_KERNEL_FPU_XCR_HEADER 1
 
 /* uncached_acl_sentinel() exists */
 #define HAVE_KERNEL_GET_ACL_HANDLE_CACHE 1
@@ -402,9 +420,6 @@
 /* kvmalloc exists */
 #define HAVE_KVMALLOC 1
 
-/* kernel has large stacks */
-#define HAVE_LARGE_STACKS 1
-
 /* Define if you have [aio] */
 #define HAVE_LIBAIO 1
 
@@ -422,6 +437,9 @@
 
 /* Define if you have [uuid] */
 #define HAVE_LIBUUID 1
+
+/* linux/blk-cgroup.h exists */
+#define HAVE_LINUX_BLK_CGROUP_HEADER 1
 
 /* lseek_execute() is available */
 /* #undef HAVE_LSEEK_EXECUTE */
@@ -455,6 +473,9 @@
 
 /* new_sync_read()/new_sync_write() are available */
 /* #undef HAVE_NEW_SYNC_READ */
+
+/* folio_wait_bit() exists */
+/* #undef HAVE_PAGEMAP_FOLIO_WAIT_BIT */
 
 /* iops->getattr() takes a path */
 #define HAVE_PATH_IOPS_GETATTR 1
@@ -496,7 +517,7 @@
 /* #undef HAVE_PUT_LINK_NAMEIDATA */
 
 /* If available, contains the Python version number currently in use. */
-#define HAVE_PYTHON "3.6"
+/* #undef HAVE_PYTHON */
 
 /* qat is enabled and existed */
 /* #undef HAVE_QAT */
@@ -802,7 +823,7 @@
 /* #undef ZFS_IS_GPL_COMPATIBLE */
 
 /* Define the project alias string. */
-#define ZFS_META_ALIAS "zfs-2.1.1-1"
+#define ZFS_META_ALIAS "zfs-2.1.2-1"
 
 /* Define the project author. */
 #define ZFS_META_AUTHOR "OpenZFS"
@@ -811,7 +832,7 @@
 /* #undef ZFS_META_DATA */
 
 /* Define the maximum compatible kernel version. */
-#define ZFS_META_KVER_MAX "5.14"
+#define ZFS_META_KVER_MAX "5.15"
 
 /* Define the minimum compatible kernel version. */
 #define ZFS_META_KVER_MIN "3.10"
@@ -835,7 +856,7 @@
 #define ZFS_META_RELEASE "1"
 
 /* Define the project version. */
-#define ZFS_META_VERSION "2.1.1"
+#define ZFS_META_VERSION "2.1.2"
 
 /* count is located in percpu_ref.data */
 #define ZFS_PERCPU_REF_COUNT_IN_DATA 1

@@ -83,15 +83,15 @@ modules_install-Linux:
 	$(MAKE) -C /scrap/linux-mdl-5.10 M=`pwd` modules_install \
 		INSTALL_MOD_PATH=$(DESTDIR)$(INSTALL_MOD_PATH) \
 		INSTALL_MOD_DIR=$(INSTALL_MOD_DIR) \
-		KERNELRELEASE=5.10.68-mdl+
+		KERNELRELEASE=5.10.88-mdl+
 	@# Remove extraneous build products when packaging
-	kmoddir=$(DESTDIR)$(INSTALL_MOD_PATH)/lib/modules/5.10.68-mdl+; \
+	kmoddir=$(DESTDIR)$(INSTALL_MOD_PATH)/lib/modules/5.10.88-mdl+; \
 	if [ -n "$(DESTDIR)" ]; then \
 		find $$kmoddir -name 'modules.*' | xargs $(RM); \
 	fi
-	sysmap=$(DESTDIR)$(INSTALL_MOD_PATH)/boot/System.map-5.10.68-mdl+; \
+	sysmap=$(DESTDIR)$(INSTALL_MOD_PATH)/boot/System.map-5.10.88-mdl+; \
 	if [ -f $$sysmap ]; then \
-		depmod -ae -F $$sysmap 5.10.68-mdl+; \
+		depmod -ae -F $$sysmap 5.10.88-mdl+; \
 	fi
 
 modules_install-FreeBSD:
@@ -102,7 +102,7 @@ modules_install: modules_install-Linux
 
 modules_uninstall-Linux:
 	@# Uninstall the kernel modules
-	kmoddir=$(DESTDIR)$(INSTALL_MOD_PATH)/lib/modules/5.10.68-mdl+; \
+	kmoddir=$(DESTDIR)$(INSTALL_MOD_PATH)/lib/modules/5.10.88-mdl+; \
 	for objdir in $(ZFS_MODULES); do \
 		$(RM) -R $$kmoddir/$(INSTALL_MOD_DIR)/$$objdir; \
 	done
@@ -114,7 +114,9 @@ modules_uninstall: modules_uninstall-Linux
 
 cppcheck-Linux:
 	 -j16 --std=c99 --quiet --force --error-exitcode=2 \
-		--inline-suppr --suppress=noValidConfiguration \
+		--inline-suppr \
+		--suppress=unmatchedSuppression \
+		--suppress=noValidConfiguration \
 		--enable=warning,information -D_KERNEL \
 		--include=/scrap/linux-mdl-5.10/include/generated/autoconf.h \
 		--include=../zfs_config.h \
