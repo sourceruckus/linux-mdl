@@ -38,6 +38,9 @@
 /* posix_acl has refcount_t */
 #define HAVE_ACL_REFCOUNT 1
 
+/* add_disk() returns int */
+/* #undef HAVE_ADD_DISK_RET */
+
 /* Define if host toolchain supports AES */
 #define HAVE_AES 1
 
@@ -207,6 +210,9 @@
 /* DECLARE_EVENT_CLASS() is available */
 #define HAVE_DECLARE_EVENT_CLASS 1
 
+/* dequeue_signal() takes 4 arguments */
+/* #undef HAVE_DEQUEUE_SIGNAL_4ARG */
+
 /* lookup_bdev() wants dev_t arg */
 /* #undef HAVE_DEVT_LOOKUP_BDEV */
 
@@ -236,6 +242,12 @@
 
 /* sops->evict_inode() exists */
 #define HAVE_EVICT_INODE 1
+
+/* FALLOC_FL_ZERO_RANGE is defined */
+#define HAVE_FALLOC_FL_ZERO_RANGE 1
+
+/* fault_in_iov_iter_readable() is available */
+/* #undef HAVE_FAULT_IN_IOV_ITER_READABLE */
 
 /* fops->aio_fsync() exists */
 /* #undef HAVE_FILE_AIO_FSYNC */
@@ -380,6 +392,9 @@
 
 /* kernel has asm/fpu/xcr.h */
 #define HAVE_KERNEL_FPU_XCR_HEADER 1
+
+/* kernel fpu and XSAVE internal */
+/* #undef HAVE_KERNEL_FPU_XSAVE_INTERNAL */
 
 /* uncached_acl_sentinel() exists */
 #define HAVE_KERNEL_GET_ACL_HANDLE_CACHE 1
@@ -753,6 +768,15 @@
 /* xattr_handler->set() takes user_namespace */
 /* #undef HAVE_XATTR_SET_USERNS */
 
+/* Define if host toolchain supports XSAVE */
+#define HAVE_XSAVE 1
+
+/* Define if host toolchain supports XSAVEOPT */
+#define HAVE_XSAVEOPT 1
+
+/* Define if host toolchain supports XSAVES */
+#define HAVE_XSAVES 1
+
 /* Define if you have [z] */
 #define HAVE_ZLIB 1
 
@@ -761,6 +785,18 @@
 
 /* kernel exports FPU functions */
 #define KERNEL_EXPORTS_X86_FPU 1
+
+/* whether the chosen libfetch is to be loaded at run-time */
+#define LIBFETCH_DYNAMIC 0
+
+/* libfetch is fetch(3) */
+#define LIBFETCH_IS_FETCH 0
+
+/* libfetch is libcurl */
+#define LIBFETCH_IS_LIBCURL 0
+
+/* soname of chosen libfetch */
+#define LIBFETCH_SONAME ""
 
 /* Define to the sub-directory where libtool stores uninstalled libraries. */
 #define LT_OBJDIR ".libs/"
@@ -774,6 +810,9 @@
 /* struct shrink_control has nid */
 #define SHRINK_CONTROL_HAS_NID 1
 
+/* using complete_and_exit() instead */
+#define SPL_KTHREAD_COMPLETE_AND_EXIT complete_and_exit
+
 /* Defined for legacy compatibility. */
 #define SPL_META_ALIAS ZFS_META_ALIAS
 
@@ -782,6 +821,9 @@
 
 /* Defined for legacy compatibility. */
 #define SPL_META_VERSION ZFS_META_VERSION
+
+/* pde_data() is PDE_DATA() */
+#define SPL_PDE_DATA PDE_DATA
 
 /* True if ZFS is to be compiled for a FreeBSD system */
 /* #undef SYSTEM_FREEBSD */
@@ -823,7 +865,7 @@
 /* #undef ZFS_IS_GPL_COMPATIBLE */
 
 /* Define the project alias string. */
-#define ZFS_META_ALIAS "zfs-2.1.2-1"
+#define ZFS_META_ALIAS "zfs-2.1.4-1"
 
 /* Define the project author. */
 #define ZFS_META_AUTHOR "OpenZFS"
@@ -832,7 +874,7 @@
 /* #undef ZFS_META_DATA */
 
 /* Define the maximum compatible kernel version. */
-#define ZFS_META_KVER_MAX "5.15"
+#define ZFS_META_KVER_MAX "5.17"
 
 /* Define the minimum compatible kernel version. */
 #define ZFS_META_KVER_MIN "3.10"
@@ -856,7 +898,7 @@
 #define ZFS_META_RELEASE "1"
 
 /* Define the project version. */
-#define ZFS_META_VERSION "2.1.2"
+#define ZFS_META_VERSION "2.1.4"
 
 /* count is located in percpu_ref.data */
 #define ZFS_PERCPU_REF_COUNT_IN_DATA 1

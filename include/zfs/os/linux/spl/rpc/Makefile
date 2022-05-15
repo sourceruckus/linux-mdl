@@ -111,6 +111,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/intlmacosx.m4 \
 	$(top_srcdir)/config/kernel-access-ok-type.m4 \
 	$(top_srcdir)/config/kernel-acl.m4 \
+	$(top_srcdir)/config/kernel-add-disk.m4 \
 	$(top_srcdir)/config/kernel-aio-fsync.m4 \
 	$(top_srcdir)/config/kernel-automount.m4 \
 	$(top_srcdir)/config/kernel-bdi.m4 \
@@ -159,6 +160,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-kmem-cache.m4 \
 	$(top_srcdir)/config/kernel-kmem.m4 \
 	$(top_srcdir)/config/kernel-kstrtoul.m4 \
+	$(top_srcdir)/config/kernel-kthread.m4 \
 	$(top_srcdir)/config/kernel-ktime.m4 \
 	$(top_srcdir)/config/kernel-kuid-helpers.m4 \
 	$(top_srcdir)/config/kernel-kuidgid.m4 \
@@ -228,6 +230,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/user-libblkid.m4 \
 	$(top_srcdir)/config/user-libcrypto.m4 \
 	$(top_srcdir)/config/user-libexec.m4 \
+	$(top_srcdir)/config/user-libfetch.m4 \
 	$(top_srcdir)/config/user-libtirpc.m4 \
 	$(top_srcdir)/config/user-libudev.m4 \
 	$(top_srcdir)/config/user-libuuid.m4 \
@@ -404,8 +407,11 @@ INSTALL_SCRIPT = ${INSTALL}
 INSTALL_STRIP_PROGRAM = $(install_sh) -c -s
 INTLLIBS = 
 INTL_MACOSX_LIBS = 
+KERNEL_CC = 
 KERNEL_DEBUG_CFLAGS = 
 KERNEL_DEBUG_CPPFLAGS = -UDEBUG -DNDEBUG
+KERNEL_LD = 
+KERNEL_LLVM = 
 KERNEL_MAKE = 
 LCOV = 
 LD = /usr/bin/ld -m elf_x86_64
@@ -421,6 +427,9 @@ LIBCLOCK_GETTIME =
 LIBCRYPTO_CFLAGS = 
 LIBCRYPTO_LIBS = -lcrypto
 LIBCRYPTO_PC = libcrypto
+LIBFETCH_DYNAMIC = 0
+LIBFETCH_LIBS = 
+LIBFETCH_SONAME = 
 LIBICONV = -liconv
 LIBINTL = 
 LIBOBJS = 
@@ -438,7 +447,7 @@ LIBUUID_PC = uuid
 LINUX = /scrap/linux-mdl-5.10
 LINUX_OBJ = /scrap/linux-mdl-5.10
 LINUX_SYMBOLS = NONE
-LINUX_VERSION = 5.10.88-mdl+
+LINUX_VERSION = 5.10.115-mdl+
 LIPO = 
 LN_S = ln -s
 LTLIBICONV = -liconv
@@ -468,10 +477,10 @@ OTOOL64 =
 PACKAGE = zfs
 PACKAGE_BUGREPORT = 
 PACKAGE_NAME = zfs
-PACKAGE_STRING = zfs 2.1.2
+PACKAGE_STRING = zfs 2.1.4
 PACKAGE_TARNAME = zfs
 PACKAGE_URL = 
-PACKAGE_VERSION = 2.1.2
+PACKAGE_VERSION = 2.1.4
 PATH_SEPARATOR = :
 PKG_CONFIG = /usr/bin/pkg-config
 PKG_CONFIG_LIBDIR = 
@@ -518,7 +527,7 @@ TARGET_CPU = x86_64
 TEST_JOBS = 16
 USE_NLS = yes
 VENDOR = ubuntu
-VERSION = 2.1.2
+VERSION = 2.1.4
 WITH_DEBUG = 
 WITH_INVARIANTS = 
 XGETTEXT = /usr/bin/xgettext
@@ -527,10 +536,10 @@ XGETTEXT_EXTRA_OPTIONS =
 ZFS_CONFIG = all
 ZFS_INIT_SYSTEMD = systemd
 ZFS_INIT_SYSV = init.d
-ZFS_META_ALIAS = zfs-2.1.2-1
+ZFS_META_ALIAS = zfs-2.1.4-1
 ZFS_META_AUTHOR = OpenZFS
 ZFS_META_DATA = 
-ZFS_META_KVER_MAX = 5.15
+ZFS_META_KVER_MAX = 5.17
 ZFS_META_KVER_MIN = 3.10
 ZFS_META_LICENSE = CDDL
 ZFS_META_LT_AGE = 
@@ -538,7 +547,7 @@ ZFS_META_LT_CURRENT =
 ZFS_META_LT_REVISION = 
 ZFS_META_NAME = zfs
 ZFS_META_RELEASE = 1
-ZFS_META_VERSION = 2.1.2
+ZFS_META_VERSION = 2.1.4
 ZFS_MODULE_LOAD = modules-load.d
 ZLIB_CFLAGS = 
 ZLIB_LIBS = -lz

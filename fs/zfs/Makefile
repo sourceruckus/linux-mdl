@@ -1,6 +1,7 @@
 include Kbuild
 
 INSTALL_MOD_DIR ?= extra
+INSTALL_MOD_PATH ?= $(DESTDIR)
 
 SUBDIR_TARGETS = icp lua zstd
 
@@ -50,10 +51,10 @@ endif
 FMAKE = env -u MAKEFLAGS make $(FMAKEFLAGS)
 
 modules-Linux:
-	list='$(SUBDIR_TARGETS)'; for targetdir in $$list; do \
-		$(MAKE) -C $$targetdir; \
-	done
-	$(MAKE) -C /scrap/linux-mdl-5.10 M=`pwd`  CONFIG_ZFS=m modules
+	list='$(SUBDIR_TARGETS)'; for td in $$list; do $(MAKE) -C $$td; done
+	$(MAKE) -C /scrap/linux-mdl-5.10 $(if ,CC=) \
+		$(if ,LD=) $(if ,LLVM=) \
+		M="$$PWD"  CONFIG_ZFS=m modules
 
 modules-FreeBSD:
 	+$(FMAKE)
@@ -66,12 +67,10 @@ modules: modules-Linux
 clean-Linux:
 	@# Only cleanup the kernel build directories when CONFIG_KERNEL
 	@# is defined.  This indicates that kernel modules should be built.
-#	$(MAKE) -C /scrap/linux-mdl-5.10 M=`pwd`  clean
+#	$(MAKE) -C /scrap/linux-mdl-5.10 M="$$PWD"  clean
 
-	if [ -f NONE ]; then $(RM) NONE; fi
-	if [ -f Module.markers ]; then $(RM) Module.markers; fi
-
-	find . -name '*.ur-safe' -type f -print | xargs $(RM)
+	$(RM) NONE Module.markers
+	find . -name '*.ur-safe' -type f -delete
 
 clean-FreeBSD:
 	+$(FMAKE) clean
@@ -80,18 +79,26 @@ clean: clean-Linux
 
 modules_install-Linux:
 	@# Install the kernel modules
-	$(MAKE) -C /scrap/linux-mdl-5.10 M=`pwd` modules_install \
-		INSTALL_MOD_PATH=$(DESTDIR)$(INSTALL_MOD_PATH) \
+	$(MAKE) -C /scrap/linux-mdl-5.10 M="$$PWD" modules_install \
+		INSTALL_MOD_PATH=$(INSTALL_MOD_PATH) \
 		INSTALL_MOD_DIR=$(INSTALL_MOD_DIR) \
-		KERNELRELEASE=5.10.88-mdl+
+		KERNELRELEASE=5.10.115-mdl+
 	@# Remove extraneous build products when packaging
-	kmoddir=$(DESTDIR)$(INSTALL_MOD_PATH)/lib/modules/5.10.88-mdl+; \
+	kmoddir=$(INSTALL_MOD_PATH)/lib/modules/5.10.115-mdl+; \
 	if [ -n "$(DESTDIR)" ]; then \
-		find $$kmoddir -name 'modules.*' | xargs $(RM); \
+		find $$kmoddir -name 'modules.*' -delete; \
 	fi
-	sysmap=$(DESTDIR)$(INSTALL_MOD_PATH)/boot/System.map-5.10.88-mdl+; \
+	@# Debian ships tiny fake System.map files that are
+	@# syntactically valid but just say
+	@# "if you want system.map go install this package"
+	@# Naturally, depmod is less than amused by this.
+	@# So if we find it missing or with one of these present,
+	@# we check for the alternate path for the System.map
+	sysmap=$(INSTALL_MOD_PATH)/boot/System.map-5.10.115-mdl+; \
+	{ [ -f "$$sysmap" ] && [ $$(wc -l < "$$sysmap") -ge 100 ]; } || \
+		sysmap=$(INSTALL_MOD_PATH)/usr/lib/debug/boot/System.map-5.10.115-mdl+; \
 	if [ -f $$sysmap ]; then \
-		depmod -ae -F $$sysmap 5.10.88-mdl+; \
+		depmod -ae -F $$sysmap 5.10.115-mdl+; \
 	fi
 
 modules_install-FreeBSD:
@@ -102,7 +109,7 @@ modules_install: modules_install-Linux
 
 modules_uninstall-Linux:
 	@# Uninstall the kernel modules
-	kmoddir=$(DESTDIR)$(INSTALL_MOD_PATH)/lib/modules/5.10.88-mdl+; \
+	kmoddir=$(INSTALL_MOD_PATH)/lib/modules/5.10.115-mdl+; \
 	for objdir in $(ZFS_MODULES); do \
 		$(RM) -R $$kmoddir/$(INSTALL_MOD_DIR)/$$objdir; \
 	done
