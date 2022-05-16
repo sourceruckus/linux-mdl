@@ -40,6 +40,10 @@
 #ifndef READ_ONCE
 #define READ_ONCE ACCESS_ONCE
 #endif
+/* introduced in v3.19-rc4-1-g43239cbe79fc */
+#ifndef WRITE_ONCE
+#define WRITE_ONCE(x, val) do { *(volatile typeof(x) *)&(x) = (val); } while (0)
+#endif
 
 /* introduced in v4.3-8058-g71baba4b92dc */
 #ifndef __GFP_RECLAIM
@@ -75,6 +79,13 @@
 	for (entry = (typeof(entry))idr_get_next((idp), &(id));		\
 	     entry;							\
 	     ++id, entry = (typeof(entry))idr_get_next((idp), &(id)))
+#endif
+
+/* introduced in v4.17-rc7-25-gead9ad7253f4 */
+#ifndef list_for_each_entry_from_rcu
+#define list_for_each_entry_from_rcu(pos, head, member)			\
+	for (; &(pos)->member != (head);					\
+		pos = list_entry_rcu(pos->member.next, typeof(*(pos)), member))
 #endif
 
 /* introduced in v3.13-rc2-4-g462225ae47d7 */

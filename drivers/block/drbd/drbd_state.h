@@ -40,6 +40,9 @@ enum chg_state_flags {
 	CS_DONT_RETRY    = 1 << 11, /* Disable internal retry. Caller has a retry loop */
 	CS_FORCE_RECALC  = 1 << 13, /* Force re-evaluation of state logic */
 	CS_CLUSTER_WIDE  = 1 << 14, /* Make this a cluster wide state change! */
+	CS_FP_LOCAL_UP_TO_DATE = 1 << 15, /* force promotion by making local disk state up_to_date */
+	CS_FP_OUTDATE_PEERS = 1 << 16, /* force promotion by marking unknown peers as outdated */
+	CS_FS_IGN_OPENERS = 1 << 17, /* force demote, ignore openers */
 };
 
 extern void drbd_resume_al(struct drbd_device *device);
@@ -85,7 +88,7 @@ extern enum drbd_state_rv nested_twopc_request(struct drbd_resource *, int, enum
 extern bool drbd_twopc_between_peer_and_me(struct drbd_connection *connection);
 extern bool cluster_wide_reply_ready(struct drbd_resource *);
 
-extern enum drbd_state_rv change_role(struct drbd_resource *, enum drbd_role, enum chg_state_flags, bool, const char **);
+extern enum drbd_state_rv change_role(struct drbd_resource *, enum drbd_role, enum chg_state_flags, const char **);
 
 extern void __change_io_susp_user(struct drbd_resource *, bool);
 extern enum drbd_state_rv change_io_susp_user(struct drbd_resource *, bool, enum chg_state_flags);

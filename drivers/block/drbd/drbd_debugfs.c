@@ -66,14 +66,15 @@ static void seq_print_request_state(struct seq_file *m, struct drbd_request *req
 	unsigned int s = req->local_rq_state;
 	char sep = ' ';
 	seq_printf(m, "\t0x%08x", s);
-	seq_printf(m, "\tmaster: %s", req->master_bio ? "pending" : "completed");
+	seq_puts(m, "\tmaster:");
+	__seq_print_rq_state_bit(m, req->master_bio, &sep, "pending", "completed");
+	seq_print_rq_state_bit(m, s & RQ_POSTPONED, &sep, "postponed");
+	seq_print_rq_state_bit(m, s & RQ_COMPLETION_SUSP, &sep, "suspended");
 
 	/* RQ_WRITE ignored, already reported */
 	seq_puts(m, "\tlocal:");
-	seq_print_rq_state_bit(m, s & RQ_IN_ACT_LOG, &sep, "in-AL");
-	seq_print_rq_state_bit(m, s & RQ_POSTPONED, &sep, "postponed");
-	seq_print_rq_state_bit(m, s & RQ_COMPLETION_SUSP, &sep, "suspended");
 	sep = ' ';
+	seq_print_rq_state_bit(m, s & RQ_IN_ACT_LOG, &sep, "in-AL");
 	seq_print_rq_state_bit(m, s & RQ_LOCAL_PENDING, &sep, "pending");
 	seq_print_rq_state_bit(m, s & RQ_LOCAL_COMPLETED, &sep, "completed");
 	seq_print_rq_state_bit(m, s & RQ_LOCAL_ABORTED, &sep, "aborted");
@@ -832,11 +833,8 @@ static int connection_debug_show(struct seq_file *m, void *ignored)
 	pretty_print_bit(TWOPC_NO);
 	pretty_print_bit(TWOPC_RETRY);
 	pretty_print_bit(CONN_DRY_RUN);
-	pretty_print_bit(CREATE_BARRIER);
 	pretty_print_bit(DISCONNECT_EXPECTED);
 	pretty_print_bit(BARRIER_ACK_PENDING);
-	pretty_print_bit(DATA_CORKED);
-	pretty_print_bit(CONTROL_CORKED);
 	pretty_print_bit(C_UNREGISTERED);
 	pretty_print_bit(RECONNECT);
 	pretty_print_bit(CONN_DISCARD_MY_DATA);
@@ -1769,11 +1767,15 @@ static int drbd_compat_show(struct seq_file *m, void *ignored)
 {
 	seq_puts(m, "bio_bi_bdev__no_present\n");
 	seq_puts(m, "blk_alloc_disk__no_present\n");
+	seq_puts(m, "submit_bio__no_returns_void\n");
 	seq_puts(m, "genl_policy__yes_in_ops\n");
+	seq_puts(m, "disk_update_readahead__no_present\n");
+	seq_puts(m, "struct_gendisk__no_has_backing_dev_info\n");
 	seq_puts(m, "set_capacity_and_notify__no_present\n");
 	seq_puts(m, "nla_strscpy__no_present\n");
 	seq_puts(m, "queue_discard_zeroes_data__no_present\n");
 	seq_puts(m, "part_stat_read__no_takes_block_device\n");
+	seq_puts(m, "bdgrab__yes_present\n");
 	seq_puts(m, "gendisk_part0__no_is_block_device\n");
 	seq_puts(m, "bio_max_vecs__no_present\n");
 	return 0;

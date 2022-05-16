@@ -267,8 +267,8 @@ struct drbd_request {
 	 * no serialization required. */
 	struct bio *private_bio;
 
-	/* Fields sector and size are "immutable". Otherwise protected by
-	 * interval_lock. */
+	/* Fields sector and size are "immutable". Other fields protected
+	 * by interval_lock. */
 	struct drbd_interval i;
 
 	/* epoch: used to check on "completion" whether this req was in
@@ -532,15 +532,12 @@ enum {
 
 /* flag bits per device */
 enum device_flag {
-	UNPLUG_QUEUED,		/* only relevant with kernel 2.4 */
-	UNPLUG_REMOTE,		/* sending a "UnplugRemote" could help */
 	MD_DIRTY,		/* current uuids and flags not yet on disk */
 	CRASHED_PRIMARY,	/* This node was a crashed primary.
 				 * Gets cleared when the state.conn
 				 * goes into L_ESTABLISHED state. */
 	MD_NO_FUA,		/* meta data device does not support barriers,
 				   so don't even try */
-	WAS_READ_ERROR,		/* Local disk READ failed, returned IO error */
 	FORCE_DETACH,		/* Force-detach from local disk, aborting any pending local IO */
 	NEW_CUR_UUID,		/* Create new current UUID when thawing IO or issuing local IO */
 	__NEW_CUR_UUID,		/* Set NEW_CUR_UUID as soon as state change visible */
@@ -555,7 +552,6 @@ enum device_flag {
 
         /* to be used in drbd_device_post_work() */
         GO_DISKLESS,            /* tell worker to schedule cleanup before detach */
-        DESTROY_DISK,           /* tell worker to close backing devices and destroy related structures. */
 	MD_SYNC,		/* tell worker to call drbd_md_sync() */
 	MAKE_NEW_CUR_UUID,	/* tell worker to ping peers and eventually write new current uuid */
 
@@ -771,12 +767,9 @@ enum connection_flag {
 	TWOPC_NO,
 	TWOPC_RETRY,
 	CONN_DRY_RUN,		/* Expect disconnect after resync handshake. */
-	CREATE_BARRIER,		/* next P_DATA is preceded by a P_BARRIER */
 	DISCONNECT_EXPECTED,
 	BARRIER_ACK_PENDING,
 	CORKED,
-	DATA_CORKED = CORKED,
-	CONTROL_CORKED,
 	C_UNREGISTERED,
 	RECONNECT,
 	CONN_DISCARD_MY_DATA,
@@ -932,6 +925,8 @@ struct drbd_resource {
 	bool susp_user[2];			/* IO suspended by user */
 	bool susp_nod[2];		/* IO suspended because no data */
 	bool susp_quorum[2];		/* IO suspended because no quorum */
+	bool susp_uuid[2];		/* IO suspended because waiting new current UUID */
+	bool fail_io[2];		/* Fail all IO requests because forced a demote */
 	bool cached_susp;		/* cached result of looking at all different suspend bits */
 	bool cached_all_devices_have_quorum;
 
@@ -958,7 +953,6 @@ struct drbd_resource {
 	unsigned int w_cb_nr; /* keeps counting up */
 	struct drbd_thread_timing_details w_timing_details[DRBD_THREAD_DETAILS_HIST];
 	wait_queue_head_t barrier_wait;  /* upon each state change. */
-	u64 peers_at_quorum_loss;
 	struct rcu_head rcu;
 
 	/* drbd's page pool, used to buffer data received from the peer, or
@@ -980,7 +974,8 @@ struct drbd_resource {
 	 * Note: This is a single linked list, the next pointer is the private
 	 *       member of struct page. */
 	struct page *pp_pool;
-	atomic_t pp_vacant;
+	spinlock_t pp_lock;
+	int pp_vacant;
 	wait_queue_head_t pp_wait;
 };
 
@@ -1102,15 +1097,10 @@ struct drbd_connection {
 		 * need to walk the full transfer_log list every time, even if
 		 * the list is kept long by some slow connections.
 		 *
-		 * There is also a special value to reliably re-start
-		 * the transfer log walk after having scheduled the requests
-		 * for RESEND.
-		 *
 		 * req_next is only accessed by drbd_sender thread, in
 		 * case of a resend from some worker, but then regular IO
 		 * is suspended.
 		 */
-#define TL_NEXT_REQUEST_RESEND	((void*)1)
 		struct drbd_request *req_next;
 	} todo;
 
@@ -1118,6 +1108,8 @@ struct drbd_connection {
 	 * so we can look up the oldest pending requests more quickly.
 	 * TODO: RCU */
 	struct drbd_request *req_ack_pending;
+	/* The oldest request that is or was queued for this peer, but is not
+	 * done towards it. */
 	struct drbd_request *req_not_net_done;
 
 	unsigned int s_cb_nr; /* keeps counting up */
@@ -1141,8 +1133,11 @@ struct drbd_connection {
 		 * If none, no P_BARRIER will be sent. */
 		unsigned current_epoch_writes;
 
-		/* position in change stream */
+		/* Position in change stream of last write sent. */
 		u64 current_dagtag_sector;
+
+		/* Position in change stream of last request seen. */
+		u64 seen_dagtag_sector;
 	} send;
 
 	struct {
@@ -1212,7 +1207,7 @@ struct drbd_peer_device {
 	unsigned long last_resync_next_bit; /* value of resync_next_bit before last set of resync requests */
 	struct mutex resync_next_bit_mutex;
 
-	atomic_t ap_pending_cnt; /* AP data packets on the wire, ack expected */
+	atomic_t ap_pending_cnt; /* AP data packets on the wire, ack expected (RQ_NET_PENDING set) */
 	atomic_t unacked_cnt;	 /* Need to send replies for */
 	atomic_t rs_pending_cnt; /* RS request/data packets on the wire */
 
@@ -1348,6 +1343,9 @@ struct drbd_device {
 
 	/* configured by drbdsetup */
 	struct drbd_backing_dev *ldev __protected_by(local);
+
+	/* Used to close backing devices and destroy related structures. */
+	struct work_struct ldev_destroy_work;
 
 	struct request_queue *rq_queue;
 	struct gendisk	    *vdisk;
@@ -1876,7 +1874,6 @@ extern void drbd_destroy_connection(struct kref *kref);
 extern void conn_free_crypto(struct drbd_connection *connection);
 
 /* drbd_req */
-extern void drbd_wake_all_senders(struct drbd_resource *resource);
 extern void do_submit(struct work_struct *ws);
 #ifndef CONFIG_DRBD_TIMING_STATS
 #define __drbd_make_request(d,b,k,j) __drbd_make_request(d,b,j)
@@ -1923,6 +1920,7 @@ drbd_determine_dev_size(struct drbd_device *, sector_t peer_current_size,
 extern void resync_after_online_grow(struct drbd_peer_device *);
 extern void drbd_reconsider_queue_parameters(struct drbd_device *device,
 			struct drbd_backing_dev *bdev, struct o_qlim *o);
+extern bool barrier_pending(struct drbd_resource *resource);
 extern enum drbd_state_rv drbd_set_role(struct drbd_resource *, enum drbd_role, bool, struct sk_buff *);
 extern bool conn_try_outdate_peer(struct drbd_connection *connection);
 extern void conn_try_outdate_peer_async(struct drbd_connection *connection);
@@ -1951,6 +1949,7 @@ extern void drbd_ov_out_of_sync_found(struct drbd_peer_device *, sector_t, int);
 extern void wait_until_done_or_force_detached(struct drbd_device *device,
 		struct drbd_backing_dev *bdev, unsigned int *done);
 extern void drbd_rs_controller_reset(struct drbd_peer_device *);
+extern void drbd_rs_all_in_flight_came_back(struct drbd_peer_device *, int);
 extern void drbd_check_peers(struct drbd_resource *resource);
 extern void drbd_check_peers_new_current_uuid(struct drbd_device *);
 extern void drbd_ping_peer(struct drbd_connection *connection);
@@ -2340,7 +2339,6 @@ extern int drbd_send_command(struct drbd_peer_device *, enum drbd_packet, enum d
 
 extern int drbd_send_ping(struct drbd_connection *connection);
 extern int drbd_send_ping_ack(struct drbd_connection *connection);
-extern int conn_send_state_req(struct drbd_connection *, int vnr, enum drbd_packet, union drbd_state, union drbd_state);
 extern int conn_send_twopc_request(struct drbd_connection *, int vnr, enum drbd_packet, struct p_twopc_request *);
 extern int drbd_send_peer_ack(struct drbd_connection *, struct drbd_peer_ack *);
 
@@ -2359,29 +2357,6 @@ static inline void drbd_thread_restart_nowait(struct drbd_thread *thi)
 	_drbd_thread_stop(thi, true, false);
 }
 
-/* counts how many answer packets packets we expect from our peer,
- * for either explicit application requests,
- * or implicit barrier packets as necessary.
- * increased:
- *  w_send_barrier
- *  _req_mod(req, QUEUE_FOR_NET_WRITE or QUEUE_FOR_NET_READ);
- *    it is much easier and equally valid to count what we queue for the
- *    sender, even before it actually was queued or sent.
- *    (drbd_make_request_common; recovery path on read io-error)
- * decreased:
- *  got_BarrierAck (respective tl_clear, tl_clear_barrier)
- *  _req_mod(req, DATA_RECEIVED)
- *     [from receive_DataReply]
- *  _req_mod(req, WRITE_ACKED_BY_PEER or RECV_ACKED_BY_PEER or NEG_ACKED)
- *     [from got_BlockAck (P_WRITE_ACK, P_RECV_ACK)]
- *     FIXME
- *     for some reason it is NOT decreased in got_NegAck,
- *     but in the resulting cleanup code from report_params.
- *     we should try to remember the reason for that...
- *  _req_mod(req, SEND_FAILED or SEND_CANCELED)
- *  _req_mod(req, CONNECTION_LOST_WHILE_PENDING)
- *     [from tl_clear_barrier]
- */
 static inline void inc_ap_pending(struct drbd_peer_device *peer_device)
 {
 	atomic_inc(&peer_device->ap_pending_cnt);
@@ -2519,9 +2494,11 @@ static inline void put_ldev(struct drbd_device *device)
 	__release(local);
 	D_ASSERT(device, i >= 0);
 	if (i == 0) {
-		if (disk_state == D_DISKLESS)
+		if (disk_state == D_DISKLESS) {
 			/* even internal references gone, safe to destroy */
-			drbd_device_post_work(device, DESTROY_DISK);
+			kref_get(&device->kref);
+			schedule_work(&device->ldev_destroy_work);
+		}
 		if (disk_state == D_FAILED || disk_state == D_DETACHING)
 			/* all application IO references gone. */
 			if (!test_and_set_bit(GOING_DISKLESS, &device->flags))
@@ -2559,21 +2536,14 @@ static inline void dec_ap_bio(struct drbd_device *device, int rw)
 
 	D_ASSERT(device, ap_bio >= 0);
 
-	if (ap_bio == 0 && rw == WRITE) {
-		/* Check for list_empty outside the lock is ok.  Worst case it queues
-		 * nothing because someone else just now did.  During list_add, a
-		 * refcount on ap_bio_cnt[WRITE] is held, so the bitmap work will be
-		 * queued when that is released if we miss it here.
-		 * Checking pending_bitmap_work.n is not correct,
-		 * it has a different lifetime. */
-		if (!list_empty(&device->pending_bitmap_work.q))
-			drbd_queue_pending_bitmap_work(device);
-
-		/* Barrier may not have been sent because of active application
-		 * writes belonging to unknown epochs. Wake senders now to
-		 * give them a chance to send the barrier. */
-		drbd_wake_all_senders(device->resource);
-	}
+	/* Check for list_empty outside the lock is ok.  Worst case it queues
+	 * nothing because someone else just now did.  During list_add, a
+	 * refcount on ap_bio_cnt[WRITE] is held, so the bitmap work will be
+	 * queued when that is released if we miss it here.
+	 * Checking pending_bitmap_work.n is not correct,
+	 * it has a different lifetime. */
+	if (ap_bio == 0 && rw == WRITE && !list_empty(&device->pending_bitmap_work.q))
+		drbd_queue_pending_bitmap_work(device);
 
 	if (ap_bio == 0 || ap_bio == nr_requests-1)
 		wake_up(&device->misc_wait);
@@ -2586,6 +2556,8 @@ static inline bool drbd_suspended(struct drbd_device *device)
 
 static inline bool may_inc_ap_bio(struct drbd_device *device)
 {
+	if (device->cached_err_io)
+		return true;
 	if (drbd_suspended(device))
 		return false;
 	if (atomic_read(&device->suspend_cnt))
