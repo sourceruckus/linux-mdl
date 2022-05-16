@@ -792,11 +792,6 @@ bool conn_try_outdate_peer(struct drbd_connection *connection)
 	    !(disk_state == D_DISKLESS && intentional_diskless(resource))) {
 		begin_state_change_locked(resource, CS_VERBOSE | CS_HARD);
 		__change_io_susp_fencing(connection, false);
-		/* We are no longer suspended due to the fencing policy.
-		 * We may still be suspended due to the on-no-data-accessible policy.
-		 * If that was OND_IO_ERROR, fail pending requests. */
-		if (!resource_is_suspended(resource, NOW))
-			_tl_walk(connection, CONNECTION_LOST_WHILE_PENDING);
 		end_state_change_locked(resource);
 		read_unlock_irq(&resource->state_rwlock);
 		return false;
@@ -907,7 +902,7 @@ void conn_try_outdate_peer_async(struct drbd_connection *connection)
 	}
 }
 
-static bool barrier_pending(struct drbd_resource *resource)
+bool barrier_pending(struct drbd_resource *resource)
 {
 	struct drbd_connection *connection;
 	bool rv = false;
@@ -922,27 +917,6 @@ static bool barrier_pending(struct drbd_resource *resource)
 	rcu_read_unlock();
 
 	return rv;
-}
-
-static void wait_for_peer_disk_updates(struct drbd_resource *resource)
-{
-	struct drbd_peer_device *peer_device;
-	struct drbd_device *device;
-	int vnr;
-
-restart:
-	rcu_read_lock();
-	idr_for_each_entry(&resource->devices, device, vnr) {
-		for_each_peer_device_rcu(peer_device, device) {
-			if (test_bit(GOT_NEG_ACK, &peer_device->flags)) {
-				clear_bit(GOT_NEG_ACK, &peer_device->flags);
-				rcu_read_unlock();
-				wait_event(resource->state_wait, peer_device->disk_state[NOW] < D_UP_TO_DATE);
-				goto restart;
-			}
-		}
-	}
-	rcu_read_unlock();
 }
 
 static int count_up_to_date(struct drbd_resource *resource)
@@ -1015,58 +989,25 @@ static bool wait_up_to_date(struct drbd_resource *resource)
 	return up_to_date > initial_up_to_date;
 }
 
-
 enum drbd_state_rv
 drbd_set_role(struct drbd_resource *resource, enum drbd_role role, bool force, struct sk_buff *reply_skb)
 {
 	struct drbd_device *device;
-	int vnr, try = 0, forced = 0;
+	int vnr, try = 0;
 	const int max_tries = 4;
 	enum drbd_state_rv rv = SS_UNKNOWN_ERROR;
 	bool retried_ss_two_primaries = false;
-	bool with_force = false;
 	const char *err_str = NULL;
 	enum chg_state_flags flags = CS_ALREADY_SERIALIZED | CS_DONT_RETRY | CS_WAIT_COMPLETE;
-	struct block_device *bdev = NULL;
+	bool fenced_peers = false;
 
 retry:
 
 	if (role == R_PRIMARY) {
 		drbd_check_peers(resource);
 		wait_up_to_date(resource);
-		down(&resource->state_sem);
-	} else /* (role == R_SECONDARY) */ {
-		down(&resource->state_sem);
-		idr_for_each_entry(&resource->devices, device, vnr) {
-			bdev = device->vdisk->part0;
-			if (bdev)
-				fsync_bdev(bdev);
-			flush_workqueue(device->submit.wq);
-		}
-
-		if (start_new_tl_epoch(resource)) {
-			struct drbd_connection *connection;
-			u64 im;
-
-			for_each_connection_ref(connection, im, resource)
-				drbd_flush_workqueue(&connection->sender_work);
-		}
-		wait_event(resource->barrier_wait, !barrier_pending(resource));
-		/* After waiting for pending barriers, we got any possible NEG_ACKs,
-		   and see them in wait_for_peer_disk_updates() */
-		wait_for_peer_disk_updates(resource);
-
-		/* In case switching from R_PRIMARY to R_SECONDARY works
-		   out, there is no rw opener at this point. Thus, no new
-		   writes can come in. -> Flushing queued peer acks is
-		   necessary and sufficient.
-		   The cluster wide role change required packets to be
-		   received by the sender. -> We can be sure that the
-		   peer_acks queued on a sender's TODO list go out before
-		   we send the two phase commit packet.
-		*/
-		drbd_flush_peer_acks(resource);
 	}
+	down(&resource->state_sem);
 
 	while (try++ < max_tries) {
 		if (try == max_tries - 1)
@@ -1077,7 +1018,7 @@ retry:
 			err_str = NULL;
 		}
 		rv = stable_state_change(resource,
-			change_role(resource, role, flags, with_force, &err_str));
+			change_role(resource, role, flags, &err_str));
 
 		if (rv == SS_CONCURRENT_ST_CHG)
 			continue;
@@ -1093,14 +1034,19 @@ retry:
 		}
 		/* in case we first succeeded to outdate,
 		 * but now suddenly could establish a connection */
-		if (rv == SS_CW_FAILED_BY_PEER) {
-			with_force = false;
+		if (rv == SS_CW_FAILED_BY_PEER && fenced_peers) {
+			flags &= ~CS_FP_LOCAL_UP_TO_DATE;
 			continue;
 		}
 
-		if (rv == SS_NO_UP_TO_DATE_DISK && force && !with_force) {
-			with_force = true;
-			forced = 1;
+		if (rv == SS_NO_UP_TO_DATE_DISK && force && !(flags & CS_FP_LOCAL_UP_TO_DATE)) {
+			flags |= CS_FP_LOCAL_UP_TO_DATE;
+			continue;
+		}
+
+		if (rv == SS_DEVICE_IN_USE && force && !(flags & CS_FS_IGN_OPENERS)) {
+			drbd_warn(resource, "forced demotion\n");
+			flags |= CS_FS_IGN_OPENERS; /* this sets resource->fail_io[NOW] */
 			continue;
 		}
 
@@ -1117,10 +1063,11 @@ retry:
 			/* fall through into possible fence-peer or even force cases */
 		}
 
-		if (rv == SS_NO_UP_TO_DATE_DISK && !with_force) {
+		if (rv == SS_NO_UP_TO_DATE_DISK && !(flags & CS_FP_LOCAL_UP_TO_DATE)) {
 			struct drbd_connection *connection;
 			u64 im;
 
+			fenced_peers = true;
 			up(&resource->state_sem); /* Allow connect while fencing */
 			for_each_connection_ref(connection, im, resource) {
 				struct drbd_peer_device *peer_device;
@@ -1135,18 +1082,33 @@ retry:
 					if (device->disk_state[NOW] != D_CONSISTENT)
 						continue;
 
-					if (conn_try_outdate_peer(connection))
-						with_force = true;
+					if (!conn_try_outdate_peer(connection))
+						fenced_peers = false;
 				}
 			}
 			down(&resource->state_sem);
-			if (with_force)
+			if (fenced_peers) {
+				flags |= CS_FP_LOCAL_UP_TO_DATE;
 				continue;
+			}
+		}
+
+		/* In case the disk is Consistent and fencing is enabled, and fencing did not work
+		 * but the user forces promote..., try it pretending we fenced the peers */
+		if (rv == SS_PRIMARY_NOP && force &&
+		    (flags & CS_FP_LOCAL_UP_TO_DATE) && !(flags & CS_FP_OUTDATE_PEERS)) {
+			flags |= CS_FP_OUTDATE_PEERS;
+			continue;
+		}
+
+		if (rv == SS_NO_QUORUM && force && !(flags & CS_FP_OUTDATE_PEERS)) {
+			flags |= CS_FP_OUTDATE_PEERS;
+			continue;
 		}
 
 		if (rv == SS_NOTHING_TO_DO)
 			goto out;
-		if (rv == SS_PRIMARY_NOP && !with_force) {
+		if (rv == SS_PRIMARY_NOP && !(flags & CS_FP_LOCAL_UP_TO_DATE)) {
 			struct drbd_connection *connection;
 			u64 im;
 
@@ -1154,11 +1116,11 @@ retry:
 			for_each_connection_ref(connection, im, resource) {
 				if (!conn_try_outdate_peer(connection) && force) {
 					drbd_warn(connection, "Forced into split brain situation!\n");
-					with_force = true;
+					flags |= CS_FP_LOCAL_UP_TO_DATE;
 				}
 			}
 			down(&resource->state_sem);
-			if (with_force)
+			if (flags & CS_FP_LOCAL_UP_TO_DATE)
 				continue;
 		}
 
@@ -1202,8 +1164,12 @@ retry:
 	if (rv < SS_SUCCESS)
 		goto out;
 
-	if (forced)
-		drbd_warn(resource, "Forced to consider local data as UpToDate!\n");
+	if (force) {
+		if (flags & CS_FP_LOCAL_UP_TO_DATE)
+			drbd_warn(resource, "Forced to consider local data as UpToDate!\n");
+		if (flags & CS_FP_OUTDATE_PEERS)
+			drbd_warn(resource, "Forced to consider peers as Outdated!\n");
+	}
 
 	if (role == R_SECONDARY) {
 		idr_for_each_entry(&resource->devices, device, vnr) {
@@ -1221,7 +1187,7 @@ retry:
 		rcu_read_unlock();
 
 		idr_for_each_entry(&resource->devices, device, vnr) {
-			if (forced) {
+			if (flags & CS_FP_LOCAL_UP_TO_DATE) {
 				drbd_uuid_new_current(device, true);
 				clear_bit(NEW_CUR_UUID, &device->flags);
 			}
@@ -1238,7 +1204,7 @@ retry:
 
 			if (peer_device->connection->cstate[NOW] == C_CONNECTED) {
 				/* if this was forced, we should consider sync */
-				if (forced) {
+				if (flags & CS_FP_LOCAL_UP_TO_DATE) {
 					drbd_send_uuids(peer_device, 0, 0);
 					set_bit(CONSIDER_RESYNC, &peer_device->flags);
 				}
@@ -1320,8 +1286,9 @@ int drbd_adm_set_role(struct sk_buff *skb, struct genl_info *info)
 {
 	struct drbd_config_context adm_ctx;
 	struct set_role_parms parms;
-	int err;
 	enum drbd_state_rv retcode;
+	enum drbd_role new_role;
+	int err;
 
 	retcode = drbd_adm_prepare(&adm_ctx, skb, info, DRBD_ADM_NEED_RESOURCE);
 	if (!adm_ctx.reply_skb)
@@ -1338,14 +1305,15 @@ int drbd_adm_set_role(struct sk_buff *skb, struct genl_info *info)
 	}
 	mutex_lock(&adm_ctx.resource->adm_mutex);
 
-	if (info->genlhdr->cmd == DRBD_ADM_PRIMARY) {
-		retcode = (enum drbd_ret_code)drbd_set_role(adm_ctx.resource,
-				R_PRIMARY, parms.assume_uptodate, adm_ctx.reply_skb);
+	new_role = info->genlhdr->cmd == DRBD_ADM_PRIMARY ? R_PRIMARY : R_SECONDARY;
+	retcode = (enum drbd_ret_code) drbd_set_role(adm_ctx.resource,
+				new_role,
+				parms.force, adm_ctx.reply_skb);
+
+	if (new_role == R_PRIMARY) {
 		if (retcode >= SS_SUCCESS)
 			set_bit(EXPLICIT_PRIMARY, &adm_ctx.resource->flags);
 	} else {
-		retcode = (enum drbd_ret_code)drbd_set_role(adm_ctx.resource,
-				R_SECONDARY, false, adm_ctx.reply_skb);
 		if (retcode >= SS_SUCCESS)
 			clear_bit(EXPLICIT_PRIMARY, &adm_ctx.resource->flags);
 		else
@@ -1755,9 +1723,6 @@ static bool get_max_agreeable_size(struct drbd_device *device, uint64_t *max) __
 			dynamic_drbd_dbg(device, "my node_id: %u\n", node_id);
 			continue; /* skip myself... */
 		}
-		/* Have we met this peer node id before? */
-		if (!(peer_md->flags & MDF_HAVE_BITMAP))
-			continue;
 		peer_device = peer_device_by_node_id(device, node_id);
 		if (peer_device) {
 			enum drbd_disk_state pdsk = peer_device->disk_state[NOW];
@@ -1969,6 +1934,7 @@ static unsigned int drbd_max_discard_sectors(struct drbd_resource *resource)
 static void decide_on_discard_support(struct drbd_device *device,
 			struct request_queue *q,
 			struct request_queue *b,
+			struct o_qlim *o,
 			bool discard_zeroes_if_aligned)
 {
 	/* q = drbd device queue (device->rq_queue)
@@ -1980,6 +1946,10 @@ static void decide_on_discard_support(struct drbd_device *device,
 	if (can_do && b && 1/* !queue_discard_zeroes_data(q) */ && !discard_zeroes_if_aligned) {
 		can_do = false;
 		drbd_info(device, "discard_zeroes_data=0 and discard_zeroes_if_aligned=no: disabling discards\n");
+	}
+	if (can_do && !b && !(o && o->discard_enabled && o->discard_zeroes_data)) {
+		can_do = false;
+		drbd_info(device, "disabling discards due to peer capabilities\n");
 	}
 	if (can_do && !(common_connection_features(device->resource) & DRBD_FF_TRIM)) {
 		can_do = false;
@@ -2118,18 +2088,12 @@ static void drbd_setup_queue_param(struct drbd_device *device, struct drbd_backi
 	blk_queue_max_hw_sectors(q, max_hw_sectors);
 	/* This is the workaround for "bio would need to, but cannot, be split" */
 	blk_queue_segment_boundary(q, PAGE_SIZE-1);
-	decide_on_discard_support(device, q, b, discard_zeroes_if_aligned);
+	decide_on_discard_support(device, q, b, o, discard_zeroes_if_aligned);
 	decide_on_write_same_support(device, q, b, o, disable_write_same);
 
 	if (b) {
 		blk_stack_limits(&q->limits, &b->limits, 0);
-		if (q->disk->bdi->ra_pages != b->disk->bdi->ra_pages) {
-			drbd_info(device,
-				  "Adjusting my ra_pages to backing device's (%lu -> %lu)\n",
-				  q->disk->bdi->ra_pages,
-				  b->disk->bdi->ra_pages);
-			q->disk->bdi->ra_pages = b->disk->bdi->ra_pages;
-		}
+		disk_update_readahead(device->vdisk);
 	}
 	fixup_discard_if_not_supported(q);
 	fixup_write_zeroes(device, q);
@@ -2694,19 +2658,6 @@ static int open_backing_devices(struct drbd_device *device,
 	return NO_ERROR;
 }
 
-static void discard_not_wanted_bitmap_uuids(struct drbd_device *device, struct drbd_backing_dev *ldev)
-{
-	struct drbd_peer_md *peer_md = ldev->md.peers;
-	struct drbd_peer_device *peer_device;
-	int node_id;
-
-	for (node_id = 0; node_id < DRBD_NODE_ID_MAX; node_id++) {
-		peer_device = peer_device_by_node_id(device, node_id);
-		if (peer_device && peer_md[node_id].bitmap_uuid && !want_bitmap(peer_device))
-			peer_md[node_id].bitmap_uuid = 0;
-	}
-}
-
 static int check_activity_log_stripe_size(struct drbd_device *device,
 		struct meta_data_on_disk_9 *on_disk,
 		struct drbd_md *in_core)
@@ -3099,7 +3050,6 @@ int drbd_adm_attach(struct sk_buff *skb, struct genl_info *info)
 
 	/* make sure there is no leftover from previous force-detach attempts */
 	clear_bit(FORCE_DETACH, &device->flags);
-	clear_bit(WAS_READ_ERROR, &device->flags);
 
 	/* and no leftover from previously aborted resync or verify, either */
 	for_each_peer_device(peer_device, device) {
@@ -3122,7 +3072,6 @@ int drbd_adm_attach(struct sk_buff *skb, struct genl_info *info)
 	if (retcode != NO_ERROR)
 		goto fail;
 
-	discard_not_wanted_bitmap_uuids(device, nbc);
 	sanitize_disk_conf(device, new_disk_conf, nbc);
 
 	backing_disk_max_sectors = drbd_get_max_capacity(device, nbc, true);
@@ -5378,26 +5327,6 @@ int drbd_adm_resume_io(struct sk_buff *skb, struct genl_info *info)
 
 	__change_io_susp_quorum(resource, false);
 	retcode = end_state_change(resource, &irq_flags);
-	if (retcode == SS_SUCCESS) {
-		struct drbd_peer_device *peer_device;
-
-		/* All the tl_walk() below should probably be moved
-		 * to an "after state change work"? */
-		read_lock_irq(&resource->state_rwlock);
-		__tl_walk(resource, NULL, COMPLETION_RESUMED);
-
-		for_each_peer_device(peer_device, device) {
-			struct drbd_connection *connection = peer_device->connection;
-
-			if (peer_device->repl_state[NOW] < L_ESTABLISHED)
-				tl_walk(connection, CONNECTION_LOST_WHILE_PENDING);
-			if (device->disk_state[NOW] == D_DISKLESS ||
-			    device->disk_state[NOW] == D_FAILED ||
-			    device->disk_state[NOW] == D_DETACHING)
-				tl_walk(connection, FAIL_FROZEN_DISK_IO);
-		}
-		read_unlock_irq(&resource->state_rwlock);
-	}
 	drbd_resume_io(device);
 	mutex_unlock(&adm_ctx.resource->adm_mutex);
 	drbd_adm_finish(&adm_ctx, info, retcode);
@@ -5545,7 +5474,6 @@ static void device_to_statistics(struct device_statistics *s,
 	if (get_ldev(device)) {
 		struct drbd_md *md = &device->ldev->md;
 		u64 *history_uuids = (u64 *)s->history_uuids;
-		struct request_queue *q;
 		int n;
 
 		spin_lock_irq(&md->uuid_lock);
@@ -5557,9 +5485,8 @@ static void device_to_statistics(struct device_statistics *s,
 		spin_unlock_irq(&md->uuid_lock);
 
 		s->dev_disk_flags = md->flags;
-		q = bdev_get_queue(device->ldev->backing_bdev);
 		s->dev_lower_blocked =
-			bdi_congested(q->disk->bdi,
+			bdi_congested(device->ldev->backing_bdev->bd_disk->bdi,
 				      (1 << WB_async_congested) |
 				      (1 << WB_sync_congested));
 		put_ldev(device);
@@ -6252,6 +6179,7 @@ static void resource_to_info(struct resource_info *info,
 	info->res_susp_nod = resource->susp_nod[NOW];
 	info->res_susp_fen = is_suspended_fen(resource, NOW);
 	info->res_susp_quorum = resource->susp_quorum[NOW];
+	info->res_fail_io = resource->fail_io[NOW];
 }
 
 int drbd_adm_new_resource(struct sk_buff *skb, struct genl_info *info)
@@ -6413,8 +6341,8 @@ static enum drbd_ret_code adm_del_minor(struct drbd_device *device)
 		stable_change_repl_state(peer_device, L_OFF,
 					 CS_VERBOSE | CS_WAIT_COMPLETE);
 
-	/* If the worker still has to find it to call drbd_ldev_destroy(),
-	 * we must not unregister the device yet. */
+	/* If drbd_ldev_destroy() is pending, wait for it to run before
+	 * unregistering the device. */
 	wait_event(device->misc_wait, !test_bit(GOING_DISKLESS, &device->flags));
 	/*
 	 * Flush the resource work queue to make sure that no more events like

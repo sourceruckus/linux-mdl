@@ -64,8 +64,6 @@
  */
 
 enum drbd_req_event {
-	CREATED,
-	TO_BE_SENT,
 	TO_BE_SUBMITTED,
 
 	/* XXX yes, now I am inconsistent...
@@ -87,7 +85,8 @@ enum drbd_req_event {
 	SEND_FAILED,
 	HANDED_OVER_TO_NETWORK,
 	OOS_HANDED_TO_NETWORK,
-	CONNECTION_LOST_WHILE_PENDING,
+	CONNECTION_LOST,
+	CONNECTION_LOST_WHILE_SUSPENDED,
 	RECV_ACKED_BY_PEER,
 	WRITE_ACKED_BY_PEER,
 	WRITE_ACKED_BY_PEER_AND_SIS, /* and set_in_sync */
@@ -104,68 +103,70 @@ enum drbd_req_event {
 
 	ABORT_DISK_IO,
 	RESEND,
-	FAIL_FROZEN_DISK_IO,
+	CANCEL_SUSPENDED_IO,
 	COMPLETION_RESUMED,
 	NOTHING,
 };
 
-/* encoding of request states for now.  we don't actually need that many bits.
- * we don't need to do atomic bit operations either, since most of the time we
- * need to look at the connection state and/or manipulate some lists at the
- * same time, so we should hold the rq_lock anyways.
+/*
+ * Encoding of request states. Modifications are protected by rq_lock. We don't
+ * do atomic bit operations.
  */
 enum drbd_req_state_bits {
-	/* 43210
-	 * 00000: no network possible
-	 * 00001: to be send
-	 * 00011: to be send, on worker queue
-	 * 00101: sent, expecting recv_ack (B) or write_ack (C)
-	 * 11101: sent,
-	 *        recv_ack (B) or implicit "ack" (A),
-	 *        still waiting for the barrier ack.
-	 *        master_bio may already be completed and invalidated.
-	 * 11100: write acked (C),
-	 *        data received (for remote read, any protocol)
-	 *        or finally the barrier ack has arrived (B,A)...
-	 *        request can be freed
-	 * 01100: neg-acked (write, protocol C)
-	 *        or neg-d-acked (read, any protocol)
-	 *        or killed from the transfer log
-	 *        during cleanup after connection loss
-	 *        request can be freed
-	 * 01000: canceled or send failed...
-	 *        request can be freed
+	/*
+	 * Here are the possible combinations of the core net flags pending,
+	 * queued, sent, done, ok.
+	 *
+	 * <none>:
+	 *   No network required, or not yet processed.
+	 * pending:
+	 *   Intended for this peer, but connection lost. If IO is suspended,
+	 *   it will stay in this state until the connection is restored or IO
+	 *   is resumed.
+	 * pending,queued:
+	 *   To be sent, on transfer log to be processed by sender.
+	 * queued:
+	 *   Queued for sending P_OUT_OF_SYNC.
+	 * pending,sent:
+	 *   Sent, expecting P_RECV_ACK (B) or P_WRITE_ACK (C).
+	 * sent,ok:
+	 *   Sent, implicit "ack" (A), P_RECV_ACK (B) or P_WRITE_ACK (C) received.
+	 *   Still waiting for the barrier ack.
+	 *   master_bio may already be completed and invalidated.
+	 * sent,done,ok:
+	 *   Data received (for remote read, any protocol),
+	 *   or finally the barrier ack has arrived.
+	 * sent,done:
+	 *   Received P_NEG_ACK for write (protocol C, or we are SyncSource),
+	 *   or P_NEG_DREPLY for read (any protocol).
+	 *   Or cleaned up after connection loss.
+	 * done:
+	 *   Canceled, send failed, or P_OUT_OF_SYNC sent.
 	 */
 
-	/* if "SENT" is not set, yet, this can still fail or be canceled.
-	 * if "SENT" is set already, we still wait for an Ack packet.
-	 * when cleared, the master_bio may be completed.
-	 * in (B,A) the request object may still linger on the transaction log
-	 * until the corresponding barrier ack comes in */
+	/* Pending some network interaction towards the peer apart from
+	 * barriers or P_OUT_OF_SYNC.
+	 * If "sent" is not yet set, this can still fail or be canceled.
+	 * While set, the master_bio may not be completed. */
 	__RQ_NET_PENDING,
 
-	/* If it is QUEUED, and it is a WRITE, it is also registered in the
-	 * transfer log. Currently we need this flag to avoid conflicts between
-	 * worker canceling the request and tl_clear_barrier killing it from
-	 * transfer log.  We should restructure the code so this conflict does
-	 * no longer occur. */
+	/* Queued for sending but not yet sent. */
 	__RQ_NET_QUEUED,
 
-	/* well, actually only "handed over to the network stack".
-	 *
-	 * TODO can potentially be dropped because of the similar meaning
-	 * of RQ_NET_SENT and ~RQ_NET_QUEUED.
-	 * however it is not exactly the same. before we drop it
-	 * we must ensure that we can tell a request with network part
-	 * from a request without, regardless of what happens to it. */
+	/* Well, actually only "handed over to the network stack". */
 	__RQ_NET_SENT,
 
-	/* when set, the request may be freed (if RQ_NET_QUEUED is clear).
-	 * basically this means the corresponding P_BARRIER_ACK was received */
+	/* When set, the request may be freed, as far as interaction with this
+	 * peer is concerned. Basically this means the corresponding
+	 * P_BARRIER_ACK was received. */
 	__RQ_NET_DONE,
 
-	/* whether or not we know (C) or pretend (B,A) that the write
-	 * was successfully written on the peer.
+	/* Set when the request was successful. That is, the corresponding
+	 * condition is fulfilled:
+	 * - The write was sent (A)
+	 * - Receipt of the write was acknowledged (B)
+	 * - The write was successfully written on the peer (C)
+	 * - Read data was received
 	 */
 	__RQ_NET_OK,
 
@@ -218,7 +219,6 @@ enum drbd_req_state_bits {
 	/* would have been completed,
 	 * but was not, because of drbd_suspended() */
 	__RQ_COMPLETION_SUSP,
-
 };
 #define RQ_NET_PENDING     (1UL << __RQ_NET_PENDING)
 #define RQ_NET_QUEUED      (1UL << __RQ_NET_QUEUED)
@@ -254,18 +254,15 @@ enum drbd_req_state_bits {
 /* these flags go into local_rq_state,
  * orhter flags go into their respective net_rq_state[idx] */
 #define RQ_STATE_0_MASK	\
-	(RQ_LOCAL_MASK	|\
-	 RQ_WRITE	|\
+	(RQ_LOCAL_MASK  |\
+	 RQ_WRITE       |\
 	 RQ_WSAME       |\
-	 RQ_IN_ACT_LOG	|\
-	 RQ_POSTPONED	|\
-	 RQ_UNPLUG	|\
+	 RQ_UNMAP       |\
+	 RQ_ZEROES      |\
+	 RQ_IN_ACT_LOG  |\
+	 RQ_UNPLUG      |\
+	 RQ_POSTPONED   |\
 	 RQ_COMPLETION_SUSP)
-
-/* For waking up the frozen transfer log mod_req() has to return if the request
-   should be counted in the epoch object*/
-#define MR_WRITE       1
-#define MR_READ        2
 
 static inline bool drbd_req_is_write(struct drbd_request *req)
 {
@@ -288,10 +285,10 @@ extern void __req_mod(struct drbd_request *req, enum drbd_req_event what,
 extern void complete_master_bio(struct drbd_device *device,
 		struct bio_and_error *m);
 extern void request_timer_fn(struct timer_list *t);
-extern void tl_walk(struct drbd_connection *connection, enum drbd_req_event what);
-extern void _tl_walk(struct drbd_connection *connection, enum drbd_req_event what);
+extern void tl_walk(struct drbd_connection *connection, struct drbd_request **from_req, enum drbd_req_event what);
 extern void __tl_walk(struct drbd_resource *const resource,
 		struct drbd_connection *const connection,
+		struct drbd_request **from_req,
 		const enum drbd_req_event what);
 extern void drbd_destroy_peer_ack_if_done(struct drbd_peer_ack *peer_ack);
 extern int w_queue_peer_ack(struct drbd_work *w, int cancel);

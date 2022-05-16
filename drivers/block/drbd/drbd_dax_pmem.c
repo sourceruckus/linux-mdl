@@ -59,9 +59,6 @@ int drbd_dax_open(struct drbd_backing_dev *bdev)
 	struct dax_device *dax_dev;
 	int err;
 
-	if (!blk_queue_dax(bdev->md_bdev->bd_disk->queue))
-		return -ENODEV;
-
 	dax_dev = fs_dax_get_by_bdev(bdev->md_bdev);
 	if (!dax_dev)
 		return -ENODEV;
