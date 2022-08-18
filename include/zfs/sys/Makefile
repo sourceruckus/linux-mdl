@@ -123,6 +123,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-clear-inode.m4 \
 	$(top_srcdir)/config/kernel-commit-metadata.m4 \
 	$(top_srcdir)/config/kernel-config-defined.m4 \
+	$(top_srcdir)/config/kernel-copy-from-user-inatomic.m4 \
 	$(top_srcdir)/config/kernel-current-time.m4 \
 	$(top_srcdir)/config/kernel-declare-event-class.m4 \
 	$(top_srcdir)/config/kernel-dentry-operations.m4 \
@@ -141,6 +142,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-generic_fillattr.m4 \
 	$(top_srcdir)/config/kernel-generic_io_acct.m4 \
 	$(top_srcdir)/config/kernel-generic_readlink.m4 \
+	$(top_srcdir)/config/kernel-genhd-flags.m4 \
 	$(top_srcdir)/config/kernel-get-disk-ro.m4 \
 	$(top_srcdir)/config/kernel-get-link.m4 \
 	$(top_srcdir)/config/kernel-global_page_state.m4 \
@@ -176,6 +178,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-percpu.m4 \
 	$(top_srcdir)/config/kernel-proc-operations.m4 \
 	$(top_srcdir)/config/kernel-put-link.m4 \
+	$(top_srcdir)/config/kernel-readpages.m4 \
 	$(top_srcdir)/config/kernel-rename.m4 \
 	$(top_srcdir)/config/kernel-revalidate-disk-size.m4 \
 	$(top_srcdir)/config/kernel-rw.m4 \
@@ -193,6 +196,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-stdarg.m4 \
 	$(top_srcdir)/config/kernel-super-userns.m4 \
 	$(top_srcdir)/config/kernel-symlink.m4 \
+	$(top_srcdir)/config/kernel-sysfs.m4 \
 	$(top_srcdir)/config/kernel-timer.m4 \
 	$(top_srcdir)/config/kernel-tmpfile.m4 \
 	$(top_srcdir)/config/kernel-totalhigh_pages.m4 \
@@ -201,14 +205,17 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-userns-capabilities.m4 \
 	$(top_srcdir)/config/kernel-usleep_range.m4 \
 	$(top_srcdir)/config/kernel-vfs-direct_IO.m4 \
+	$(top_srcdir)/config/kernel-vfs-filemap_dirty_folio.m4 \
 	$(top_srcdir)/config/kernel-vfs-fsync.m4 \
 	$(top_srcdir)/config/kernel-vfs-getattr.m4 \
 	$(top_srcdir)/config/kernel-vfs-iov_iter.m4 \
 	$(top_srcdir)/config/kernel-vfs-iterate.m4 \
+	$(top_srcdir)/config/kernel-vfs-read_folio.m4 \
 	$(top_srcdir)/config/kernel-vfs-rw-iterate.m4 \
 	$(top_srcdir)/config/kernel-vfs-set_page_dirty.m4 \
 	$(top_srcdir)/config/kernel-wait.m4 \
 	$(top_srcdir)/config/kernel-xattr-handler.m4 \
+	$(top_srcdir)/config/kernel-zero_page.m4 \
 	$(top_srcdir)/config/kernel-zlib.m4 \
 	$(top_srcdir)/config/kernel.m4 $(top_srcdir)/config/lib-ld.m4 \
 	$(top_srcdir)/config/lib-link.m4 \
@@ -543,7 +550,7 @@ LIBUUID_PC = uuid
 LINUX = /scrap/linux-mdl-5.10
 LINUX_OBJ = /scrap/linux-mdl-5.10
 LINUX_SYMBOLS = NONE
-LINUX_VERSION = 5.10.115-mdl+
+LINUX_VERSION = 5.10.130-mdl+
 LIPO = 
 LN_S = ln -s
 LTLIBICONV = -liconv
@@ -573,10 +580,10 @@ OTOOL64 =
 PACKAGE = zfs
 PACKAGE_BUGREPORT = 
 PACKAGE_NAME = zfs
-PACKAGE_STRING = zfs 2.1.4
+PACKAGE_STRING = zfs 2.1.5
 PACKAGE_TARNAME = zfs
 PACKAGE_URL = 
-PACKAGE_VERSION = 2.1.4
+PACKAGE_VERSION = 2.1.5
 PATH_SEPARATOR = :
 PKG_CONFIG = /usr/bin/pkg-config
 PKG_CONFIG_LIBDIR = 
@@ -623,7 +630,7 @@ TARGET_CPU = x86_64
 TEST_JOBS = 16
 USE_NLS = yes
 VENDOR = ubuntu
-VERSION = 2.1.4
+VERSION = 2.1.5
 WITH_DEBUG = 
 WITH_INVARIANTS = 
 XGETTEXT = /usr/bin/xgettext
@@ -632,10 +639,10 @@ XGETTEXT_EXTRA_OPTIONS =
 ZFS_CONFIG = all
 ZFS_INIT_SYSTEMD = systemd
 ZFS_INIT_SYSV = init.d
-ZFS_META_ALIAS = zfs-2.1.4-1
+ZFS_META_ALIAS = zfs-2.1.5-1
 ZFS_META_AUTHOR = OpenZFS
 ZFS_META_DATA = 
-ZFS_META_KVER_MAX = 5.17
+ZFS_META_KVER_MAX = 5.18
 ZFS_META_KVER_MIN = 3.10
 ZFS_META_LICENSE = CDDL
 ZFS_META_LT_AGE = 
@@ -643,7 +650,7 @@ ZFS_META_LT_CURRENT =
 ZFS_META_LT_REVISION = 
 ZFS_META_NAME = zfs
 ZFS_META_RELEASE = 1
-ZFS_META_VERSION = 2.1.4
+ZFS_META_VERSION = 2.1.5
 ZFS_MODULE_LOAD = modules-load.d
 ZLIB_CFLAGS = 
 ZLIB_LIBS = -lz

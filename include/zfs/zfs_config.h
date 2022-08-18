@@ -80,11 +80,23 @@
 /* bdev_check_media_change() exists */
 #define HAVE_BDEV_CHECK_MEDIA_CHANGE 1
 
+/* bdev_*_io_acct() available */
+/* #undef HAVE_BDEV_IO_ACCT */
+
+/* bdev_max_discard_sectors() is available */
+/* #undef HAVE_BDEV_MAX_DISCARD_SECTORS */
+
+/* bdev_max_secure_erase_sectors() is available */
+/* #undef HAVE_BDEV_MAX_SECURE_ERASE_SECTORS */
+
 /* block_device_operations->submit_bio() returns void */
 /* #undef HAVE_BDEV_SUBMIT_BIO_RETURNS_VOID */
 
 /* bdev_whole() is available */
 /* #undef HAVE_BDEV_WHOLE */
+
+/* bio_alloc() takes 4 arguments */
+/* #undef HAVE_BIO_ALLOC_4ARG */
 
 /* bio->bi_bdev->bd_disk exists */
 /* #undef HAVE_BIO_BDEV_DISK */
@@ -119,6 +131,12 @@
 /* blkdev_get_by_path() handles ERESTARTSYS */
 #define HAVE_BLKDEV_GET_ERESTARTSYS 1
 
+/* blkdev_issue_discard() is available */
+#define HAVE_BLKDEV_ISSUE_DISCARD 1
+
+/* blkdev_issue_secure_erase() is available */
+/* #undef HAVE_BLKDEV_ISSUE_SECURE_ERASE */
+
 /* blkdev_reread_part() exists */
 /* #undef HAVE_BLKDEV_REREAD_PART */
 
@@ -139,6 +157,9 @@
 
 /* blk queue backing_dev_info is dynamic */
 #define HAVE_BLK_QUEUE_BDI_DYNAMIC 1
+
+/* blk_queue_discard() is available */
+#define HAVE_BLK_QUEUE_DISCARD 1
 
 /* blk_queue_flag_clear() exists */
 #define HAVE_BLK_QUEUE_FLAG_CLEAR 1
@@ -390,6 +411,9 @@
 /* kernel fpu internal */
 /* #undef HAVE_KERNEL_FPU_INTERNAL */
 
+/* kernel has asm/fpu/internal.h */
+#define HAVE_KERNEL_FPU_INTERNAL_HEADER 1
+
 /* kernel has asm/fpu/xcr.h */
 #define HAVE_KERNEL_FPU_XCR_HEADER 1
 
@@ -606,7 +630,7 @@
 /* new shrinker callback wants 2 args */
 /* #undef HAVE_SINGLE_SHRINKER_CALLBACK */
 
-/* ->count_objects exists */
+/* cs->count_objects exists */
 #define HAVE_SPLIT_SHRINKER_CALLBACK 1
 
 /* Define if host toolchain supports SSE */
@@ -660,6 +684,9 @@
 /* super_block->s_user_ns exists */
 #define HAVE_SUPER_USER_NS 1
 
+/* struct kobj_type has default_groups */
+#define HAVE_SYSFS_DEFAULT_GROUPS 1
+
 /* Define to 1 if you have the <sys/stat.h> header file. */
 #define HAVE_SYS_STAT_H 1
 
@@ -705,6 +732,9 @@
 /* aops->direct_IO() uses iov_iter with rw and offset */
 /* #undef HAVE_VFS_DIRECT_IO_ITER_RW_OFFSET */
 
+/* filemap_dirty_folio exists */
+/* #undef HAVE_VFS_FILEMAP_DIRTY_FOLIO */
+
 /* All required iov_iter interfaces are available */
 #define HAVE_VFS_IOV_ITER 1
 
@@ -716,6 +746,12 @@
 
 /* fops->readdir() is available */
 /* #undef HAVE_VFS_READDIR */
+
+/* address_space_operations->readpages exists */
+#define HAVE_VFS_READPAGES 1
+
+/* read_folio exists */
+/* #undef HAVE_VFS_READ_FOLIO */
 
 /* fops->read/write_iter() are available */
 #define HAVE_VFS_RW_ITERATE 1
@@ -776,6 +812,9 @@
 
 /* Define if host toolchain supports XSAVES */
 #define HAVE_XSAVES 1
+
+/* ZERO_PAGE() is GPL-only */
+/* #undef HAVE_ZERO_PAGE_GPL_ONLY */
 
 /* Define if you have [z] */
 #define HAVE_ZLIB 1
@@ -855,6 +894,12 @@
 /* enum zone_stat_item contains NR_INACTIVE_FILE */
 /* #undef ZFS_ENUM_ZONE_STAT_ITEM_NR_INACTIVE_FILE */
 
+/* GENHD_FL_EXT_DEVT flag is not available */
+#define ZFS_GENHD_FL_EXT_DEVT GENHD_FL_EXT_DEVT
+
+/* GENHD_FL_NO_PART_SCAN flag is available */
+#define ZFS_GENHD_FL_NO_PART GENHD_FL_NO_PART_SCAN
+
 /* global_node_page_state() exists */
 #define ZFS_GLOBAL_NODE_PAGE_STATE 1
 
@@ -865,7 +910,7 @@
 /* #undef ZFS_IS_GPL_COMPATIBLE */
 
 /* Define the project alias string. */
-#define ZFS_META_ALIAS "zfs-2.1.4-1"
+#define ZFS_META_ALIAS "zfs-2.1.5-1"
 
 /* Define the project author. */
 #define ZFS_META_AUTHOR "OpenZFS"
@@ -874,7 +919,7 @@
 /* #undef ZFS_META_DATA */
 
 /* Define the maximum compatible kernel version. */
-#define ZFS_META_KVER_MAX "5.17"
+#define ZFS_META_KVER_MAX "5.18"
 
 /* Define the minimum compatible kernel version. */
 #define ZFS_META_KVER_MIN "3.10"
@@ -898,7 +943,7 @@
 #define ZFS_META_RELEASE "1"
 
 /* Define the project version. */
-#define ZFS_META_VERSION "2.1.4"
+#define ZFS_META_VERSION "2.1.5"
 
 /* count is located in percpu_ref.data */
 #define ZFS_PERCPU_REF_COUNT_IN_DATA 1
