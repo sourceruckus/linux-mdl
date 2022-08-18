@@ -152,13 +152,16 @@ void drbd_endio_write_sec_final(struct drbd_peer_request *peer_req) __releases(l
 	block_id = peer_req->block_id;
 
 	if (peer_req->flags & EE_WAS_ERROR) {
-                /* In protocol != C, we usually do not send write acks.
-                 * In case of a write error, send the neg ack anyways. */
-                if (!__test_and_set_bit(__EE_SEND_WRITE_ACK, &peer_req->flags))
-                        inc_unacked(peer_device);
-                drbd_set_out_of_sync(peer_device, peer_req->i.sector, peer_req->i.size);
+		/* In protocol != C, we usually do not send write acks.
+		 * In case of a write error, send the neg ack anyways.
+		 * This only applies to to application writes, not to resync. */
+		if (block_id != ID_SYNCER) {
+			if (!__test_and_set_bit(__EE_SEND_WRITE_ACK, &peer_req->flags))
+				inc_unacked(peer_device);
+		}
+		drbd_set_out_of_sync(peer_device, peer_req->i.sector, peer_req->i.size);
 		drbd_handle_io_error(device, DRBD_WRITE_ERROR);
-        }
+	}
 
 	spin_lock_irqsave(&connection->peer_reqs_lock, flags);
 	device->writ_cnt += peer_req->i.size >> 9;
@@ -1010,6 +1013,7 @@ static int make_ov_request(struct drbd_peer_device *peer_device, int cancel)
 		 * w_e_end_ov_reply().
 		 * We need to send at least one request out. */
 		stop_sector_reached = sector > peer_device->ov_start_sector
+			&& verify_can_do_stop_sector(peer_device)
 			&& sector >= peer_device->ov_stop_sector;
 		if (stop_sector_reached)
 			break;
@@ -1279,23 +1283,33 @@ void drbd_resync_finished(struct drbd_peer_device *peer_device,
 		return;
 	}
 
+	if (!down_write_trylock(&device->uuid_sem)) {
+		if (current == device->resource->worker.task) {
+			queue_resync_finished(peer_device, new_peer_disk_state);
+			return;
+		} else {
+			down_write(&device->uuid_sem);
+		}
+	}
+
 	dt = (jiffies - peer_device->rs_start - peer_device->rs_paused) / HZ;
 	if (dt <= 0)
 		dt = 1;
 	db = peer_device->rs_total;
 	/* adjust for verify start and stop sectors, respective reached position */
 	if (repl_state[NOW] == L_VERIFY_S || repl_state[NOW] == L_VERIFY_T)
-		db -= peer_device->ov_left;
+		db -= atomic64_read(&peer_device->ov_left);
 
 	dbdt = Bit2KB(db/dt);
 	peer_device->rs_paused /= HZ;
 
-	if (!get_ldev(device))
+	if (!get_ldev(device)) {
+		up_write(&device->uuid_sem);
 		goto out;
+	}
 
 	drbd_ping_peer(connection);
 
-	down_write(&device->uuid_sem);
 	write_lock_irq(&device->resource->state_rwlock);
 	begin_state_change_locked(device->resource, CS_VERBOSE);
 	old_repl_state = repl_state[NOW];
@@ -1404,6 +1418,10 @@ void drbd_resync_finished(struct drbd_peer_device *peer_device,
 		} else if (repl_state[NOW] == L_SYNC_SOURCE || repl_state[NOW] == L_PAUSED_SYNC_S) {
 			if (new_peer_disk_state != D_MASK)
 				__change_peer_disk_state(peer_device, new_peer_disk_state);
+			if (peer_device->connection->agreed_pro_version < 110) {
+				drbd_uuid_set_bitmap(peer_device, 0UL);
+				drbd_print_uuids(peer_device, "updated UUIDs");
+			}
 		}
 	}
 
@@ -1429,7 +1447,7 @@ out_unlock:
 
 out:
 	/* reset start sector, if we reached end of device */
-	if (verify_done && peer_device->ov_left == 0)
+	if (verify_done && atomic64_read(&peer_device->ov_left) == 0)
 		peer_device->ov_start_sector = 0;
 
 	drbd_md_sync_if_dirty(device);
@@ -1714,15 +1732,16 @@ void verify_progress(struct drbd_peer_device *peer_device,
 {
 	bool stop_sector_reached =
 		(peer_device->repl_state[NOW] == L_VERIFY_S) &&
+		verify_can_do_stop_sector(peer_device) &&
 		(sector + (size>>9)) >= peer_device->ov_stop_sector;
 
-	--peer_device->ov_left;
+	unsigned long ov_left = atomic64_dec_return(&peer_device->ov_left);
 
 	/* let's advance progress step marks only for every other megabyte */
-	if ((peer_device->ov_left & 0x1ff) == 0)
-		drbd_advance_rs_marks(peer_device, peer_device->ov_left);
+	if ((ov_left & 0x1ff) == 0)
+		drbd_advance_rs_marks(peer_device, ov_left);
 
-	if (peer_device->ov_left == 0 || stop_sector_reached)
+	if (ov_left == 0 || stop_sector_reached)
 		drbd_peer_device_post_work(peer_device, RS_DONE);
 }
 
@@ -2599,9 +2618,12 @@ static struct drbd_request *__next_request_for_connection(
 	list_for_each_entry_rcu(req, &connection->resource->transfer_log, tl_requests) {
 		unsigned s = req->net_rq_state[connection->peer_node_id];
 		connection->send.seen_dagtag_sector = req->dagtag_sector;
-		if (!(s & RQ_NET_QUEUED))
-			continue;
-		return req;
+		if (s & RQ_NET_QUEUED)
+			return req;
+		/* Found a request which is for this peer but not yet queued.
+		 * Do not skip past it. */
+		if (s & RQ_NET_PENDING && !(s & RQ_NET_SENT))
+			return NULL;
 	}
 	return NULL;
 }

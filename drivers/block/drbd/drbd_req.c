@@ -98,7 +98,8 @@ static void queue_peer_ack_send(struct drbd_resource *resource,
 	rcu_read_lock();
 	for_each_connection_rcu(connection, resource) {
 		unsigned int node_id = connection->peer_node_id;
-		if (connection->cstate[NOW] != C_CONNECTED ||
+		if (connection->agreed_pro_version < 110 ||
+				connection->cstate[NOW] != C_CONNECTED ||
 				!(req->net_rq_state[node_id] & RQ_NET_SENT))
 			continue;
 
@@ -215,8 +216,7 @@ void drbd_req_destroy(struct kref *kref)
 	s = req->local_rq_state;
 
 #ifdef CONFIG_DRBD_TIMING_STATS
-	if (s & RQ_WRITE) {
-
+	if (s & RQ_WRITE && req->i.size != 0) {
 		spin_lock(&device->timing_lock); /* local irq already disabled */
 		device->reqs++;
 		ktime_aggregate(device, req, in_actlog_kt);
@@ -606,11 +606,43 @@ static void advance_conn_req_next(struct drbd_connection *connection, struct drb
 			found_req = req;
 			break;
 		}
+		/* Found a request which is for this peer but not yet queued.
+		 * Do not skip past it. */
+		if (s & RQ_NET_PENDING && !(s & RQ_NET_SENT))
+			break;
 	}
 	rcu_read_unlock();
 	connection->todo.req_next = found_req;
 }
 
+/**
+ * set_cache_ptr_if_null() - Set caching pointer to given request if not currently set.
+ * @cache_ptr: Pointer to set.
+ * @req: Request to potentially set the pointer to.
+ *
+ * The caching pointer system is designed to track the oldest request in the
+ * transfer log fulfilling some condition. In particular, a combination of
+ * flags towards a given peer. This condition must guarantee that the request
+ * will not be destroyed.
+ *
+ * This system is implemented by set_cache_ptr_if_null() and
+ * advance_cache_ptr(). A request must be in the transfer log and fulfil the
+ * condition before set_cache_ptr_if_null() is called. If
+ * set_cache_ptr_if_null() is called before this request is in the transfer log
+ * or before it fulfils the condition, the pointer may be advanced past this
+ * request, or unset, which also has the effect of skipping the request.
+ *
+ * Once the condition is no longer fulfilled for a request, advance_cache_ptr()
+ * must be called. If the caching pointer currently points to this request,
+ * this will advance it to the next request fulfilling the condition.
+ *
+ * set_cache_ptr_if_null() may be called concurrently with itself and with
+ * advance_cache_ptr(). However, advance_cache_ptr() must not be called
+ * concurrently for a given caching pointer. If it were, the call for the older
+ * request may advance the pointer to the newer request, although the newer
+ * request has concurrently been modified such that it no longer fulfils the
+ * condition.
+ */
 static void set_cache_ptr_if_null(struct drbd_request **cache_ptr, struct drbd_request *req)
 {
 	struct drbd_request *prev_req, *old_req = NULL;
@@ -626,8 +658,9 @@ static void set_cache_ptr_if_null(struct drbd_request **cache_ptr, struct drbd_r
 	rcu_read_unlock();
 }
 
+/* See set_cache_ptr_if_null(). */
 static void advance_cache_ptr(struct drbd_connection *connection,
-			      struct drbd_request **cache_ptr, struct drbd_request *req,
+			      struct drbd_request __rcu **cache_ptr, struct drbd_request *req,
 			      unsigned int is_set, unsigned int is_clear)
 {
 	struct drbd_request *old_req;
@@ -701,8 +734,7 @@ static void mod_rq_state(struct drbd_request *req, struct bio_and_error *m,
 
 	if (idx != -1) {
 		old_net = req->net_rq_state[idx];
-		req->net_rq_state[idx] &= ~clear;
-		req->net_rq_state[idx] |= set;
+		WRITE_ONCE(req->net_rq_state[idx], (req->net_rq_state[idx] & ~clear) | set);
 		connection = peer_device->connection;
 	}
 
@@ -949,7 +981,7 @@ void __req_mod(struct drbd_request *req, enum drbd_req_event what,
 		mod_rq_state(req, m, peer_device, RQ_LOCAL_PENDING, RQ_LOCAL_COMPLETED);
 		break;
 
-	case QUEUE_FOR_NET_READ:
+	case NEW_NET_READ:
 		/* READ, and
 		 * no local disk,
 		 * or target area marked as invalid,
@@ -967,10 +999,10 @@ void __req_mod(struct drbd_request *req, enum drbd_req_event what,
 
 		D_ASSERT(device, !(req->net_rq_state[idx] & RQ_NET_MASK));
 		D_ASSERT(device, !(req->local_rq_state & RQ_LOCAL_MASK));
-		mod_rq_state(req, m, peer_device, 0, RQ_NET_PENDING|RQ_NET_QUEUED);
+		mod_rq_state(req, m, peer_device, 0, RQ_NET_PENDING);
 		break;
 
-	case QUEUE_FOR_NET_WRITE:
+	case NEW_NET_WRITE:
 		/* assert something? */
 		/* from __drbd_make_request only */
 
@@ -991,7 +1023,7 @@ void __req_mod(struct drbd_request *req, enum drbd_req_event what,
 		D_ASSERT(device, !(req->net_rq_state[idx] & RQ_NET_MASK));
 
 		/* queue work item to send data */
-		mod_rq_state(req, m, peer_device, 0, RQ_NET_PENDING|RQ_NET_QUEUED|RQ_EXP_BARR_ACK|
+		mod_rq_state(req, m, peer_device, 0, RQ_NET_PENDING|RQ_EXP_BARR_ACK|
 				drbd_protocol_state_bits(peer_device->connection));
 
 		/* Close the epoch, in case it outgrew the limit.
@@ -1016,7 +1048,11 @@ void __req_mod(struct drbd_request *req, enum drbd_req_event what,
 			start_new_tl_epoch(device->resource);
 		break;
 
-	case QUEUE_FOR_SEND_OOS:
+	case NEW_NET_OOS:
+		mod_rq_state(req, m, peer_device, 0, RQ_NET_PENDING);
+		break;
+
+	case ADDED_TO_TRANSFER_LOG:
 		mod_rq_state(req, m, peer_device, 0, RQ_NET_QUEUED);
 		break;
 
@@ -1043,9 +1079,9 @@ void __req_mod(struct drbd_request *req, enum drbd_req_event what,
 		break;
 
 	case OOS_HANDED_TO_NETWORK:
-		/* Was not set PENDING, no longer QUEUED, so is now DONE
+		/* No longer PENDING or QUEUED, so is now DONE
 		 * as far as this connection is concerned. */
-		mod_rq_state(req, m, peer_device, RQ_NET_QUEUED, RQ_NET_DONE);
+		mod_rq_state(req, m, peer_device, RQ_NET_PENDING|RQ_NET_QUEUED, RQ_NET_DONE);
 		break;
 
 	case CONNECTION_LOST:
@@ -1309,6 +1345,9 @@ static void __maybe_pull_ahead(struct drbd_device *device, struct drbd_connectio
 
 	lockdep_assert_held(&device->resource->state_rwlock);
 
+	if (connection->agreed_pro_version < 96)
+		return;
+
 	nc = rcu_dereference(connection->transport.net_conf);
 	if (nc) {
 		on_congestion = nc->on_congestion;
@@ -1388,9 +1427,16 @@ bool drbd_should_do_remote(struct drbd_peer_device *peer_device, enum which_stat
 
 static bool drbd_should_send_out_of_sync(struct drbd_peer_device *peer_device)
 {
-	return peer_device->repl_state[NOW] == L_AHEAD || peer_device->repl_state[NOW] == L_WF_BITMAP_S;
-	/* pdsk = D_INCONSISTENT as a consequence. Protocol 96 check not necessary
-	   since we enter state L_AHEAD only if proto >= 96 */
+	enum drbd_disk_state peer_disk_state = peer_device->disk_state[NOW];
+	enum drbd_repl_state repl_state = peer_device->repl_state[NOW];
+
+	return repl_state == L_AHEAD ||
+		repl_state == L_WF_BITMAP_S ||
+		(peer_disk_state == D_OUTDATED && repl_state >= L_ESTABLISHED);
+
+	/* proto 96 check omitted, there was no L_AHEAD back then,
+	 * peer disk was never Outdated while connection was established,
+	 * and IO was frozen during bitmap exchange */
 }
 
 /* Prefer to read from protcol C peers, then B, last A */
@@ -1543,12 +1589,23 @@ static int drbd_process_write_request(struct drbd_request *req)
 
 		if (remote) {
 			++count;
-			_req_mod(req, QUEUE_FOR_NET_WRITE, peer_device);
+			_req_mod(req, NEW_NET_WRITE, peer_device);
 		} else
-			_req_mod(req, QUEUE_FOR_SEND_OOS, peer_device);
+			_req_mod(req, NEW_NET_OOS, peer_device);
 	}
 
 	return count;
+}
+
+static void drbd_queue_request(struct drbd_request *req)
+{
+	struct drbd_device *device = req->device;
+	struct drbd_peer_device *peer_device;
+
+	for_each_peer_device(peer_device, device) {
+		if (req->net_rq_state[peer_device->node_id] & RQ_NET_PENDING)
+			_req_mod(req, ADDED_TO_TRANSFER_LOG, peer_device);
+	}
 }
 
 static void drbd_process_discard_or_zeroes_req(struct drbd_request *req, int flags)
@@ -1884,7 +1941,7 @@ static void drbd_send_and_submit(struct drbd_device *device, struct drbd_request
 				no_remote = true;
 		} else {
 			if (peer_device)
-				_req_mod(req, QUEUE_FOR_NET_READ, peer_device);
+				_req_mod(req, NEW_NET_READ, peer_device);
 			else
 				no_remote = true;
 		}
@@ -1892,6 +1949,11 @@ static void drbd_send_and_submit(struct drbd_device *device, struct drbd_request
 		/* req may now be accessed by other threads - do not modify
 		 * "immutable" fields after this point */
 		list_add_tail_rcu(&req->tl_requests, &resource->transfer_log);
+
+		/* Do this after adding to the transfer log so that the
+		 * caching pointer req_not_net_done is set if
+		 * necessary. */
+		drbd_queue_request(req);
 	}
 	spin_unlock(&resource->tl_update_lock);
 

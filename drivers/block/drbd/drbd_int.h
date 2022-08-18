@@ -28,7 +28,6 @@
 #include <linux/major.h>
 #include <linux/blkdev.h>
 #include <linux/backing-dev.h>
-#include <linux/genhd.h>
 #include <linux/idr.h>
 #include <linux/lru_cache.h>
 #include <linux/prefetch.h>
@@ -717,7 +716,7 @@ struct drbd_backing_dev {
 	struct block_device *backing_bdev;
 	struct block_device *md_bdev;
 	struct drbd_md md;
-	struct disk_conf *disk_conf; /* RCU, for updates: resource->conf_update */
+	struct disk_conf __rcu *disk_conf; /* RCU, for updates: resource->conf_update */
 	sector_t known_size; /* last known size of that backing device */
 #if IS_ENABLED(CONFIG_DEV_DAX_PMEM) && !defined(DAX_PMEM_IS_INCOMPLETE)
 	struct dax_device *dax_dev;
@@ -866,6 +865,7 @@ struct drbd_resource {
 	struct dentry *debugfs_res_connections;
 	struct dentry *debugfs_res_in_flight_summary;
 	struct dentry *debugfs_res_state_twopc;
+	struct dentry *debugfs_res_worker_pid;
 #endif
 	struct kref kref;
 	struct kref_debug_info kref_debug;
@@ -988,6 +988,9 @@ struct drbd_connection {
 	struct dentry *debugfs_conn_oldest_requests;
 	struct dentry *debugfs_conn_transport;
 	struct dentry *debugfs_conn_debug;
+	struct dentry *debugfs_conn_receiver_pid;
+	struct dentry *debugfs_conn_ack_receiver_pid;
+	struct dentry *debugfs_conn_sender_pid;
 #endif
 	struct kref kref;
 	struct kref_debug_info kref_debug;
@@ -1164,7 +1167,7 @@ struct drbd_peer_device {
 	struct list_head peer_devices;
 	struct drbd_device *device;
 	struct drbd_connection *connection;
-	struct peer_device_conf *conf; /* RCU, for updates: resource->conf_update */
+	struct peer_device_conf __rcu *conf; /* RCU, for updates: resource->conf_update */
 	enum drbd_disk_state disk_state[2];
 	enum drbd_repl_state repl_state[2];
 	bool resync_susp_user[2];
@@ -1247,14 +1250,14 @@ struct drbd_peer_device {
 	/* size of skipped range in sectors. */
 	sector_t ov_last_skipped_size;
 	int c_sync_rate; /* current resync rate after syncer throttle magic */
-	struct fifo_buffer *rs_plan_s; /* correction values of resync planer (RCU, connection->conn_update) */
+	struct fifo_buffer __rcu *rs_plan_s; /* correction values of resync planer (RCU, connection->conn_update) */
 	atomic_t rs_sect_in; /* for incoming resync data rate, SyncTarget */
 	int rs_last_sect_ev; /* counter to compare with */
 	int rs_last_events;  /* counter of read or write "events" (unit sectors)
 			      * on the lower level device when we last looked. */
 	int rs_in_flight; /* resync sectors in flight (to proxy, in proxy and from proxy) */
 	ktime_t rs_last_mk_req_kt;
-	unsigned long ov_left; /* in bits */
+	atomic64_t ov_left; /* in bits */
 	unsigned long ov_skipped; /* in bits */
 	u64 rs_start_uuid;
 
@@ -1332,7 +1335,7 @@ struct drbd_device {
 #endif
 #endif
 
-	unsigned int vnr;	/* volume number within the connection */
+	unsigned int vnr;	/* volume number within the resource */
 	unsigned int minor;	/* device minor number */
 
 	struct kref kref;
@@ -1556,6 +1559,7 @@ extern int drbd_send_protocol(struct drbd_connection *connection);
 extern u64 drbd_collect_local_uuid_flags(struct drbd_peer_device *peer_device, u64 *authoritative_mask);
 extern u64 drbd_resolved_uuid(struct drbd_peer_device *peer_device_base, u64 *uuid_flags);
 extern int drbd_send_uuids(struct drbd_peer_device *, u64 uuid_flags, u64 weak_nodes);
+extern void drbd_gen_and_send_sync_uuid(struct drbd_peer_device *);
 extern int drbd_attach_peer_device(struct drbd_peer_device *);
 extern int drbd_send_sizes(struct drbd_peer_device *, uint64_t u_size_diskless, enum dds_flags flags);
 extern int conn_send_state(struct drbd_connection *, union drbd_state);
@@ -1573,6 +1577,8 @@ extern int drbd_send_ov_request(struct drbd_peer_device *, sector_t sector, int 
 
 extern int drbd_send_bitmap(struct drbd_device *, struct drbd_peer_device *);
 extern int drbd_send_dagtag(struct drbd_connection *connection, u64 dagtag);
+extern void drbd_send_sr_reply(struct drbd_connection *connection, int vnr,
+			       enum drbd_state_rv retcode);
 extern int drbd_send_rs_deallocated(struct drbd_peer_device *, struct drbd_peer_request *);
 extern void drbd_send_twopc_reply(struct drbd_connection *connection,
 				  enum drbd_packet, struct twopc_reply *);
@@ -1626,6 +1632,7 @@ extern int drbd_bmio_set_n_write(struct drbd_device *device, struct drbd_peer_de
 extern int drbd_bmio_clear_all_n_write(struct drbd_device *device, struct drbd_peer_device *) __must_hold(local);
 extern int drbd_bmio_set_all_n_write(struct drbd_device *device, struct drbd_peer_device *) __must_hold(local);
 extern int drbd_bmio_set_allocated_n_write(struct drbd_device *,struct drbd_peer_device *) __must_hold(local);
+extern int drbd_bmio_clear_one_peer(struct drbd_device *, struct drbd_peer_device *) __must_hold(local);
 extern bool drbd_device_stable(struct drbd_device *device, u64 *authoritative);
 extern void drbd_flush_peer_acks(struct drbd_resource *resource);
 extern void drbd_cork(struct drbd_connection *connection, enum drbd_stream stream);
@@ -2079,7 +2086,6 @@ extern void drbd_try_to_get_resynced(struct drbd_device *device);
 
 static inline sector_t drbd_get_capacity(struct block_device *bdev)
 {
-	/* return bdev ? get_capacity(bdev->bd_disk) : 0; */
 	return bdev ? i_size_read(bdev->bd_inode) >> 9 : 0;
 }
 
@@ -2339,6 +2345,7 @@ extern int drbd_send_command(struct drbd_peer_device *, enum drbd_packet, enum d
 
 extern int drbd_send_ping(struct drbd_connection *connection);
 extern int drbd_send_ping_ack(struct drbd_connection *connection);
+extern int conn_send_state_req(struct drbd_connection *, int vnr, enum drbd_packet, union drbd_state, union drbd_state);
 extern int conn_send_twopc_request(struct drbd_connection *, int vnr, enum drbd_packet, struct p_twopc_request *);
 extern int drbd_send_peer_ack(struct drbd_connection *, struct drbd_peer_ack *);
 
@@ -2588,6 +2595,12 @@ static inline u64 drbd_current_uuid(struct drbd_device *device)
 	if (!device->ldev)
 		return 0;
 	return device->ldev->md.current_uuid;
+}
+
+static inline bool verify_can_do_stop_sector(struct drbd_peer_device *peer_device)
+{
+	return peer_device->connection->agreed_pro_version >= 97 &&
+		peer_device->connection->agreed_pro_version != 100;
 }
 
 static inline u64 drbd_bitmap_uuid(struct drbd_peer_device *peer_device)

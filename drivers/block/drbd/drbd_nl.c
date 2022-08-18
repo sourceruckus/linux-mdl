@@ -996,7 +996,7 @@ drbd_set_role(struct drbd_resource *resource, enum drbd_role role, bool force, s
 	int vnr, try = 0;
 	const int max_tries = 4;
 	enum drbd_state_rv rv = SS_UNKNOWN_ERROR;
-	bool retried_ss_two_primaries = false;
+	bool retried_ss_two_primaries = false, retried_ss_primary_nop = false;
 	const char *err_str = NULL;
 	enum chg_state_flags flags = CS_ALREADY_SERIALIZED | CS_DONT_RETRY | CS_WAIT_COMPLETE;
 	bool fenced_peers = false;
@@ -1108,29 +1108,29 @@ retry:
 
 		if (rv == SS_NOTHING_TO_DO)
 			goto out;
-		if (rv == SS_PRIMARY_NOP && !(flags & CS_FP_LOCAL_UP_TO_DATE)) {
+		if (rv == SS_PRIMARY_NOP && !retried_ss_primary_nop) {
 			struct drbd_connection *connection;
 			u64 im;
 
+			retried_ss_primary_nop = true;
+
 			up(&resource->state_sem); /* Allow connect while fencing */
 			for_each_connection_ref(connection, im, resource) {
-				if (!conn_try_outdate_peer(connection) && force) {
+				bool outdated_peer = conn_try_outdate_peer(connection);
+				if (!outdated_peer && force) {
 					drbd_warn(connection, "Forced into split brain situation!\n");
 					flags |= CS_FP_LOCAL_UP_TO_DATE;
 				}
 			}
 			down(&resource->state_sem);
-			if (flags & CS_FP_LOCAL_UP_TO_DATE)
-				continue;
+			continue;
 		}
 
-		if (rv == SS_TWO_PRIMARIES) {
+		if (rv == SS_TWO_PRIMARIES && !retried_ss_two_primaries) {
 			struct drbd_connection *connection;
 			struct net_conf *nc;
 			int timeout = 0;
 
-			if (try >= max_tries || retried_ss_two_primaries)
-				break;
 			retried_ss_two_primaries = true;
 
 			/*
@@ -1154,10 +1154,6 @@ retry:
 			continue;
 		}
 
-		if (rv < SS_SUCCESS && !(flags & CS_VERBOSE)) {
-			flags |= CS_VERBOSE;
-			continue;
-		}
 		break;
 	}
 
@@ -1222,6 +1218,7 @@ retry:
 out:
 	up(&resource->state_sem);
 	if (err_str) {
+		drbd_err(resource, "%s", err_str);
 		if (reply_skb)
 			drbd_msg_put_info(reply_skb, err_str);
 		kfree(err_str);
@@ -1316,9 +1313,9 @@ int drbd_adm_set_role(struct sk_buff *skb, struct genl_info *info)
 	} else {
 		if (retcode >= SS_SUCCESS)
 			clear_bit(EXPLICIT_PRIMARY, &adm_ctx.resource->flags);
-		else
-			opener_info(adm_ctx.resource, adm_ctx.reply_skb, retcode);
 	}
+	if (retcode == SS_DEVICE_IN_USE)
+		opener_info(adm_ctx.resource, adm_ctx.reply_skb, retcode);
 
 	mutex_unlock(&adm_ctx.resource->adm_mutex);
 out:
@@ -3548,6 +3545,20 @@ static bool conn_ov_running(struct drbd_connection *connection)
 static enum drbd_ret_code
 _check_net_options(struct drbd_connection *connection, struct net_conf *old_net_conf, struct net_conf *new_net_conf)
 {
+	if (old_net_conf && connection->cstate[NOW] == C_CONNECTED && connection->agreed_pro_version < 100) {
+		if (new_net_conf->wire_protocol != old_net_conf->wire_protocol)
+			return ERR_NEED_APV_100;
+
+		if (new_net_conf->two_primaries != old_net_conf->two_primaries)
+			return ERR_NEED_APV_100;
+
+		if (!new_net_conf->integrity_alg != !old_net_conf->integrity_alg)
+			return ERR_NEED_APV_100;
+
+		if (strcmp(new_net_conf->integrity_alg, old_net_conf->integrity_alg))
+			return ERR_NEED_APV_100;
+	}
+
 	if (!new_net_conf->two_primaries &&
 	    connection->resource->role[NOW] == R_PRIMARY &&
 	    connection->peer_role[NOW] == R_PRIMARY)
@@ -3782,7 +3793,7 @@ int drbd_adm_net_opts(struct sk_buff *skb, struct genl_info *info)
 
 	crypto_free_shash(connection->integrity_tfm);
 	connection->integrity_tfm = crypto.integrity_tfm;
-	if (connection->cstate[NOW] >= C_CONNECTED)
+	if (connection->cstate[NOW] >= C_CONNECTED && connection->agreed_pro_version >= 100)
 		/* Do this without trying to take connection->data.mutex again.  */
 		__drbd_send_protocol(connection, P_PROTOCOL_UPDATE);
 
@@ -4055,8 +4066,7 @@ static bool is_resync_target_in_other_connection(struct drbd_peer_device *peer_d
 	return false;
 }
 
-static int adm_new_connection(struct drbd_connection **ret_conn,
-		struct drbd_config_context *adm_ctx, struct genl_info *info)
+static int adm_new_connection(struct drbd_config_context *adm_ctx, struct genl_info *info)
 {
 	struct connection_info connection_info;
 	enum drbd_notification_type flags;
@@ -4070,13 +4080,6 @@ static int adm_new_connection(struct drbd_connection **ret_conn,
 	int i, err;
 	char *transport_name;
 	struct drbd_transport_class *tr_class;
-
-	*ret_conn = NULL;
-	if (adm_ctx->connection) {
-		drbd_err(adm_ctx->resource, "Connection for peer node id %d already exists\n",
-			 adm_ctx->peer_node_id);
-		return ERR_INVALID_REQUEST;
-	}
 
 	/* allocation not in the IO path, drbdsetup / netlink process context */
 	new_net_conf = kzalloc(sizeof(*new_net_conf), GFP_KERNEL);
@@ -4226,7 +4229,6 @@ static int adm_new_connection(struct drbd_connection **ret_conn,
 
 	drbd_debugfs_connection_add(connection); /* after ->net_conf was assigned */
 	drbd_thread_start(&connection->sender);
-	*ret_conn = connection;
 	return NO_ERROR;
 
 unlock_fail_free_connection:
@@ -4427,11 +4429,15 @@ int drbd_adm_new_peer(struct sk_buff *skb, struct genl_info *info)
 
 	mutex_lock(&adm_ctx.resource->adm_mutex);
 
-	if (adm_ctx.connection) {
+	/* ensure uniqueness of peer_node_id by checking with adm_mutex */
+	connection = drbd_connection_by_node_id(adm_ctx.resource, adm_ctx.peer_node_id);
+	if (adm_ctx.connection || connection) {
 		retcode = ERR_INVALID_REQUEST;
-		drbd_msg_put_info(adm_ctx.reply_skb, "peer connection already exists");
+		drbd_msg_sprintf_info(adm_ctx.reply_skb,
+				      "Connection for peer node id %d already exists",
+				      adm_ctx.peer_node_id);
 	} else {
-		retcode = adm_new_connection(&connection, &adm_ctx, info);
+		retcode = adm_new_connection(&adm_ctx, info);
 	}
 
 	mutex_unlock(&adm_ctx.resource->adm_mutex);
@@ -4736,6 +4742,11 @@ void resync_after_online_grow(struct drbd_peer_device *peer_device)
 		sync_source = self_id < peer_id ? 1 : 0;
 	}
 
+	if (!sync_source && connection->agreed_pro_version < 110) {
+		stable_change_repl_state(peer_device, L_WF_SYNC_UUID,
+					 CS_VERBOSE | CS_SERIALIZE);
+		return;
+	}
 	drbd_start_resync(peer_device, sync_source ? L_SYNC_SOURCE : L_SYNC_TARGET);
 }
 
@@ -4841,6 +4852,16 @@ int drbd_adm_resize(struct sk_buff *skb, struct genl_info *info)
 		goto fail_ldev;
 	}
 
+	for_each_peer_device(peer_device, device) {
+		struct drbd_connection *connection = peer_device->connection;
+		if (rs.no_resync &&
+		    connection->cstate[NOW] == C_CONNECTED &&
+		    connection->agreed_pro_version < 93) {
+			retcode = ERR_NEED_APV_93;
+			goto fail_ldev;
+		}
+	}
+
 	rcu_read_lock();
 	u_size = rcu_dereference(device->ldev->disk_conf)->disk_size;
 	rcu_read_unlock();
@@ -4865,6 +4886,12 @@ int drbd_adm_resize(struct sk_buff *skb, struct genl_info *info)
 			retcode = ERR_MD_LAYOUT_TOO_SMALL;
 			goto fail_ldev;
 		}
+
+		/* Removed this pre-condition while merging from 8.4 to 9.0
+		if (device->state.conn != C_CONNECTED && !rs.resize_force) {
+			retcode = ERR_MD_LAYOUT_CONNECTED;
+			goto fail_ldev;
+		} */
 
 		change_al_layout = true;
 	}
@@ -5785,11 +5812,11 @@ static void peer_device_to_statistics(struct peer_device_statistics *s,
 	s->peer_dev_out_of_sync = BM_BIT_TO_SECT(drbd_bm_total_weight(pd));
 
 	if (is_verify_state(pd, NOW)) {
-		rs_left = BM_BIT_TO_SECT(pd->ov_left);
+		rs_left = BM_BIT_TO_SECT(atomic64_read(&pd->ov_left));
 		s->peer_dev_ov_start_sector = pd->ov_start_sector;
 		s->peer_dev_ov_stop_sector = pd->ov_stop_sector;
 		s->peer_dev_ov_position = pd->ov_position;
-		s->peer_dev_ov_left = BM_BIT_TO_SECT(pd->ov_left);
+		s->peer_dev_ov_left = BM_BIT_TO_SECT(atomic64_read(&pd->ov_left));
 		s->peer_dev_ov_skipped = BM_BIT_TO_SECT(pd->ov_skipped);
 	} else if (is_sync_state(pd, NOW)) {
 		rs_left = s->peer_dev_out_of_sync - BM_BIT_TO_SECT(pd->rs_failed);
@@ -6019,6 +6046,7 @@ out:
 static bool should_skip_initial_sync(struct drbd_peer_device *peer_device)
 {
 	return peer_device->repl_state[NOW] == L_ESTABLISHED &&
+	       peer_device->connection->agreed_pro_version >= 90 &&
 	       drbd_current_uuid(peer_device->device) == UUID_JUST_CREATED;
 }
 
@@ -7083,7 +7111,7 @@ out_no_adm:
 
 }
 
-enum drbd_ret_code validate_new_resource_name(const struct drbd_resource *resource, const char *new_name)
+static enum drbd_ret_code validate_new_resource_name(const struct drbd_resource *resource, const char *new_name)
 {
 	enum drbd_ret_code retcode = drbd_check_resource_name_str(new_name);
 
