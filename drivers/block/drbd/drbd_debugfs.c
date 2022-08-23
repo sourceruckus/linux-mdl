@@ -382,7 +382,7 @@ static void seq_print_resource_transfer_log_summary(struct seq_file *m,
 			rcu_read_unlock();
 			cond_resched();
 			rcu_read_lock();
-			next_hdr = list_next_rcu(&req->tl_requests);
+			next_hdr = rcu_dereference(list_next_rcu(&req->tl_requests));
 			if (kref_put(&req->kref, drbd_req_destroy_lock)) {
 				if (next_hdr == &resource->transfer_log)
 					break;
@@ -427,6 +427,7 @@ static void seq_print_resource_transfer_log_summary(struct seq_file *m,
 			break;
 	}
 	rcu_read_unlock();
+	seq_printf(m, "%u total\n", count);
 }
 
 /* TODO: transfer_log and friends should be moved to resource */
@@ -580,6 +581,14 @@ static int resource_state_twopc_show(struct seq_file *m, void *pos)
 	return 0;
 }
 
+static int resource_worker_pid_show(struct seq_file *m, void *pos)
+{
+	struct drbd_resource *resource = m->private;
+	if (resource->worker.task)
+		seq_printf(m, "%d\n", resource->worker.task->pid);
+	return 0;
+}
+
 /* make sure at *open* time that the respective object won't go away. */
 static int drbd_single_open(struct file *file, int (*show)(struct seq_file *, void *),
 		                void *data, struct kref *kref,
@@ -634,6 +643,7 @@ static const struct file_operations resource_ ## name ## _fops = {	\
 
 drbd_debugfs_resource_attr(in_flight_summary)
 drbd_debugfs_resource_attr(state_twopc)
+drbd_debugfs_resource_attr(worker_pid)
 
 #define drbd_dcf(top, obj, attr, perm) do {			\
 	dentry = debugfs_create_file(#attr, perm,		\
@@ -669,6 +679,7 @@ void drbd_debugfs_resource_add(struct drbd_resource *resource)
 	/* debugfs create file */
 	res_dcf(in_flight_summary);
 	res_dcf(state_twopc);
+	res_dcf(worker_pid);
 }
 
 static void drbd_debugfs_remove(struct dentry **dp)
@@ -687,6 +698,7 @@ void drbd_debugfs_resource_cleanup(struct drbd_resource *resource)
 	 * and call debugfs_remove on all of them separately.
 	 */
 	/* it is ok to call debugfs_remove(NULL) */
+	drbd_debugfs_remove(&resource->debugfs_res_worker_pid);
 	drbd_debugfs_remove(&resource->debugfs_res_state_twopc);
 	drbd_debugfs_remove(&resource->debugfs_res_in_flight_summary);
 	drbd_debugfs_remove(&resource->debugfs_res_connections);
@@ -840,6 +852,11 @@ static int connection_debug_show(struct seq_file *m, void *ignored)
 	pretty_print_bit(CONN_DISCARD_MY_DATA);
 	pretty_print_bit(SEND_STATE_AFTER_AHEAD_C);
 	pretty_print_bit(NOTIFY_PEERS_LOST_PRIMARY);
+	pretty_print_bit(CHECKING_PEER);
+	pretty_print_bit(CONN_CONGESTED);
+	pretty_print_bit(CONN_HANDSHAKE_DISCONNECT);
+	pretty_print_bit(CONN_HANDSHAKE_RETRY);
+	pretty_print_bit(CONN_HANDSHAKE_READY);
 #undef pretty_print_bit
 	seq_putc(m, '\n');
 
@@ -871,6 +888,41 @@ static int connection_debug_show(struct seq_file *m, void *ignored)
 	return 0;
 }
 
+static void pid_show(struct seq_file *m, struct drbd_thread *thi)
+{
+	struct task_struct *task = NULL;
+	pid_t pid;
+
+	spin_lock_irq(&thi->t_lock);
+	task = thi->task;
+	if (task)
+		pid = task->pid;
+	spin_unlock_irq(&thi->t_lock);
+	if (task)
+		seq_printf(m, "%d\n", pid);
+}
+
+static int connection_receiver_pid_show(struct seq_file *m, void *pos)
+{
+	struct drbd_connection *connection = m->private;
+	pid_show(m, &connection->receiver);
+	return 0;
+}
+
+static int connection_ack_receiver_pid_show(struct seq_file *m, void *pos)
+{
+	struct drbd_connection *connection = m->private;
+	pid_show(m, &connection->ack_receiver);
+	return 0;
+}
+
+static int connection_sender_pid_show(struct seq_file *m, void *pos)
+{
+	struct drbd_connection *connection = m->private;
+	pid_show(m, &connection->sender);
+	return 0;
+}
+
 static int connection_attr_release(struct inode *inode, struct file *file)
 {
 	struct drbd_connection *connection = inode->i_private;
@@ -898,6 +950,9 @@ drbd_debugfs_connection_attr(oldest_requests)
 drbd_debugfs_connection_attr(callback_history)
 drbd_debugfs_connection_attr(transport)
 drbd_debugfs_connection_attr(debug)
+drbd_debugfs_connection_attr(receiver_pid)
+drbd_debugfs_connection_attr(ack_receiver_pid)
+drbd_debugfs_connection_attr(sender_pid)
 
 void drbd_debugfs_connection_add(struct drbd_connection *connection)
 {
@@ -919,6 +974,9 @@ void drbd_debugfs_connection_add(struct drbd_connection *connection)
 	conn_dcf(oldest_requests);
 	conn_dcf(transport);
 	conn_dcf(debug);
+	conn_dcf(receiver_pid);
+	conn_dcf(ack_receiver_pid);
+	conn_dcf(sender_pid);
 
 	idr_for_each_entry(&connection->peer_devices, peer_device, vnr) {
 		if (!peer_device->debugfs_peer_dev)
@@ -928,6 +986,9 @@ void drbd_debugfs_connection_add(struct drbd_connection *connection)
 
 void drbd_debugfs_connection_cleanup(struct drbd_connection *connection)
 {
+	drbd_debugfs_remove(&connection->debugfs_conn_sender_pid);
+	drbd_debugfs_remove(&connection->debugfs_conn_ack_receiver_pid);
+	drbd_debugfs_remove(&connection->debugfs_conn_receiver_pid);
 	drbd_debugfs_remove(&connection->debugfs_conn_debug);
 	drbd_debugfs_remove(&connection->debugfs_conn_transport);
 	drbd_debugfs_remove(&connection->debugfs_conn_callback_history);
@@ -1428,7 +1489,7 @@ static void drbd_get_syncer_progress(struct drbd_peer_device *pd,
 	 * for the percentage, we don't care. */
 
 	if (repl_state == L_VERIFY_S || repl_state == L_VERIFY_T)
-		*bits_left = pd->ov_left;
+		*bits_left = atomic64_read(&pd->ov_left);
 	else
 		*bits_left = drbd_bm_total_weight(pd) - pd->rs_failed;
 	/* >> 10 to prevent overflow,
@@ -1564,8 +1625,9 @@ static void drbd_syncer_progress(struct drbd_peer_device *pd, struct seq_file *s
 		unsigned long long stop_sector = 0;
 		if (repl_state == L_VERIFY_S ||
 		    repl_state == L_VERIFY_T) {
-			bit_pos = bm_bits - pd->ov_left;
-			stop_sector = pd->ov_stop_sector;
+			bit_pos = bm_bits - (unsigned long)atomic64_read(&pd->ov_left);
+			if (verify_can_do_stop_sector(pd))
+				stop_sector = pd->ov_stop_sector;
 		} else
 			bit_pos = pd->resync_next_bit;
 		/* Total sectors may be slightly off for oddly
@@ -1765,10 +1827,12 @@ static const struct file_operations drbd_refcounts_fops = {
 
 static int drbd_compat_show(struct seq_file *m, void *ignored)
 {
+	seq_puts(m, "bio_alloc__no_has_4_params\n");
 	seq_puts(m, "submit_bio__no_returns_void\n");
-	seq_puts(m, "genl_policy__yes_in_ops\n");
 	seq_puts(m, "blk_queue_update_readahead__no_present\n");
 	seq_puts(m, "queue_discard_zeroes_data__no_present\n");
+	seq_puts(m, "fs_dax_get_by_bdev__no_takes_start_off\n");
+	seq_puts(m, "genhd_fl_no_part__no_present\n");
 	return 0;
 }
 
