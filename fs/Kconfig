@@ -19,6 +19,7 @@ config FS_IOMAP
 	bool
 
 if BLOCK
+source "fs/zfs/Kconfig"
 
 source "fs/ext2/Kconfig"
 source "fs/ext4/Kconfig"
