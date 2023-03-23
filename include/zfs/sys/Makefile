@@ -94,6 +94,7 @@ ACLOCAL_M4 = $(top_srcdir)/aclocal.m4
 am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/always-compiler-options.m4 \
 	$(top_srcdir)/config/always-cppcheck.m4 \
+	$(top_srcdir)/config/always-parallel.m4 \
 	$(top_srcdir)/config/always-python.m4 \
 	$(top_srcdir)/config/always-pyzfs.m4 \
 	$(top_srcdir)/config/always-sed.m4 \
@@ -126,6 +127,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-copy-from-user-inatomic.m4 \
 	$(top_srcdir)/config/kernel-current-time.m4 \
 	$(top_srcdir)/config/kernel-declare-event-class.m4 \
+	$(top_srcdir)/config/kernel-dentry-alias.m4 \
 	$(top_srcdir)/config/kernel-dentry-operations.m4 \
 	$(top_srcdir)/config/kernel-dirty-inode.m4 \
 	$(top_srcdir)/config/kernel-discard-granularity.m4 \
@@ -171,7 +173,6 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-misc-minor.m4 \
 	$(top_srcdir)/config/kernel-mkdir.m4 \
 	$(top_srcdir)/config/kernel-mknod.m4 \
-	$(top_srcdir)/config/kernel-mod-param.m4 \
 	$(top_srcdir)/config/kernel-objtool.m4 \
 	$(top_srcdir)/config/kernel-pagemap-folio_wait_bit.m4 \
 	$(top_srcdir)/config/kernel-pde-data.m4 \
@@ -503,6 +504,7 @@ HAVE_DPKGBUILD = yes
 HAVE_RPM = yes
 HAVE_RPMBUILD = yes
 IMPLICIT_FALLTHROUGH = -Wimplicit-fallthrough
+INFINITE_RECURSION = 
 INSTALL = /usr/bin/install -c
 INSTALL_DATA = ${INSTALL} -m 644
 INSTALL_PROGRAM = ${INSTALL}
@@ -550,7 +552,7 @@ LIBUUID_PC = uuid
 LINUX = /scrap/linux-mdl-5.15
 LINUX_OBJ = /scrap/linux-mdl-5.15
 LINUX_SYMBOLS = NONE
-LINUX_VERSION = 5.15.54-mdl+
+LINUX_VERSION = 5.15.104-mdl+
 LIPO = 
 LN_S = ln -s
 LTLIBICONV = -liconv
@@ -567,12 +569,11 @@ MSGMERGE_FOR_MSGFMT_OPTION = --no-fuzzy-matching --no-location --quiet
 MULTIARCH_LIBDIR = lib/x86_64-linux-gnu
 NM = /usr/bin/nm -B
 NMEDIT = 
-NO_BOOL_COMPARE = -Wno-bool-compare
+NO_CLOBBERED = -Wno-clobbered
 NO_FORMAT_TRUNCATION = -Wno-format-truncation
 NO_FORMAT_ZERO_LENGTH = -Wno-format-zero-length
 NO_IPA_SRA = -fno-ipa-sra
 NO_OMIT_FRAME_POINTER = -fno-omit-frame-pointer
-NO_UNUSED_BUT_SET_VARIABLE = -Wno-unused-but-set-variable
 OBJDUMP = objdump
 OBJEXT = o
 OTOOL = 
@@ -580,10 +581,11 @@ OTOOL64 =
 PACKAGE = zfs
 PACKAGE_BUGREPORT = 
 PACKAGE_NAME = zfs
-PACKAGE_STRING = zfs 2.1.5
+PACKAGE_STRING = zfs 2.1.9
 PACKAGE_TARNAME = zfs
 PACKAGE_URL = 
-PACKAGE_VERSION = 2.1.5
+PACKAGE_VERSION = 2.1.9
+PARALLEL = 
 PATH_SEPARATOR = :
 PKG_CONFIG = /usr/bin/pkg-config
 PKG_CONFIG_LIBDIR = 
@@ -630,7 +632,7 @@ TARGET_CPU = x86_64
 TEST_JOBS = 16
 USE_NLS = yes
 VENDOR = ubuntu
-VERSION = 2.1.5
+VERSION = 2.1.9
 WITH_DEBUG = 
 WITH_INVARIANTS = 
 XGETTEXT = /usr/bin/xgettext
@@ -639,10 +641,10 @@ XGETTEXT_EXTRA_OPTIONS =
 ZFS_CONFIG = all
 ZFS_INIT_SYSTEMD = systemd
 ZFS_INIT_SYSV = init.d
-ZFS_META_ALIAS = zfs-2.1.5-1
+ZFS_META_ALIAS = zfs-2.1.9-1
 ZFS_META_AUTHOR = OpenZFS
 ZFS_META_DATA = 
-ZFS_META_KVER_MAX = 5.18
+ZFS_META_KVER_MAX = 6.1
 ZFS_META_KVER_MIN = 3.10
 ZFS_META_LICENSE = CDDL
 ZFS_META_LT_AGE = 
@@ -650,7 +652,7 @@ ZFS_META_LT_CURRENT =
 ZFS_META_LT_REVISION = 
 ZFS_META_NAME = zfs
 ZFS_META_RELEASE = 1
-ZFS_META_VERSION = 2.1.5
+ZFS_META_VERSION = 2.1.9
 ZFS_MODULE_LOAD = modules-load.d
 ZLIB_CFLAGS = 
 ZLIB_LIBS = -lz

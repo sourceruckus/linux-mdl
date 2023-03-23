@@ -56,7 +56,7 @@ static void *zfs_vdev_holder = VDEV_HOLDER;
  * device is missing. The missing path may be transient since the links
  * can be briefly removed and recreated in response to udev events.
  */
-static unsigned zfs_vdev_open_timeout_ms = 1000;
+static uint_t zfs_vdev_open_timeout_ms = 1000;
 
 /*
  * Size of the "reserved" partition, in blocks.
@@ -102,6 +102,16 @@ static inline struct block_device *
 bdev_whole(struct block_device *bdev)
 {
 	return (bdev->bd_contains);
+}
+#endif
+
+#if defined(HAVE_BDEVNAME)
+#define	vdev_bdevname(bdev, name)	bdevname(bdev, name)
+#else
+static inline void
+vdev_bdevname(struct block_device *bdev, char *name)
+{
+	snprintf(name, BDEVNAME_SIZE, "%pg", bdev);
 }
 #endif
 
@@ -204,7 +214,7 @@ vdev_disk_open(vdev_t *v, uint64_t *psize, uint64_t *max_psize,
 
 		if (bdev) {
 			if (v->vdev_expanding && bdev != bdev_whole(bdev)) {
-				bdevname(bdev_whole(bdev), disk_name + 5);
+				vdev_bdevname(bdev_whole(bdev), disk_name + 5);
 				/*
 				 * If userland has BLKPG_RESIZE_PARTITION,
 				 * then it should have updated the partition
@@ -1010,3 +1020,6 @@ param_set_max_auto_ashift(const char *buf, zfs_kernel_param_t *kp)
 
 	return (0);
 }
+
+ZFS_MODULE_PARAM(zfs_vdev, zfs_vdev_, open_timeout_ms, UINT, ZMOD_RW,
+	"Timeout before determining that a device is missing");
