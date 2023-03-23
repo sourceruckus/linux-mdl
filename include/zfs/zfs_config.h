@@ -77,6 +77,9 @@
 /* Define if host toolchain supports AVX512VL */
 #define HAVE_AVX512VL 1
 
+/* bdevname() is available */
+#define HAVE_BDEVNAME 1
+
 /* bdev_check_media_change() exists */
 #define HAVE_BDEV_CHECK_MEDIA_CHANGE 1
 
@@ -155,6 +158,9 @@
 /* blk_alloc_queue_rh() expects request function */
 /* #undef HAVE_BLK_ALLOC_QUEUE_REQUEST_FN_RH */
 
+/* blk_cleanup_disk() exists */
+/* #undef HAVE_BLK_CLEANUP_DISK */
+
 /* blk queue backing_dev_info is dynamic */
 #define HAVE_BLK_QUEUE_BDI_DYNAMIC 1
 
@@ -230,6 +236,9 @@
 
 /* DECLARE_EVENT_CLASS() is available */
 #define HAVE_DECLARE_EVENT_CLASS 1
+
+/* dentry aliases are in d_u member */
+#define HAVE_DENTRY_D_U_ALIASES 1
 
 /* dequeue_signal() takes 4 arguments */
 /* #undef HAVE_DEQUEUE_SIGNAL_4ARG */
@@ -318,6 +327,9 @@
 /* iops->get_acl() takes rcu */
 /* #undef HAVE_GET_ACL_RCU */
 
+/* has iops->get_inode_acl() */
+/* #undef HAVE_GET_INODE_ACL */
+
 /* iops->get_link() cookie */
 /* #undef HAVE_GET_LINK_COOKIE */
 
@@ -335,6 +347,9 @@
 
 /* Define if compiler supports -Wimplicit-fallthrough */
 #define HAVE_IMPLICIT_FALLTHROUGH 1
+
+/* Define if compiler supports -Winfinite-recursion */
+/* #undef HAVE_INFINITE_RECURSION */
 
 /* yes */
 #define HAVE_INODE_LOCK_SHARED 1
@@ -561,6 +576,9 @@
 /* qat is enabled and existed */
 /* #undef HAVE_QAT */
 
+/* register_shrinker is vararg */
+/* #undef HAVE_REGISTER_SHRINKER_VARARG */
+
 /* iops->rename() wants flags */
 #define HAVE_RENAME_WANTS_FLAGS 1
 
@@ -611,6 +629,9 @@
 
 /* iops->set_acl() takes 4 args */
 /* #undef HAVE_SET_ACL_USERNS */
+
+/* iops->set_acl() takes 4 args, arg2 is struct dentry * */
+/* #undef HAVE_SET_ACL_USERNS_DENTRY_ARG2 */
 
 /* set_cached_acl() is usable */
 #define HAVE_SET_CACHED_ACL_USABLE 1
@@ -696,6 +717,9 @@
 /* i_op->tmpfile() exists */
 #define HAVE_TMPFILE 1
 
+/* i_op->tmpfile() uses old dentry signature */
+#define HAVE_TMPFILE_DENTRY 1
+
 /* i_op->tmpfile() has userns */
 /* #undef HAVE_TMPFILE_USERNS */
 
@@ -777,6 +801,9 @@
 /* xattr_handler->get() wants both dentry and inode */
 #define HAVE_XATTR_GET_DENTRY_INODE 1
 
+/* xattr_handler->get() wants dentry and inode and flags */
+/* #undef HAVE_XATTR_GET_DENTRY_INODE_FLAGS */
+
 /* xattr_handler->get() wants xattr_handler */
 /* #undef HAVE_XATTR_GET_HANDLER */
 
@@ -843,9 +870,6 @@
 /* make_request_fn() return type */
 /* #undef MAKE_REQUEST_FN_RET */
 
-/* hardened module_param_call */
-#define MODULE_PARAM_CALL_CONST 1
-
 /* struct shrink_control has nid */
 #define SHRINK_CONTROL_HAS_NID 1
 
@@ -910,7 +934,7 @@
 /* #undef ZFS_IS_GPL_COMPATIBLE */
 
 /* Define the project alias string. */
-#define ZFS_META_ALIAS "zfs-2.1.5-1"
+#define ZFS_META_ALIAS "zfs-2.1.9-1"
 
 /* Define the project author. */
 #define ZFS_META_AUTHOR "OpenZFS"
@@ -919,7 +943,7 @@
 /* #undef ZFS_META_DATA */
 
 /* Define the maximum compatible kernel version. */
-#define ZFS_META_KVER_MAX "5.18"
+#define ZFS_META_KVER_MAX "6.1"
 
 /* Define the minimum compatible kernel version. */
 #define ZFS_META_KVER_MIN "3.10"
@@ -943,7 +967,7 @@
 #define ZFS_META_RELEASE "1"
 
 /* Define the project version. */
-#define ZFS_META_VERSION "2.1.5"
+#define ZFS_META_VERSION "2.1.9"
 
 /* count is located in percpu_ref.data */
 #define ZFS_PERCPU_REF_COUNT_IN_DATA 1

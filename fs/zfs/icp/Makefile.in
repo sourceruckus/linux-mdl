@@ -27,7 +27,6 @@ $(MODULE)-objs += core/kcf_prov_lib.o
 $(MODULE)-objs += spi/kcf_spi.o
 $(MODULE)-objs += io/aes.o
 $(MODULE)-objs += io/edonr_mod.o
-$(MODULE)-objs += io/sha1_mod.o
 $(MODULE)-objs += io/sha2_mod.o
 $(MODULE)-objs += io/skein_mod.o
 $(MODULE)-objs += os/modhash.o
@@ -43,7 +42,6 @@ $(MODULE)-objs += algs/aes/aes_impl_generic.o
 $(MODULE)-objs += algs/aes/aes_impl.o
 $(MODULE)-objs += algs/aes/aes_modes.o
 $(MODULE)-objs += algs/edonr/edonr.o
-$(MODULE)-objs += algs/sha1/sha1.o
 $(MODULE)-objs += algs/sha2/sha2.o
 $(MODULE)-objs += algs/skein/skein.o
 $(MODULE)-objs += algs/skein/skein_block.o
@@ -55,7 +53,6 @@ $(MODULE)-$(CONFIG_X86_64) += asm-x86_64/aes/aes_aesni.o
 $(MODULE)-$(CONFIG_X86_64) += asm-x86_64/modes/gcm_pclmulqdq.o
 $(MODULE)-$(CONFIG_X86_64) += asm-x86_64/modes/aesni-gcm-x86_64.o
 $(MODULE)-$(CONFIG_X86_64) += asm-x86_64/modes/ghash-x86_64.o
-$(MODULE)-$(CONFIG_X86_64) += asm-x86_64/sha1/sha1-x86_64.o
 $(MODULE)-$(CONFIG_X86_64) += asm-x86_64/sha2/sha256_impl.o
 $(MODULE)-$(CONFIG_X86_64) += asm-x86_64/sha2/sha512_impl.o
 
@@ -63,16 +60,12 @@ $(MODULE)-$(CONFIG_X86) += algs/modes/gcm_pclmulqdq.o
 $(MODULE)-$(CONFIG_X86) += algs/aes/aes_impl_aesni.o
 $(MODULE)-$(CONFIG_X86) += algs/aes/aes_impl_x86-64.o
 
-# Suppress objtool "can't find jump dest instruction at" warnings.  They
-# are caused by the constants which are defined in the text section of the
-# assembly file using .byte instructions (e.g. bswap_mask).  The objtool
-# utility tries to interpret them as opcodes and obviously fails doing so.
+# Suppress objtool "return with modified stack frame" warnings.
 OBJECT_FILES_NON_STANDARD_aesni-gcm-x86_64.o := y
-OBJECT_FILES_NON_STANDARD_ghash-x86_64.o := y
+
 # Suppress objtool "unsupported stack pointer realignment" warnings. We are
 # not using a DRAP register while aligning the stack to a 64 byte boundary.
 # See #6950 for the reasoning.
-OBJECT_FILES_NON_STANDARD_sha1-x86_64.o := y
 OBJECT_FILES_NON_STANDARD_sha256_impl.o := y
 OBJECT_FILES_NON_STANDARD_sha512_impl.o := y
 
@@ -86,13 +79,11 @@ ICP_DIRS = \
 	algs/aes \
 	algs/edonr \
 	algs/modes \
-	algs/sha1 \
 	algs/sha2 \
 	algs/skein \
 	asm-x86_64 \
 	asm-x86_64/aes \
 	asm-x86_64/modes \
-	asm-x86_64/sha1 \
 	asm-x86_64/sha2 \
 	asm-i386 \
 	asm-generic

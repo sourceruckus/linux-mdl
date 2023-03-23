@@ -23,7 +23,15 @@
  * Copyright (c) 1992, 2010, Oracle and/or its affiliates. All rights reserved.
  */
 
+#if defined(_KERNEL) && defined(__linux__)
+#include <linux/linkage.h>
+#endif
 
+#ifndef RET
+#define	RET	ret
+#endif
+
+#undef ENTRY
 #define	ENTRY(x) \
 	.text; \
 	.align	8; \
@@ -33,7 +41,6 @@ x:
 
 #define	SET_SIZE(x) \
 	.size	x, [.-x]
-
 
 /*
  * Setjmp and longjmp implement non-local gotos using state vectors
@@ -52,7 +59,7 @@ x:
 	movq	0(%rsp), %rdx		/* return address */
 	movq	%rdx, 56(%rdi)		/* rip */
 	xorl	%eax, %eax		/* return 0 */
-	ret
+	RET
 	SET_SIZE(setjmp)
 
 	ENTRY(longjmp)
@@ -67,7 +74,7 @@ x:
 	movq	%rdx, 0(%rsp)
 	xorl	%eax, %eax
 	incl	%eax			/* return 1 */
-	ret
+	RET
 	SET_SIZE(longjmp)
 
 #ifdef __ELF__

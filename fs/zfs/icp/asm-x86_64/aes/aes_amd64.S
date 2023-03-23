@@ -704,6 +704,7 @@ enc_tab:
 
 
 ENTRY_NP(aes_encrypt_amd64)
+	ENDBR
 #ifdef	GLADMAN_INTERFACE
 	// Original interface
 	sub	$[4*8], %rsp	// gnu/linux/opensolaris binary interface
@@ -785,7 +786,7 @@ ENTRY_NP(aes_encrypt_amd64)
 	mov	2*8(%rsp), %rbp
 	mov	3*8(%rsp), %r12
 	add	$[4*8], %rsp
-	ret
+	RET
 
 	SET_SIZE(aes_encrypt_amd64)
 
@@ -809,6 +810,7 @@ dec_tab:
 
 
 ENTRY_NP(aes_decrypt_amd64)
+	ENDBR
 #ifdef	GLADMAN_INTERFACE
 	// Original interface
 	sub	$[4*8], %rsp	// gnu/linux/opensolaris binary interface
@@ -896,7 +898,7 @@ ENTRY_NP(aes_decrypt_amd64)
 	mov	2*8(%rsp), %rbp
 	mov	3*8(%rsp), %r12
 	add	$[4*8], %rsp
-	ret
+	RET
 
 	SET_SIZE(aes_decrypt_amd64)
 #endif	/* lint || __lint */
