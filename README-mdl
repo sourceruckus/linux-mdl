@@ -6,15 +6,56 @@ DRBD9, OpenZFS) merged in and updated for the last couple longterm series.
 The following upstream projects have been merged in, with compilation problems
 fixed as needed.
 
-- OpenZFS v2.1.6-staging
+- 
 
 I've also started controlling my .config in here, to make my life easier.
 
 
 * TODO
-- OpenZFS v2.1.6 (final, when it's released)
+- OpenZFS v2.1.6 (or newer, once it compiles)
 - DRBD v9.1.9 (or newer, once it compiles)
 
+
+* config history 6.1
+Started with my mdl/5.19 .config, see history below.  Walked through 'make
+oldconfig' and accepted defaults with the following modifications:
+
+- Misc Devices (M to all new drivers)
+- Serial ATA and Parallel ATA drivers (libata)
+  - Controllers with non-SFF native interface
+    - Synopsys DWC AHCI SATA support (AHCI_DWC): M (default was N)
+- Ethernet driver support (M to all new drivers)
+- Keyboards (M to all new drivers)
+- TPM Hardware Support (M to all new drivers)
+- External I2C/SMBus adapter drivers (M to all new drivers)
+- Pin controllers (M to all new drivers)
+- Hardware Monitoring support (M to all new drivers)
+- Watchdog Timer Support (M to all new drivers)
+- Multifunction device drivers (M to all new drivers)
+- Voltage and Current Regulator Support (N to all new drivers)
+- Media PCI Adapters (M to all new drivers)
+- Camera sensor devices (M to all new drivers)
+- Backlight & LCD device support (M to all new drivers)
+- Advanced Linux Sound Architecture
+  - HD-Audio
+    - Use the device identifier field for controls (SND_HDA_CTL_DEV_ID): Y (default was N)
+  - ALSA for SoC audio support (M to all new drivers)
+  - Sound Open Firmware Support (M to all new drivers)
+  - CODEC drivers (M to all new drivers)
+- Special HID drivers (M to all new drivers)
+- USB Type-C Support (M to all new drivers)
+- LED Support (M to all new drivers)
+- X86 Platform Specific Device Drivers (M to all new drivers)
+- Reset Controller Support (M to all new drivers)
+- Android (N to everything)
+- NVMEM Support (M to all new drivers)
+- Distributed Lock Manager (DLM)
+  - Distributed Lock Manager (DLM) (DLM): Y (default was N)
+- Block ciphers (M to all new things)
+- Length-preserving ciphers and modes (M to all new ones)
+- Accelerated Cryptographic Algorithms for CPU (x86) (M to all new ones)
+- Miscellaneous devices (M to all new ones)
+  
 
 * config history 5.19
 Started with my mdl/5.18 .config, see history below.  Walked through 'make
