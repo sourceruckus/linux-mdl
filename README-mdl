@@ -1,0 +1,363 @@
+-*- org -*-
+
+Fork of the mainline Linux kernel with interesting out-of-tree projects (e.g.,
+DRBD9, OpenZFS) merged in and updated for the last couple longterm series.
+
+The following upstream projects have been merged in, with compilation problems
+fixed as needed.
+
+- OpenZFS v2.1.6-staging
+
+I've also started controlling my .config in here, to make my life easier.
+
+
+* TODO
+- OpenZFS v2.1.6 (final, when it's released)
+- DRBD v9.1.9 (or newer, once it compiles)
+
+
+* config history 5.19
+Started with my mdl/5.18 .config, see history below.  Walked through 'make
+oldconfig' and accepted defaults with the following modifications:
+
+- Linux Guest Support
+  - Intel TDX: Y (default was N)
+- Performance Monitoring
+  - AMD Zen3 Branch Sampling support (PERF_EVENTS_AMD_BRS): Y (default was N)
+- Enable Loadable Module Suport
+  - Tainted module unload tracking (MODULE_UNLOAD_TAINT_TRACKING): Y (default was N)
+- Firmware Loader
+  - Enable ZSTD-compressed firmware support (FW_LOADER_COMPRESS_ZSTD): Y (default was N)
+  - Enable users to initiate firmware updates using sysfs (FW_UPLOAD): Y (default was N)
+- EFI Support
+  - EFI Confidential Computing Secret Area Support (EFI_COCO_SECRET): Y (default was N)
+- Misc Devices
+  - Intel MEI GSC embedded device (INTEL_MEI_GSC): M (default was N)
+- Ethernet Drivers (M to all new drivers)
+- PHY devices (M to all new drivers)
+- Wireless LAN (M to all new drivers)
+- Wireless WAN (M to all new drivers)
+- Joysticks (M to all new drivers)
+- Hardware Monitoring (M to all new drivers)
+- Voltage and Current Regulator (N to all new drivers)
+- CODEC drivers (M to all new drivers)
+- Special HID (M to all new drivers)
+- Virtualization drivers
+  - EFI secret area securityfs support (EFI_SECRET): Y (default was N)
+- Xen driver support
+  - Xen virtio support (XEN_VIRTIO): Y (default was N)
+  - Require Xen virtio support to use grants (XEN_VIRTIO_FORCE_GRANT): Y (default was N)
+- x86 drivers (M to all new drivers)
+- Hardware Timestamping Engine (HTE) Support (HTE): Y (default was N)
+- Caches
+  - Support for on-demand read (CACHEFILES_ONDEMAND): Y (default was N)
+- Cryptographic API
+  - Digests (M to all new)
+  - Ciphers (M to all new)
+  - Asymmetric
+    - Run FIPS selftests on the X.509+PKCS7 signature verification (FIPS_SIGNATURE_SELFTEST): Y (default was N)
+  - Certificates
+    - Allow root to add signed blacklist keys (SYSTEM_BLACKLIST_AUTH_UPDATE): Y (default was N)
+
+* config history 5.18
+Started with my mdl/5.17 .config, see history below.  Accepted all defaults by
+'make menuconfig', exit and save.
+
+- Device Drivers
+  - Xen driver support
+    - Xen /dev/xen/evtchn device: Y (was M)
+    - Xen filesystem: Y (was M)
+    - userspace grant access device driver: Y (was M)
+    - User-space grant reference allocator driver: Y (was M)
+
+* config history 5.17
+Started with my mdl/5.16 .config, see history below.  Accepted all defaults by
+'make menuconfig', exit and save.
+
+- General setup
+  - Include all symbols in kallsyms: N (was Y, had to disable debugging first)
+  - Profiling support: N (was Y)
+
+- Power Management
+  - ACPI
+    - ACPI Platform Firmware Runtime Udate and Telemetry: M (was N)
+  - CPU Frequency scaling
+    - AMD Processor P-state driver: Y (was N)
+
+- Binary emulation
+  - x32 ABI: N (was Y)
+
+- General architecture-dependent options
+  - Kprobes: N (was Y)
+
+- Enable loadable module support
+  - Module versioning: N (was Y)
+
+- Memory Management
+  - Anonymous VMA name support: Y (was N)
+
+- Networking support
+  - Amateur Radio: N (was Y)
+  - CAN bus: N (was M)
+  - RxRPC session sockets: N (was M)
+  - KCM sockets: N (was M)
+  - Plan9 Resource Sharing: N (was M)
+  - CAIF support: N (was M)
+  - NFC support: N (was M)
+
+- Device Drivers
+  - Block devices
+    - DRBD: Y (after removing DRBD8 and merging DRBD9 code in)
+  - I3C: N (was M)
+  - SPI: N (was Y)
+  - SPMI: N (was M)
+  - HSI: N (was M)
+  - Voltage and Current Regulator
+    - No to all but:
+      - Fixed voltage regulator: M (was selected via depends)
+
+  - USB support
+    - Xen USB virtual host driver: M (was N)
+  - Greybus: N (was M)
+  - Data acquisition (comedi): N (was M)
+  - Staging drivers: N (was Y)
+  - Platform support for Chrome hardware: N (was Y)
+  - Platform support for Mellanox hardware: N (was Y)
+  - Microsoft Surface platform specific drivers: N (was Y)
+  - Industrial I/O: N (was M)
+  - Non-Transparent Bridge support: N (was M)
+  - Pulse Width Modulation: N (was Y)
+  - IndustryPack: N (was M)
+  - MCB: N (was M)
+  - Android
+    - Android Drivers: N (was Y)
+  - FPGA Configuration: N (was M)
+  - Unisys visorbus: N (was M)
+  - Eckelmann SIOX: N (was M)
+  - SLIMbus: N (was M)
+  - On-Chip Interconnect: N (was Y)
+  - Counter: N (was M)
+  - MOST: N (was M)
+
+- File systems
+  - ZFS: Y (after merging code in from OpenZFS)
+  - Reiserfs: N (was M)
+  - zonefs: N (was M)
+
+- Kernel Hacking
+  - printk and dmesg options
+    - Delay each boot printk: N (was Y)
+  - Generic kernel debugging
+    - KDB: N (was Y)
+    - Undefined behavior sanity checker: N (was Y)
+  - Misc debug code: N (was Y)
+  - Memory Debuggin:
+    - Poison pages after freeing: N (was Y)
+    - KFENCE: N (was Y)
+  - Scheduler debugging:
+    - Collect scheduler debug info: N (was Y)
+    - Collect scheduler statistics: N (was Y)
+  - Stack backtrace: N (was Y)
+  - Latency measuring infrastructure: N (was Y)
+  - Tracers: N (was Y)
+  - Sample kernel code: N (was Y)
+  - x86 debugging:
+    - Early printk: N (was Y)
+    - IO delay type: port 0x80 [recommended] (was 0xed)
+    - Debug the x86 FPU code: N (was Y)
+    - ATOM Punit debug driver: N (was M)
+    - Choose kernel unwinder: ORC (was Frame Pointer)
+  - Kernel Testing and Coverage
+    - Notifier error injection: N (was M)
+    - Runtime Testing: N (was Y)
+    - Memtest: N (was Y)
+
+
+* config history 5.16
+Started with Ubuntu Mainline's 5.16.5-051605-lowlatency Kernel Configuration.
+
+- General Setup
+  - Local version: -mdl
+  - Kernel compression: LZ4 (can't do zstd until we upgrade xen)
+  - Kernel .config support: Y
+    - /proc/config.gz: Y
+  - Kernel headers: N (was M)
+  - PC/104 support: N
+
+- Processor type
+  - Support for extended (non-PC) x86 platforms: N
+  - Supported processor vendors
+    - Hygon: N
+    - Centaur: N
+    - Zhaoxin: N
+  - Performance Monitoring
+    - AMD Processor Power Reporting Mechanism: M
+
+- Power Management and ACPI
+  - CPU frequency scaling
+    - default cpufreq governor: performance (was schedultil)
+
+- Bus options
+  - ISA bus for modern systems: N
+
+- Memory Management
+  - Compressed cache for swap pages (EXPERIMENTAL): N
+
+- Block Layer
+  - Partition Types: Only the following
+    - PC BIOS
+    - Windows Logical Disk Manager
+    - EFI GUID
+
+- File Systems
+  - JFS: N
+  - NILFS2: N
+  - F2FS: N
+  - Old quota: N
+  - Old Kconfig automounter: N
+  - Kernel automounter: Y (was M)
+  - Overlay: Y (was M)
+  - DOS/FAT
+    - NTFS: N (the old read-only one)
+  - Misc: Only the following
+    - eCrypt: Y (was Y)
+      - notifications: Y (was Y)
+    - Squashfs: Y
+      - decompress directly to page cache
+      - parallelism: percpu (was single thread)
+      - XATTR: Y (was Y)
+      - ZLIB: Y (was Y)
+      - LZ4: Y (was Y)
+      - LZ0: Y (was Y)
+      - XZ: Y (was Y)
+      - ZSTD: Y (was Y)
+    - Persistent store: Y (was Y)
+      - 10240 (default)
+      - ZLIB: Y (was Y)
+      - log panic/oops to RAM: Y (was M)
+      - log panic/oops to disk: Y (was M)
+    - VirtualBox shared folder: M (was M)
+  - Network File Systems:
+    - CEPH: N
+    - SMB direct: Y
+    - Coda: N
+    - AFS: N
+    - Plan9: N
+  - Native Language Support (just the following)
+    - default: utf8
+    - Codepage 437: Y
+    - Codepage 850: Y
+    - Codepage 863: Y
+    - ASCII: Y
+    - NLS ISO 8859-1: Y
+    - NLS ISO 8859-15: Y
+    - Codepage macroman: Y
+    - NLS UTF-8: Y
+    
+
+- Device Drivers
+  - EISA: N (was Y)
+  - RapidIO: N (was Y)
+  - Generic Driver Options
+    - Support for uevent helper: N (was Y)
+  - Firmware Drivers
+    - Mark VGA/VBE/EFI FB as generic framebuffer: Y (was N)
+  - MTD support: N (was M)
+  - Parallel Port: N (was M)
+  - Block Devices
+    - Packet writing on CD/DVD: N (was M)
+  - Multiple Device support (RAID and LVM)
+    - Linear: N (was M)
+    - RAID-1: Y (was M)
+    - Multipath IO: N (was M)
+    - Faulty test mode: N (was M)
+  - Fusion MPT: N (was Y)
+  - FireWare: N (was all M)
+  - Mac drivers: N (was Y)
+  - ARCnet: N (was Y)
+  - ATM: N (was Y)
+  - CAIF: N (was Y)
+  - FDDI: N (was Y)
+  - Surfboard: N (was M)
+  - Micrel: N (was M)
+  - PPP: N (was Y, had to also go disable IPWIRELESS)
+  - SLIP: N (was Y)
+  - 802.15.4: N
+  - ISDN: N
+
+  - Input device support
+    - Event deugging: N (was M)
+  - Xen
+    - XEN PV Calls backend: M (was N)
+
+  - HID support
+    - USB HID
+      - USB HID Boot protocol
+        - Keyboard: N (ubuntu blacklist)
+        - Mouse: N (ubuntu blacklist)
+  - Input device
+    - Generic input layer
+      - Misc
+        - PC Speker: N (was M, ubuntu blacklist)
+
+  - Network Device
+    - Ethernet drivers
+      - Generic DECchip: N (was M, ubuntu blacklist)
+  - Sound Card
+    - ALSA
+      - Generic sound devices
+        - PC Speaker: N (was M, ubuntu blacklist)
+
+      - PCI
+        - Emagic Audiowerk 2: N (was M, ubuntu blacklist)
+        - Intel/sis/nvidia/amd MC97: N (was M, ubuntu blacklist)
+  - I2C
+    - I2C hardware bus support
+      - Intel 82801: N (was M, ubuntu blacklist)
+  - USB
+    - USB Serial Converter
+      - USB Garmin GPS: N (was M, ubuntu blacklist)
+
+  - Graphics Support
+    - agpgart: N
+    - DRM: Y (was M)
+    - Simple framebuffer: Y (was M)
+    - Frame buffer devices
+      - support for frame buffer devices (only the following)
+        - Firmware EDID: Y
+        - Video Mode Helpers: Y
+        - Tile Blitting: Y
+        - Vesa VGA: Y
+        - EFI-based: Y
+        - nvidia: M
+          - DDC: Y
+          - backlight: Y
+        - Intel740: M
+        - Intel LE80578: M
+          - carillo ranch: Y
+        - ATI Radeon: M
+          - DDC/I2C: Y
+          - backlight: Y
+        - Xen: M
+        - Hyper-V: M
+        - Simple Frame Buffer: Y (was M originally, I think)
+    - Console driver
+      - deferred takeover: Y (was Y originally, I think)
+
+    - Bootup logo: Y  (was N)
+      - black/white: Y
+      - 16color: Y
+      - 224color: Y
+
+  - Infiniband: N
+  - VME: N
+
+- Cryptographic API
+  - Certificates for signature checking
+    - Additional x.509 keys: -empty- (was a debian/canonical key)
+    - X.509 certs to preload: -empty- (was a debian/canonical key)
+
+- Kernel Hacking
+  - Compile-time checks
+    - debug info: N (was Y)
+    - vmlinux.map: N (was Y)
