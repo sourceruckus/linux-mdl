@@ -7,12 +7,14 @@ The following upstream projects have been merged in, with compilation problems
 fixed as needed.
 
 - OpenZFS v2.1.9
+- DRBD v9.2.2
 
 I've also started controlling my .config in here, to make my life easier.
 
 
 * TODO
-- DRBD v9.1.13 (or v9.2.2, once it compiles)
+- Thoroughly test DRBD v9.2.2, as we were previously using the 9.1 series.
+- Shrink config down more?
 
 
 * config history 6.1
@@ -54,7 +56,33 @@ oldconfig' and accepted defaults with the following modifications:
 - Length-preserving ciphers and modes (M to all new ones)
 - Accelerated Cryptographic Algorithms for CPU (x86) (M to all new ones)
 - Miscellaneous devices (M to all new ones)
-  
+
+Then made the following changes:
+
+- Networking support
+  - Netowrking options
+    - SMC socket protocol: M
+    - SMC: socket monitoring: M
+    - RDS over InfiniBand: M
+    - The TIPC Protocol
+      - InfiniBand media type: Y
+
+- File systems
+  - ZFS: Y (after merging code in from OpenZFS)
+  - Network File Systems
+    - SMB Direct support: Y
+    - Support for SMB Direct protocol: Y
+
+- Device Drivers
+  - Block Devices
+    - DRBD: Y (after replacing in-tree code with upstream DRBD9)
+    - RDMA Network Block Device driver client: M
+    - RDMA Network Block Device driver server: M
+  - InfiniBand support: M
+    - M for everything not marked Experimental
+
+- Security options
+  - Infiniband security hooks: Y
 
 * config history 5.19
 Started with my mdl/5.18 .config, see history below.  Walked through 'make
@@ -211,7 +239,6 @@ Started with my mdl/5.16 .config, see history below.  Accepted all defaults by
     - Notifier error injection: N (was M)
     - Runtime Testing: N (was Y)
     - Memtest: N (was Y)
-
 
 * config history 5.16
 Started with Ubuntu Mainline's 5.16.5-051605-lowlatency Kernel Configuration.
