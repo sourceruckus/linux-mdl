@@ -40,7 +40,6 @@ rm -v compat*.h
 cp -v $DRBDDIR/drbd/Kconfig .
 cp -v $DRBDDIR/drbd/Kbuild Makefile
 rm -v drbd_strings.c # which was a symlink
-rm -v lru_cache.c # we use mainline
 cp -v $DRBDDIR/drbd/linux/drbd*.h ../../../include/linux/
 cp -v $DRBDDIR/drbd/drbd-headers/drbd*.[ch] .
 cp -v $DRBDDIR/drbd/drbd-headers/linux/*.h ../../../include/linux/
