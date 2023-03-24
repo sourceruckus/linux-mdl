@@ -6,14 +6,13 @@ DRBD9, OpenZFS) merged in and updated for the last couple longterm series.
 The following upstream projects have been merged in, with compilation problems
 fixed as needed.
 
-- 
+- OpenZFS v2.1.9
 
 I've also started controlling my .config in here, to make my life easier.
 
 
 * TODO
-- OpenZFS v2.1.6 (or newer, once it compiles)
-- DRBD v9.1.9 (or newer, once it compiles)
+- DRBD v9.1.13 (or v9.2.2, once it compiles)
 
 
 * config history 6.1
