@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /*
    drbd_transport_tcp.c
 
@@ -19,9 +19,9 @@
 #include <linux/highmem.h>
 #include <linux/drbd_genl_api.h>
 #include <linux/drbd_config.h>
+#include <net/tcp.h>
 #include "drbd_protocol.h"
 #include "drbd_transport.h"
-#include "drbd_wrappers.h"
 
 
 MODULE_AUTHOR("Philipp Reisner <philipp.reisner@linbit.com>");
@@ -30,6 +30,13 @@ MODULE_AUTHOR("Roland Kammerer <roland.kammerer@linbit.com>");
 MODULE_DESCRIPTION("TCP (SDP, SSOCKS) transport layer for DRBD");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(REL_VERSION);
+
+static unsigned int drbd_keepcnt;
+module_param_named(keepcnt, drbd_keepcnt, uint, 0664);
+static unsigned int drbd_keepidle;
+module_param_named(keepidle, drbd_keepidle, uint, 0664);
+static unsigned int drbd_keepintvl;
+module_param_named(keepintvl, drbd_keepintvl, uint, 0664);
 
 struct buffer {
 	void *base;
@@ -44,6 +51,8 @@ struct drbd_tcp_transport {
 	unsigned long flags;
 	struct socket *stream[2];
 	struct buffer rbuf[2];
+	struct timer_list control_timer;
+	void (*original_control_sk_state_change)(struct sock *sk);
 };
 
 struct dtt_listener {
@@ -87,6 +96,7 @@ static void dtt_debugfs_show(struct drbd_transport *transport, struct seq_file *
 static void dtt_update_congested(struct drbd_tcp_transport *tcp_transport);
 static int dtt_add_path(struct drbd_transport *, struct drbd_path *path);
 static int dtt_remove_path(struct drbd_transport *, struct drbd_path *);
+static void dtt_control_timer_fn(struct timer_list *t);
 
 static struct drbd_transport_class tcp_transport_class = {
 	.name = "tcp",
@@ -170,6 +180,7 @@ static int dtt_init(struct drbd_transport *transport)
 		tcp_transport->rbuf[i].base = buffer;
 		tcp_transport->rbuf[i].pos = buffer;
 	}
+	timer_setup(&tcp_transport->control_timer, dtt_control_timer_fn, 0);
 
 	return 0;
 fail:
@@ -210,6 +221,8 @@ static void dtt_free(struct drbd_transport *transport, enum drbd_tr_free_op free
 		else if (was_established)
 			drbd_path_event(transport, drbd_path, false);
 	}
+
+	del_timer_sync(&tcp_transport->control_timer);
 
 	if (free_op == DESTROY_TRANSPORT) {
 		struct drbd_path *tmp;
@@ -441,7 +454,7 @@ static int dtt_try_connect(struct drbd_transport *transport, struct dtt_path *pa
 	peer_addr = path->path.peer_addr;
 
 	what = "sock_create_kern";
-	err = sock_create_kern(&init_net, my_addr.ss_family, SOCK_STREAM, IPPROTO_TCP, &socket);
+	err = sock_create_kern(path->path.net, my_addr.ss_family, SOCK_STREAM, IPPROTO_TCP, &socket);
 	if (err < 0) {
 		socket = NULL;
 		goto out;
@@ -633,7 +646,7 @@ static int dtt_wait_for_connect(struct drbd_transport *transport,
 	rcu_read_unlock();
 
 	timeo = connect_int * HZ;
-	timeo += (prandom_u32() & 1) ? timeo / 7 : -timeo / 7; /* 28.5% random jitter */
+	timeo += (prandom_u32() % 2) ? timeo / 7 : -timeo / 7; /* 28.5% random jitter */
 
 retry:
 	timeo = wait_event_interruptible_timeout(listener->wait,
@@ -750,6 +763,63 @@ static int dtt_receive_first_packet(struct drbd_tcp_transport *tcp_transport, st
 	return be16_to_cpu(h->command);
 }
 
+
+static int dtt_control_tcp_input(read_descriptor_t *rd_desc, struct sk_buff *skb,
+				 unsigned int offset, size_t len)
+{
+	struct drbd_transport *transport = rd_desc->arg.data;
+	struct skb_seq_state seq;
+	unsigned int consumed = 0;
+
+	skb_prepare_seq_read(skb, offset, skb->len, &seq);
+	while (true) {
+		struct drbd_const_buffer buffer;
+
+		buffer.avail = skb_seq_read(consumed, &buffer.buffer, &seq);
+		if (buffer.avail == 0)
+			break;
+		consumed += buffer.avail;
+		drbd_control_data_ready(transport, &buffer);
+	}
+	return consumed;
+}
+
+static void dtt_control_data_ready(struct sock *sock)
+{
+	struct drbd_transport *transport = sock->sk_user_data;
+	struct drbd_tcp_transport *tcp_transport =
+		container_of(transport, struct drbd_tcp_transport, transport);
+
+	read_descriptor_t rd_desc = {
+		.count = 1,
+		.arg = { .data = transport },
+	};
+
+	mod_timer(&tcp_transport->control_timer, jiffies + sock->sk_rcvtimeo);
+	tcp_read_sock(sock, &rd_desc, dtt_control_tcp_input);
+}
+
+static void dtt_control_state_change(struct sock *sock)
+{
+	struct drbd_transport *transport = sock->sk_user_data;
+	struct drbd_tcp_transport *tcp_transport =
+		container_of(transport, struct drbd_tcp_transport, transport);
+
+	switch (sock->sk_state) {
+	case TCP_FIN_WAIT1:
+	case TCP_CLOSE_WAIT:
+	case TCP_CLOSE:
+	case TCP_LAST_ACK:
+	case TCP_CLOSING:
+		drbd_control_event(transport, CLOSED_BY_PEER);
+		break;
+	default:
+		tr_warn(transport, "unhandled state %d\n", sock->sk_state);
+	}
+
+	tcp_transport->original_control_sk_state_change(sock);
+}
+
 static void dtt_incoming_connection(struct sock *sock)
 {
 	struct dtt_listener *listener = sock->sk_user_data;
@@ -764,6 +834,14 @@ static void dtt_incoming_connection(struct sock *sock)
 	wake_up(&listener->wait);
 }
 
+static void dtt_control_timer_fn(struct timer_list *t)
+{
+	struct drbd_tcp_transport *tcp_transport = from_timer(tcp_transport, t, control_timer);
+	struct drbd_transport *transport = &tcp_transport->transport;
+
+	drbd_control_event(transport, TIMEOUT);
+}
+
 static void dtt_destroy_listener(struct drbd_listener *generic_listener)
 {
 	struct dtt_listener *listener =
@@ -776,6 +854,7 @@ static void dtt_destroy_listener(struct drbd_listener *generic_listener)
 
 static int dtt_init_listener(struct drbd_transport *transport,
 			     const struct sockaddr *addr,
+			     struct net *net,
 			     struct drbd_listener *drbd_listener)
 {
 	int err, sndbuf_size, rcvbuf_size, addr_len;
@@ -797,8 +876,8 @@ static int dtt_init_listener(struct drbd_transport *transport,
 
 	my_addr = *(struct sockaddr_storage *)addr;
 
-	err = sock_create_kern(&init_net, my_addr.ss_family, SOCK_STREAM, IPPROTO_TCP, &s_listen);
-	if (err) {
+	err = sock_create_kern(net, my_addr.ss_family, SOCK_STREAM, IPPROTO_TCP, &s_listen);
+	if (err < 0) {
 		s_listen = NULL;
 		what = "sock_create_kern";
 		goto out;
@@ -1033,7 +1112,7 @@ retry:
 				kernel_sock_shutdown(s, SHUT_RDWR);
 				sock_release(s);
 randomize:
-				if (prandom_u32() & 1)
+				if ((prandom_u32() % 2))
 					goto retry;
 			}
 		}
@@ -1083,6 +1162,20 @@ randomize:
 
 	sock_set_keepalive(dsocket->sk);
 
+	if (drbd_keepidle)
+		tcp_sock_set_keepidle(dsocket->sk, drbd_keepidle);
+	if (drbd_keepcnt)
+		tcp_sock_set_keepcnt(dsocket->sk, drbd_keepcnt);
+	if (drbd_keepintvl)
+		tcp_sock_set_keepintvl(dsocket->sk, drbd_keepintvl);
+
+	write_lock_bh(&csocket->sk->sk_callback_lock);
+	tcp_transport->original_control_sk_state_change = csocket->sk->sk_state_change;
+	csocket->sk->sk_user_data = transport;
+	csocket->sk->sk_data_ready = dtt_control_data_ready;
+	csocket->sk->sk_state_change = dtt_control_state_change;
+	write_unlock_bh(&csocket->sk->sk_callback_lock);
+
 	return 0;
 
 out_eagain:
@@ -1129,6 +1222,10 @@ static void dtt_set_rcvtimeo(struct drbd_transport *transport, enum drbd_stream 
 		return;
 
 	socket->sk->sk_rcvtimeo = timeout;
+
+	if (stream == CONTROL_STREAM)
+		mod_timer(&tcp_transport->control_timer, jiffies + timeout);
+
 }
 
 static long dtt_get_rcvtimeo(struct drbd_transport *transport, enum drbd_stream stream)
@@ -1225,9 +1322,6 @@ static int dtt_send_zc_bio(struct drbd_transport *transport, struct bio *bio)
 				      bio_iter_last(bvec, iter) ? 0 : MSG_MORE);
 		if (err)
 			return err;
-
-		if (bio_op(bio) == REQ_OP_WRITE_SAME)
-			break;
 	}
 	return 0;
 }

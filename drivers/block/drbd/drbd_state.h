@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef DRBD_STATE_H
 #define DRBD_STATE_H
 
@@ -8,6 +9,7 @@ struct drbd_device;
 struct drbd_connection;
 struct drbd_peer_device;
 struct drbd_work;
+struct twopc_request;
 
 /**
  * DOC: DRBD State macros
@@ -84,7 +86,7 @@ extern union drbd_state drbd_get_connection_state(struct drbd_connection *, enum
 	})
 
 extern int nested_twopc_work(struct drbd_work *work, int cancel);
-extern enum drbd_state_rv nested_twopc_request(struct drbd_resource *, int, enum drbd_packet, struct p_twopc_request *);
+extern enum drbd_state_rv nested_twopc_request(struct drbd_resource *res, struct twopc_request *r);
 extern bool drbd_twopc_between_peer_and_me(struct drbd_connection *connection);
 extern bool cluster_wide_reply_ready(struct drbd_resource *);
 
@@ -120,7 +122,7 @@ extern void __downgrade_peer_disk_states(struct drbd_connection *, enum drbd_dis
 extern void __outdate_myself(struct drbd_resource *resource);
 extern enum drbd_state_rv change_peer_disk_state(struct drbd_peer_device *, enum drbd_disk_state, enum chg_state_flags);
 
-enum drbd_state_rv change_from_consistent(struct drbd_resource *, enum chg_state_flags);
+enum drbd_state_rv twopc_after_lost_peer(struct drbd_resource *resource, enum chg_state_flags);
 
 extern void __change_resync_susp_user(struct drbd_peer_device *, bool);
 extern enum drbd_state_rv change_resync_susp_user(struct drbd_peer_device *, bool, enum chg_state_flags);

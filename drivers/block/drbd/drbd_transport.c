@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #define pr_fmt(fmt)	KBUILD_MODNAME ": " fmt
 
 #include <linux/spinlock.h>
@@ -168,7 +169,7 @@ static void generic_listener_destroy(struct drbd_listener *unused)
 }
 
 int drbd_get_listener(struct drbd_transport *transport, struct drbd_path *path,
-		      int (*init_listener)(struct drbd_transport *, const struct sockaddr *addr, struct drbd_listener *))
+		      int (*init_listener)(struct drbd_transport *, const struct sockaddr *addr, struct net *net, struct drbd_listener *))
 {
 	struct drbd_connection *connection =
 		container_of(transport, struct drbd_connection, transport);
@@ -203,7 +204,7 @@ int drbd_get_listener(struct drbd_transport *transport, struct drbd_path *path,
 	spin_unlock_bh(&resource->listeners_lock);
 
 	if (needs_init) {
-		err = init_listener(transport, addr, listener);
+		err = init_listener(transport, addr, path->net, listener);
 		if (err)
 			drbd_put_listener(path);
 
@@ -275,10 +276,7 @@ bool drbd_stream_send_timed_out(struct drbd_transport *transport, enum drbd_stre
 		container_of(transport, struct drbd_connection, transport);
 	bool drop_it;
 
-	drop_it = stream == CONTROL_STREAM
-		|| !connection->ack_receiver.task
-		|| get_t_state(&connection->ack_receiver) != RUNNING
-		|| connection->cstate[NOW] < C_CONNECTED;
+	drop_it = stream == CONTROL_STREAM || connection->cstate[NOW] < C_CONNECTED;
 
 	if (drop_it)
 		return true;
@@ -287,11 +285,10 @@ bool drbd_stream_send_timed_out(struct drbd_transport *transport, enum drbd_stre
 	if (!drop_it) {
 		drbd_err(connection, "[%s/%d] sending time expired, ko = %u\n",
 			 current->comm, current->pid, connection->transport.ko_count);
-		request_ping(connection);
+		schedule_work(&connection->send_ping_work);
 	}
 
 	return drop_it;
-
 }
 
 bool drbd_should_abort_listening(struct drbd_transport *transport)

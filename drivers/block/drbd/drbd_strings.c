@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
   drbd.h
 
@@ -6,20 +7,6 @@
   Copyright (C) 2003-2008, LINBIT Information Technologies GmbH.
   Copyright (C) 2003-2008, Philipp Reisner <philipp.reisner@linbit.com>.
   Copyright (C) 2003-2008, Lars Ellenberg <lars.ellenberg@linbit.com>.
-
-  drbd is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation; either version 2, or (at your option)
-  any later version.
-
-  drbd is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with drbd; see the file COPYING.  If not, write to
-  the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
 
 */
 
@@ -111,7 +98,7 @@ static const char * const __error_messages[] = {
 	[-SS_DEVICE_IN_USE] = "Device is held open by someone",
 	[-SS_NO_NET_CONFIG] = "Have no net/connection configuration",
 	[-SS_NO_VERIFY_ALG] = "Need a verify algorithm to start online verify",
-	[-SS_NEED_CONNECTION] = "Need a connection to start verify or resync",
+	[-SS_NEED_CONNECTION] = "State change requires a connection",
 	[-SS_NOT_SUPPORTED] = "Peer does not support protocol",
 	[-SS_LOWER_THAN_OUTDATED] = "Disk state is lower than outdated",
 	[-SS_IN_TRANSIENT_STATE] = "In transient state, retry after next state change",

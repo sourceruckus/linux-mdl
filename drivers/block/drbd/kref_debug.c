@@ -1,10 +1,9 @@
-
+// SPDX-License-Identifier: GPL-2.0-only
 #define pr_fmt(fmt)	KBUILD_MODNAME ": " fmt
 
 #include <linux/spinlock.h>
 #include <linux/seq_file.h>
 #include <linux/kref.h>
-#include "drbd_wrappers.h"
 #include "kref_debug.h"
 
 static struct list_head kref_debug_objects;
