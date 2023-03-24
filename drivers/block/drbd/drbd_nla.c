@@ -1,4 +1,4 @@
-#include "drbd_wrappers.h"
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/kernel.h>
 #include <net/netlink.h>
 #include <linux/drbd_genl_api.h>

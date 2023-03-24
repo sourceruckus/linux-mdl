@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef GENL_MAGIC_FUNC_H
 #define GENL_MAGIC_FUNC_H
 
@@ -309,9 +310,8 @@ static struct genl_family ZZZ_genl_family __read_mostly = {
 	.n_mcgrps = ARRAY_SIZE(ZZZ_genl_mcgrps),
 	.module = THIS_MODULE,
 #endif
-#ifdef COMPAT_HAVE_GENL_FAMILY_PARALLEL_OPS
+	.netnsok = true,
 	.parallel_ops = true,
-#endif
 };
 
 /*

@@ -1,31 +1,7 @@
 obj-m += drbd.o drbd_transport_tcp.o
-
-
-# The augmented rbtree helper functions are not exported at least until kernel
-# version 2.6.38-rc2.
-#ifeq ($(shell grep -e '\<rb_augment_insert\>' \
-#		   -e '\<rb_augment_erase_begin\>' \
-#		   -e '\<rb_augment_erase_end\>' \
-#		   $(objtree)/Module.symvers | wc -l),3)
-#override EXTRA_CFLAGS += -DAUGMENTED_RBTREE_SYMBOLS_EXPORTED
-#endif
-#
-# NOTE: That copy-pasted comment doesn't seem entirely true... 5.4 -
-#       5.10 do NOT export those symbols.
-#
-#override EXTRA_CFLAGS += -DAUGMENTED_RBTREE_SYMBOLS_EXPORTED
-
-
-#ifeq ($(shell grep -e '\<blkdev_issue_zeroout\>' \
-#		   $(objtree)/Module.symvers | wc -l),1)
-#override EXTRA_CFLAGS += -DBLKDEV_ISSUE_ZEROOUT_EXPORTED
-#else
-#compat_objs += drbd-kernel-compat/blkdev_issue_zeroout.o
-#endif
-#
-# NOTE: 5.4 - 5.10 look good
-#
-override EXTRA_CFLAGS += -DBLKDEV_ISSUE_ZEROOUT_EXPORTED
+ifdef CONFIG_INFINIBAND
+obj-m += drbd_transport_rdma.o
+endif
 
 
 #ifneq ($(shell grep -e '\<nsecs_to_jiffies\>' \
@@ -33,7 +9,7 @@ override EXTRA_CFLAGS += -DBLKDEV_ISSUE_ZEROOUT_EXPORTED
 #compat_objs += drbd-kernel-compat/nsecs_to_jiffies.o
 #endif
 #
-# NOTE: 5.4 - 5.10 look good
+# NOTE: 5.4 - 5.10 look good, haven't double-checked since then
 #
 
 
@@ -49,15 +25,32 @@ compat_objs += drbd_wrappers.o
 #endif
 #endif
 #
-# NOTE: 5.4 - 5.10 have it, and I've got CONFIG_DEV_DAX_PMEM=m
+# NOTE: 5.4 - 5.10 have it, haven't double-checked since then.
 #
+ifdef CONFIG_DEV_DAX_PMEM
 drbd-y += drbd_dax_pmem.o
+endif
+
+
+#
+# NOTE: Out-of-tree module Kbuild enables fault injection by default
+#       because it always has, even though it's probably not
+#       desirable.  See Christoph's comment in 1e29f68bf2d6e6f in
+#       upstream repo.  We'll leave this up to .config.
+#
+# enable fault injection by default
+#ifndef CONFIG_DRBD_FAULT_INJECTION
+#       override EXTRA_CFLAGS += -DCONFIG_DRBD_FAULT_INJECTION
+#endif
 
 
 #
 # NOTE: We yanked lru_cache.o out of here to use the mainline version.
 #       I'm not 100% sure that's the right thing to do, so if things
 #       go south, revisit that.
+#
+#       Looks like that was the right call, as now even the
+#       out-of-tree build system uses the in-tree lru_cache.
 #
 drbd-$(CONFIG_DEBUG_FS) += drbd_debugfs.o
 drbd-y += drbd_buildtag.o drbd_bitmap.o drbd_proc.o

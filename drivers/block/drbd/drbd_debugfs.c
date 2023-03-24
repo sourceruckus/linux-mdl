@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #define pr_fmt(fmt)	KBUILD_MODNAME " debugfs: " fmt
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -6,16 +7,13 @@
 #include <linux/stat.h>
 #include <linux/jiffies.h>
 #include <linux/list.h>
+#include <generated/utsrelease.h>
 
 #include "drbd_int.h"
 #include "drbd_req.h"
 #include "drbd_debugfs.h"
 #include "drbd_transport.h"
 #include "drbd_dax_pmem.h"
-
-#ifdef COMPAT_CAN_INCLUDE_VERMAGIC_H
-#include <linux/vermagic.h>
-#endif
 
 /**********************************************************************
  * Whenever you change the file format, remember to bump the version. *
@@ -42,11 +40,13 @@ static void __seq_print_rq_state_bit(struct seq_file *m,
 	bool is_set, char *sep, const char *set_name, const char *unset_name)
 {
 	if (is_set && set_name) {
-		seq_putc(m, *sep);
+		if (*sep)
+			seq_putc(m, *sep);
 		seq_puts(m, set_name);
 		*sep = '|';
 	} else if (!is_set && unset_name) {
-		seq_putc(m, *sep);
+		if (*sep)
+			seq_putc(m, *sep);
 		seq_puts(m, unset_name);
 		*sep = '|';
 	}
@@ -275,15 +275,16 @@ static void seq_print_resource_pending_bitmap_io(struct seq_file *m, struct drbd
 static void seq_print_peer_request_flags(struct seq_file *m, struct drbd_peer_request *peer_req)
 {
 	unsigned long f = peer_req->flags;
-	char sep = ' ';
+	char sep = 0;
 
-	__seq_print_rq_state_bit(m, f & EE_SUBMITTED, &sep, "submitted", "preparing");
-	__seq_print_rq_state_bit(m, drbd_interval_is_application(&peer_req->i), &sep, "application", "internal");
+	seq_print_rq_state_bit(m, test_bit(INTERVAL_SUBMIT_CONFLICT_QUEUED, &peer_req->i.flags), &sep, "submit-conflict-queued");
+	seq_print_rq_state_bit(m, test_bit(INTERVAL_SUBMITTED, &peer_req->i.flags), &sep, "submitted");
+	seq_print_rq_state_bit(m, test_bit(INTERVAL_CONFLICT, &peer_req->i.flags), &sep, "conflict");
 	seq_print_rq_state_bit(m, f & EE_IS_BARRIER, &sep, "barr");
 	seq_print_rq_state_bit(m, f & EE_SEND_WRITE_ACK, &sep, "C");
 	seq_print_rq_state_bit(m, f & EE_MAY_SET_IN_SYNC, &sep, "set-in-sync");
 	seq_print_rq_state_bit(m, f & EE_SET_OUT_OF_SYNC, &sep, "set-out-of-sync");
-	seq_print_rq_state_bit(m, drbd_interval_is_write(&peer_req->i) && !(f & EE_IN_ACTLOG), &sep, "blocked-on-al");
+	seq_print_rq_state_bit(m, peer_req->i.type == INTERVAL_PEER_WRITE && !(f & EE_IN_ACTLOG), &sep, "blocked-on-al");
 	seq_print_rq_state_bit(m, f & EE_TRIM, &sep, "trim");
 	seq_print_rq_state_bit(m, f & EE_ZEROOUT, &sep, "zero-out");
 	seq_print_rq_state_bit(m, f & EE_WRITE_SAME, &sep, "write-same");
@@ -292,7 +293,7 @@ static void seq_print_peer_request_flags(struct seq_file *m, struct drbd_peer_re
 
 static void seq_print_peer_request(struct seq_file *m,
 	struct drbd_connection *connection, struct list_head *lh,
-	unsigned long jif)
+	const char *list_name, unsigned long jif)
 {
 	bool reported_preparing = false;
 	struct drbd_peer_request *peer_req;
@@ -300,18 +301,20 @@ static void seq_print_peer_request(struct seq_file *m,
 		struct drbd_peer_device *peer_device = peer_req->peer_device;
 		struct drbd_device *device = peer_device ? peer_device->device : NULL;
 
-		if (reported_preparing && !(peer_req->flags & EE_SUBMITTED))
+		if (reported_preparing && !test_bit(INTERVAL_SUBMITTED, &peer_req->i.flags))
 			continue;
+
+		seq_printf(m, "%s\t", list_name);
 
 		if (device)
 			seq_printf(m, "%u\t%u\t", device->minor, device->vnr);
 
-		seq_printf(m, "%llu\t%u\t%c\t%u\t",
+		seq_printf(m, "%llu\t%u\t%s\t%u\t",
 			(unsigned long long)peer_req->i.sector, peer_req->i.size >> 9,
-			drbd_interval_is_write(&peer_req->i) ? 'W' : 'R',
+			drbd_interval_type_str(&peer_req->i),
 			jiffies_to_msecs(jif - peer_req->submit_jif));
 		seq_print_peer_request_flags(m, peer_req);
-		if (peer_req->flags & EE_SUBMITTED)
+		if (test_bit(INTERVAL_SUBMITTED, &peer_req->i.flags))
 			break;
 		else
 			reported_preparing = true;
@@ -321,11 +324,16 @@ static void seq_print_peer_request(struct seq_file *m,
 static void seq_print_connection_peer_requests(struct seq_file *m,
 	struct drbd_connection *connection, unsigned long jif)
 {
-	seq_puts(m, "minor\tvnr\tsector\tsize\trw\tage\tflags\n");
+	seq_printf(m, "list\t\tminor\tvnr\tsector\tsize\ttype\t\tage\tflags\n");
 	spin_lock_irq(&connection->peer_reqs_lock);
-	seq_print_peer_request(m, connection, &connection->active_ee, jif);
-	seq_print_peer_request(m, connection, &connection->read_ee, jif);
-	seq_print_peer_request(m, connection, &connection->sync_ee, jif);
+	seq_print_peer_request(m, connection, &connection->resync_request_ee, "resync_request", jif);
+	seq_print_peer_request(m, connection, &connection->active_ee, "active\t", jif);
+	seq_print_peer_request(m, connection, &connection->sync_ee, "sync\t", jif);
+	seq_print_peer_request(m, connection, &connection->done_ee, "done\t", jif);
+	seq_print_peer_request(m, connection, &connection->dagtag_wait_ee, "dagtag_wait", jif);
+	seq_print_peer_request(m, connection, &connection->read_ee, "read\t", jif);
+	seq_print_peer_request(m, connection, &connection->resync_ack_ee, "resync_ack", jif);
+	seq_print_peer_request(m, connection, &connection->net_ee, "net\t", jif);
 	spin_unlock_irq(&connection->peer_reqs_lock);
 }
 
@@ -347,12 +355,20 @@ static void seq_print_resource_pending_peer_requests(struct seq_file *m,
 	int i;
 
 	rcu_read_lock();
+
 	for_each_connection_rcu(connection, resource) {
+		seq_printf(m, "oldest peer requests (peer: %s)\n",
+			rcu_dereference(connection->transport.net_conf)->name);
 		seq_print_connection_peer_requests(m, connection, jif);
+		seq_putc(m, '\n');
 	}
+
+	seq_puts(m, "flushes\n");
 	idr_for_each_entry(&resource->devices, device, i) {
 		seq_print_device_peer_flushes(m, device, jif);
 	}
+	seq_putc(m, '\n');
+
 	rcu_read_unlock();
 }
 
@@ -430,7 +446,6 @@ static void seq_print_resource_transfer_log_summary(struct seq_file *m,
 	seq_printf(m, "%u total\n", count);
 }
 
-/* TODO: transfer_log and friends should be moved to resource */
 static int resource_in_flight_summary_show(struct seq_file *m, void *pos)
 {
 	struct drbd_resource *resource = m->private;
@@ -440,15 +455,8 @@ static int resource_in_flight_summary_show(struct seq_file *m, void *pos)
 	ktime_t now = ktime_get();
 	unsigned long jif = jiffies;
 
-	connection = first_connection(resource);
-	transport = &connection->transport;
-	/* This does not happen, actually.
-	 * But be robust and prepare for future code changes. */
-	if (!connection || !kref_get_unless_zero(&connection->kref))
-		return -ESTALE;
-
 	/* BUMP me if you change the file format/content/presentation */
-	seq_printf(m, "v: %u\n\n", 0);
+	seq_printf(m, "v: %u\n\n", 1);
 
 	seq_puts(m, "oldest bitmap IO\n");
 	seq_print_resource_pending_bitmap_io(m, resource, jif);
@@ -459,21 +467,28 @@ static int resource_in_flight_summary_show(struct seq_file *m, void *pos)
 	seq_putc(m, '\n');
 
 	seq_puts(m, "transport buffer stats\n");
-	/* for each connection ... once we have more than one */
+	seq_puts(m, "peer\ttransport class\tunread receive buffer\tunacked send buffer\n");
 	rcu_read_lock();
-	if (transport->ops->stream_ok(transport, DATA_STREAM)) {
-		transport->ops->stats(transport, &transport_stats);
-		seq_printf(m, "unread receive buffer: %u Byte\n",
-				transport_stats.unread_received);
-		seq_printf(m, "unacked send buffer: %u Byte\n",
+	for_each_connection_rcu(connection, resource) {
+		char *name;
+
+		transport = &connection->transport;
+		name = rcu_dereference(transport->net_conf)->name;
+		seq_printf(m, "%s\t%s\t", name, transport->class->name);
+
+		if (transport->ops->stream_ok(transport, DATA_STREAM)) {
+			transport->ops->stats(transport, &transport_stats);
+			seq_printf(m, "%u\t%u\n",
+				transport_stats.unread_received,
 				transport_stats.unacked_send);
+		} else {
+			seq_printf(m, "-\t-\n");
+		}
 	}
 	rcu_read_unlock();
 	seq_putc(m, '\n');
 
-	seq_puts(m, "oldest peer requests\n");
 	seq_print_resource_pending_peer_requests(m, resource, jif);
-	seq_putc(m, '\n');
 
 	seq_puts(m, "application requests waiting for activity log\n");
 	seq_print_waiting_for_AL(m, resource, now, jif);
@@ -589,6 +604,14 @@ static int resource_worker_pid_show(struct seq_file *m, void *pos)
 	return 0;
 }
 
+static int resource_members_show(struct seq_file *m, void *pos)
+{
+	struct drbd_resource *resource = m->private;
+
+	seq_printf(m, "0x%016llX\n", resource->members);
+	return 0;
+}
+
 /* make sure at *open* time that the respective object won't go away. */
 static int drbd_single_open(struct file *file, int (*show)(struct seq_file *, void *),
 		                void *data, struct kref *kref,
@@ -644,6 +667,7 @@ static const struct file_operations resource_ ## name ## _fops = {	\
 drbd_debugfs_resource_attr(in_flight_summary)
 drbd_debugfs_resource_attr(state_twopc)
 drbd_debugfs_resource_attr(worker_pid)
+drbd_debugfs_resource_attr(members)
 
 #define drbd_dcf(top, obj, attr, perm) do {			\
 	dentry = debugfs_create_file(#attr, perm,		\
@@ -680,6 +704,7 @@ void drbd_debugfs_resource_add(struct drbd_resource *resource)
 	res_dcf(in_flight_summary);
 	res_dcf(state_twopc);
 	res_dcf(worker_pid);
+	res_dcf(members);
 }
 
 static void drbd_debugfs_remove(struct dentry **dp)
@@ -698,6 +723,7 @@ void drbd_debugfs_resource_cleanup(struct drbd_resource *resource)
 	 * and call debugfs_remove on all of them separately.
 	 */
 	/* it is ok to call debugfs_remove(NULL) */
+	drbd_debugfs_remove(&resource->debugfs_res_members);
 	drbd_debugfs_remove(&resource->debugfs_res_worker_pid);
 	drbd_debugfs_remove(&resource->debugfs_res_state_twopc);
 	drbd_debugfs_remove(&resource->debugfs_res_in_flight_summary);
@@ -838,7 +864,6 @@ static int connection_debug_show(struct seq_file *m, void *ignored)
 	seq_printf(m, "flags: 0x%04lx :", flags);
 #define pretty_print_bit(n) \
 	seq_print_rq_state_bit(m, test_bit(n, &flags), &sep, #n);
-	pretty_print_bit(SEND_PING);
 	pretty_print_bit(GOT_PING_ACK);
 	pretty_print_bit(TWOPC_PREPARED);
 	pretty_print_bit(TWOPC_YES);
@@ -909,13 +934,6 @@ static int connection_receiver_pid_show(struct seq_file *m, void *pos)
 	return 0;
 }
 
-static int connection_ack_receiver_pid_show(struct seq_file *m, void *pos)
-{
-	struct drbd_connection *connection = m->private;
-	pid_show(m, &connection->ack_receiver);
-	return 0;
-}
-
 static int connection_sender_pid_show(struct seq_file *m, void *pos)
 {
 	struct drbd_connection *connection = m->private;
@@ -951,7 +969,6 @@ drbd_debugfs_connection_attr(callback_history)
 drbd_debugfs_connection_attr(transport)
 drbd_debugfs_connection_attr(debug)
 drbd_debugfs_connection_attr(receiver_pid)
-drbd_debugfs_connection_attr(ack_receiver_pid)
 drbd_debugfs_connection_attr(sender_pid)
 
 void drbd_debugfs_connection_add(struct drbd_connection *connection)
@@ -975,7 +992,6 @@ void drbd_debugfs_connection_add(struct drbd_connection *connection)
 	conn_dcf(transport);
 	conn_dcf(debug);
 	conn_dcf(receiver_pid);
-	conn_dcf(ack_receiver_pid);
 	conn_dcf(sender_pid);
 
 	idr_for_each_entry(&connection->peer_devices, peer_device, vnr) {
@@ -987,7 +1003,6 @@ void drbd_debugfs_connection_add(struct drbd_connection *connection)
 void drbd_debugfs_connection_cleanup(struct drbd_connection *connection)
 {
 	drbd_debugfs_remove(&connection->debugfs_conn_sender_pid);
-	drbd_debugfs_remove(&connection->debugfs_conn_ack_receiver_pid);
 	drbd_debugfs_remove(&connection->debugfs_conn_receiver_pid);
 	drbd_debugfs_remove(&connection->debugfs_conn_debug);
 	drbd_debugfs_remove(&connection->debugfs_conn_transport);
@@ -1117,9 +1132,12 @@ static void seq_printf_interval_tree(struct seq_file *m, struct rb_root *root)
 		struct drbd_interval *i = rb_entry(node, struct drbd_interval, rb);
 		char sep = ' ';
 
-		seq_printf(m, "%llus+%u", (unsigned long long) i->sector, i->size);
-		__seq_print_rq_state_bit(m, i->type == INTERVAL_LOCAL_WRITE, &sep, "local", "peer");
-		seq_print_rq_state_bit(m, test_bit(INTERVAL_WAITING, &i->flags), &sep, "waiting");
+		seq_printf(m, "%llus+%u %s", (unsigned long long) i->sector, i->size, drbd_interval_type_str(i));
+		seq_print_rq_state_bit(m, test_bit(INTERVAL_SENT, &i->flags), &sep, "sent");
+		seq_print_rq_state_bit(m, test_bit(INTERVAL_RECEIVED, &i->flags), &sep, "received");
+		seq_print_rq_state_bit(m, test_bit(INTERVAL_SUBMIT_CONFLICT_QUEUED, &i->flags), &sep, "submit-conflict-queued");
+		seq_print_rq_state_bit(m, test_bit(INTERVAL_SUBMITTED, &i->flags), &sep, "submitted");
+		seq_print_rq_state_bit(m, test_bit(INTERVAL_BACKING_COMPLETED, &i->flags), &sep, "backing-completed");
 		seq_print_rq_state_bit(m, test_bit(INTERVAL_COMPLETED, &i->flags), &sep, "completed");
 		seq_putc(m, '\n');
 
@@ -1133,7 +1151,7 @@ static int device_interval_tree_show(struct seq_file *m, void *ignored)
 
 	spin_lock_irq(&device->interval_lock);
 	seq_puts(m, "Write requests:\n");
-	seq_printf_interval_tree(m, &device->write_requests);
+	seq_printf_interval_tree(m, &device->requests);
 	seq_putc(m, '\n');
 	seq_puts(m, "Read requests:\n");
 	seq_printf_interval_tree(m, &device->read_requests);
@@ -1434,33 +1452,6 @@ out:
 	return -ESTALE;
 }
 
-static void resync_dump_detail(struct seq_file *m, struct lc_element *e)
-{
-       struct bm_extent *bme = lc_entry(e, struct bm_extent, lce);
-
-       seq_printf(m, "%5d %s %s %s", bme->rs_left,
-		  test_bit(BME_NO_WRITES, &bme->flags) ? "NO_WRITES" : "---------",
-		  test_bit(BME_LOCKED, &bme->flags) ? "LOCKED" : "------",
-		  test_bit(BME_PRIORITY, &bme->flags) ? "PRIORITY" : "--------"
-		  );
-}
-
-static int peer_device_resync_extents_show(struct seq_file *m, void *ignored)
-{
-	struct drbd_peer_device *peer_device = m->private;
-	struct drbd_device *device = peer_device->device;
-
-	/* BUMP me if you change the file format/content/presentation */
-	seq_printf(m, "v: %u\n\n", 0);
-
-	if (get_ldev_if_state(device, D_FAILED)) {
-		lc_seq_printf_stats(m, peer_device->resync_lru);
-		lc_seq_dump_details(m, peer_device->resync_lru, "rs_left flags", resync_dump_detail);
-		put_ldev(device);
-	}
-	return 0;
-}
-
 static void seq_printf_with_thousands_grouping(struct seq_file *seq, long v)
 {
 	/* v is in kB/sec. We don't expect TiByte/sec yet. */
@@ -1712,7 +1703,6 @@ static int peer_device_proc_drbd_show(struct seq_file *m, void *ignored)
 		drbd_syncer_progress(peer_device, m, state.conn);
 
 	if (get_ldev_if_state(device, D_FAILED)) {
-		lc_seq_printf_stats(m, peer_device->resync_lru);
 		lc_seq_printf_stats(m, device->act_log);
 		put_ldev(device);
 	}
@@ -1751,7 +1741,6 @@ static const struct file_operations peer_device_ ## name ## _fops = {		\
 	.release	= peer_device_ ## name ## _release,			\
 };
 
-drbd_debugfs_peer_device_attr(resync_extents)
 drbd_debugfs_peer_device_attr(proc_drbd)
 
 void drbd_debugfs_peer_device_add(struct drbd_peer_device *peer_device)
@@ -1765,14 +1754,12 @@ void drbd_debugfs_peer_device_add(struct drbd_peer_device *peer_device)
 	peer_device->debugfs_peer_dev = dentry;
 
 	/* debugfs create file */
-	peer_dev_dcf(resync_extents);
 	peer_dev_dcf(proc_drbd);
 }
 
 void drbd_debugfs_peer_device_cleanup(struct drbd_peer_device *peer_device)
 {
 	drbd_debugfs_remove(&peer_device->debugfs_peer_dev_proc_drbd);
-	drbd_debugfs_remove(&peer_device->debugfs_peer_dev_resync_extents);
 	drbd_debugfs_remove(&peer_device->debugfs_peer_dev);
 }
 
@@ -1827,23 +1814,37 @@ static const struct file_operations drbd_refcounts_fops = {
 
 static int drbd_compat_show(struct seq_file *m, void *ignored)
 {
+	seq_puts(m, "bio_split_to_limits__no_present\n");
 	seq_puts(m, "bio_alloc__no_has_4_params\n");
+	seq_puts(m, "bio_alloc_clone__no_present\n");
 	seq_puts(m, "bio_bi_bdev__no_present\n");
+	seq_puts(m, "bvec_kmap_local__no_present\n");
 	seq_puts(m, "blk_alloc_disk__no_present\n");
 	seq_puts(m, "submit_bio__no_returns_void\n");
+	seq_puts(m, "queue_flag_discard__yes_present\n");
+	seq_puts(m, "bdi_congested__yes_present\n");
 	seq_puts(m, "disk_update_readahead__no_present\n");
 	seq_puts(m, "struct_gendisk__no_has_backing_dev_info\n");
 	seq_puts(m, "set_capacity_and_notify__no_present\n");
 	seq_puts(m, "nla_strscpy__no_present\n");
-	seq_puts(m, "queue_discard_zeroes_data__no_present\n");
 	seq_puts(m, "part_stat_read__no_takes_block_device\n");
 	seq_puts(m, "bdgrab__yes_present\n");
 	seq_puts(m, "gendisk_part0__no_is_block_device\n");
 	seq_puts(m, "bio_max_vecs__no_present\n");
+	seq_puts(m, "fs_dax_get_by_bdev__no_takes_start_off_and_holder\n");
 	seq_puts(m, "fs_dax_get_by_bdev__no_takes_start_off\n");
 	seq_puts(m, "add_disk__no_returns_int\n");
 	seq_puts(m, "bdev_nr_sectors__no_present\n");
 	seq_puts(m, "genhd_fl_no_part__no_present\n");
+	seq_puts(m, "list_is_first__no_present\n");
+	seq_puts(m, "dax_direct_access__no_takes_mode\n");
+	seq_puts(m, "bdev_max_discard_sectors__no_present\n");
+	seq_puts(m, "blk_queue_max_write_same_sectors__yes_present\n");
+	seq_puts(m, "blkdev_issue_discard__yes_takes_flags\n");
+	seq_puts(m, "bdev_discard_granularity__no_present\n");
+	seq_puts(m, "strscpy__no_present\n");
+	seq_puts(m, "get_random_u32_below__no_present\n");
+	seq_puts(m, "get_random_u32__no_present\n");
 	return 0;
 }
 

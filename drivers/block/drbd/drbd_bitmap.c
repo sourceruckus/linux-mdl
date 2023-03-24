@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /*
    drbd_bitmap.c
 
@@ -891,7 +891,7 @@ int drbd_bm_resize(struct drbd_device *device, sector_t capacity, bool set_new_b
 		}
 	}
 
-	want = ALIGN(words*sizeof(long), PAGE_SIZE) >> PAGE_SHIFT;
+	want = PFN_UP(words * sizeof(long));
 	have = b->bm_number_of_pages;
 	if (drbd_md_dax_active(device->ldev)) {
 		bm_on_pmem = drbd_dax_bitmap(device, want);
@@ -1661,12 +1661,6 @@ void drbd_bm_copy_slot(struct drbd_device *device, unsigned int from_index, unsi
 			addr = bm_map(bitmap, current_page_nr);
 		}
 		data_word = addr[word32_in_page(from_word_nr)];
-
-		if (word_nr == words32_total - bitmap->bm_max_peers) {
-			unsigned long lw = word_nr / bitmap->bm_max_peers;
-			if (bitmap->bm_bits < (lw + 1) * 32)
-			    data_word &= cpu_to_le32((1 << (bitmap->bm_bits - lw * 32)) - 1);
-		}
 
 		if (current_page_nr != to_page_nr) {
 			bm_unmap(bitmap, addr);
