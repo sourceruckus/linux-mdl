@@ -13,7 +13,9 @@ I've also started controlling my .config in here, to make my life easier.
 
 
 * TODO
-- Thoroughly test DRBD v9.2.2, as we were previously using the 9.1 series.
+- Upgrade DRVD to v9.2.5
+- Upgrade OpenZFS to 2.1.12
+- Test OpenZFS 2.2.0-rc3?
 - Shrink config down more?
 
 
