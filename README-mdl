@@ -7,13 +7,12 @@ The following upstream projects have been merged in, with compilation problems
 fixed as needed.
 
 - OpenZFS v2.1.9
-- DRBD v9.2.2
+- DRBD v9.2.5
 
 I've also started controlling my .config in here, to make my life easier.
 
 
 * TODO
-- Upgrade DRVD to v9.2.5
 - Upgrade OpenZFS to 2.1.12
 - Test OpenZFS 2.2.0-rc3?
 - Shrink config down more?

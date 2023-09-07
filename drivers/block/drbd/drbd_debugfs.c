@@ -277,9 +277,20 @@ static void seq_print_peer_request_flags(struct seq_file *m, struct drbd_peer_re
 	unsigned long f = peer_req->flags;
 	char sep = 0;
 
-	seq_print_rq_state_bit(m, test_bit(INTERVAL_SUBMIT_CONFLICT_QUEUED, &peer_req->i.flags), &sep, "submit-conflict-queued");
-	seq_print_rq_state_bit(m, test_bit(INTERVAL_SUBMITTED, &peer_req->i.flags), &sep, "submitted");
-	seq_print_rq_state_bit(m, test_bit(INTERVAL_CONFLICT, &peer_req->i.flags), &sep, "conflict");
+	seq_print_rq_state_bit(m, test_bit(INTERVAL_SUBMIT_CONFLICT_QUEUED, &peer_req->i.flags),
+			&sep, "submit-conflict-queued");
+	seq_print_rq_state_bit(m, test_bit(INTERVAL_SUBMITTED, &peer_req->i.flags),
+			&sep, "submitted");
+	seq_print_rq_state_bit(m, test_bit(INTERVAL_CONFLICT, &peer_req->i.flags),
+			&sep, "conflict");
+	seq_print_rq_state_bit(m, test_bit(INTERVAL_SENT, &peer_req->i.flags),
+			&sep, "sent");
+	seq_print_rq_state_bit(m, test_bit(INTERVAL_RECEIVED, &peer_req->i.flags),
+			&sep, "received");
+	seq_print_rq_state_bit(m, test_bit(INTERVAL_BACKING_COMPLETED, &peer_req->i.flags),
+			&sep, "backing-completed");
+	seq_print_rq_state_bit(m, test_bit(INTERVAL_COMPLETED, &peer_req->i.flags),
+			&sep, "completed");
 	seq_print_rq_state_bit(m, f & EE_IS_BARRIER, &sep, "barr");
 	seq_print_rq_state_bit(m, f & EE_SEND_WRITE_ACK, &sep, "C");
 	seq_print_rq_state_bit(m, f & EE_MAY_SET_IN_SYNC, &sep, "set-in-sync");
@@ -291,49 +302,92 @@ static void seq_print_peer_request_flags(struct seq_file *m, struct drbd_peer_re
 	seq_putc(m, '\n');
 }
 
+enum drbd_peer_request_state {
+	PRS_NEW,
+	PRS_SENT,
+	PRS_SUBMITTED,
+	PRS_LAST,
+};
+
+static enum drbd_peer_request_state drbd_get_peer_request_state(struct drbd_peer_request *peer_req)
+{
+	unsigned long interval_flags = peer_req->i.flags;
+
+	if (interval_flags & INTERVAL_SUBMITTED)
+		return PRS_SUBMITTED;
+
+	if (interval_flags & INTERVAL_SENT)
+		return PRS_SENT;
+
+	return PRS_NEW;
+}
+
+static void seq_print_peer_request_one(struct seq_file *m,
+	struct drbd_peer_request *peer_req,
+	const char *list_name, unsigned long jif)
+{
+	struct drbd_peer_device *peer_device = peer_req->peer_device;
+	struct drbd_device *device = peer_device ? peer_device->device : NULL;
+
+	seq_printf(m, "%s\t", list_name);
+
+	if (device)
+		seq_printf(m, "%u\t%u\t", device->minor, device->vnr);
+
+	seq_printf(m, "%llu\t%u\t%s\t%u\t",
+			(unsigned long long)peer_req->i.sector, peer_req->i.size >> 9,
+			drbd_interval_type_str(&peer_req->i),
+			jiffies_to_msecs(jif - peer_req->submit_jif));
+	seq_print_peer_request_flags(m, peer_req);
+}
+
+static void seq_print_peer_request_w(struct seq_file *m,
+	struct drbd_connection *connection, struct list_head *lh,
+	const char *list_name, unsigned long jif)
+{
+	int count[PRS_LAST] = {0};
+	struct drbd_peer_request *peer_req;
+
+	list_for_each_entry(peer_req, lh, w.list) {
+		enum drbd_peer_request_state state = drbd_get_peer_request_state(peer_req);
+
+		count[state]++;
+		if (count[state] <= 16)
+			seq_print_peer_request_one(m, peer_req, list_name, jif);
+	}
+}
+
 static void seq_print_peer_request(struct seq_file *m,
 	struct drbd_connection *connection, struct list_head *lh,
 	const char *list_name, unsigned long jif)
 {
-	bool reported_preparing = false;
+	int count = 0;
 	struct drbd_peer_request *peer_req;
-	list_for_each_entry(peer_req, lh, w.list) {
-		struct drbd_peer_device *peer_device = peer_req->peer_device;
-		struct drbd_device *device = peer_device ? peer_device->device : NULL;
 
-		if (reported_preparing && !test_bit(INTERVAL_SUBMITTED, &peer_req->i.flags))
-			continue;
-
-		seq_printf(m, "%s\t", list_name);
-
-		if (device)
-			seq_printf(m, "%u\t%u\t", device->minor, device->vnr);
-
-		seq_printf(m, "%llu\t%u\t%s\t%u\t",
-			(unsigned long long)peer_req->i.sector, peer_req->i.size >> 9,
-			drbd_interval_type_str(&peer_req->i),
-			jiffies_to_msecs(jif - peer_req->submit_jif));
-		seq_print_peer_request_flags(m, peer_req);
-		if (test_bit(INTERVAL_SUBMITTED, &peer_req->i.flags))
-			break;
-		else
-			reported_preparing = true;
+	list_for_each_entry(peer_req, lh, recv_order) {
+		count++;
+		if (count <= 16)
+			seq_print_peer_request_one(m, peer_req, list_name, jif);
 	}
 }
 
 static void seq_print_connection_peer_requests(struct seq_file *m,
 	struct drbd_connection *connection, unsigned long jif)
 {
+	struct drbd_peer_device *peer_device;
+	int i;
+
 	seq_printf(m, "list\t\tminor\tvnr\tsector\tsize\ttype\t\tage\tflags\n");
 	spin_lock_irq(&connection->peer_reqs_lock);
-	seq_print_peer_request(m, connection, &connection->resync_request_ee, "resync_request", jif);
-	seq_print_peer_request(m, connection, &connection->active_ee, "active\t", jif);
-	seq_print_peer_request(m, connection, &connection->sync_ee, "sync\t", jif);
-	seq_print_peer_request(m, connection, &connection->done_ee, "done\t", jif);
-	seq_print_peer_request(m, connection, &connection->dagtag_wait_ee, "dagtag_wait", jif);
-	seq_print_peer_request(m, connection, &connection->read_ee, "read\t", jif);
-	seq_print_peer_request(m, connection, &connection->resync_ack_ee, "resync_ack", jif);
-	seq_print_peer_request(m, connection, &connection->net_ee, "net\t", jif);
+	seq_print_peer_request_w(m, connection, &connection->done_ee, "done\t", jif);
+	seq_print_peer_request_w(m, connection, &connection->dagtag_wait_ee, "dagtag_wait", jif);
+	seq_print_peer_request_w(m, connection, &connection->resync_ack_ee, "resync_ack", jif);
+	seq_print_peer_request_w(m, connection, &connection->net_ee, "net\t", jif);
+	seq_print_peer_request(m, connection, &connection->peer_requests, "peer_requests", jif);
+	seq_print_peer_request(m, connection, &connection->peer_reads, "peer_reads", jif);
+	idr_for_each_entry(&connection->peer_devices, peer_device, i)
+		seq_print_peer_request(m, connection, &peer_device->resync_requests,
+				"resync_requests", jif);
 	spin_unlock_irq(&connection->peer_reqs_lock);
 }
 
@@ -374,7 +428,6 @@ static void seq_print_resource_pending_peer_requests(struct seq_file *m,
 
 static void seq_print_resource_transfer_log_summary(struct seq_file *m,
 	struct drbd_resource *resource,
-	struct drbd_connection *connection,
 	ktime_t now, unsigned long jif)
 {
 	struct drbd_request *req;
@@ -495,13 +548,12 @@ static int resource_in_flight_summary_show(struct seq_file *m, void *pos)
 	seq_putc(m, '\n');
 
 	seq_puts(m, "oldest application requests\n");
-	seq_print_resource_transfer_log_summary(m, resource, connection, now, jif);
+	seq_print_resource_transfer_log_summary(m, resource, now, jif);
 	seq_putc(m, '\n');
 
 	jif = jiffies - jif;
 	if (jif)
 		seq_printf(m, "generated in %d ms\n", jiffies_to_msecs(jif));
-	kref_put(&connection->kref, drbd_destroy_connection);
 	return 0;
 }
 
@@ -531,19 +583,8 @@ static int resource_state_twopc_show(struct seq_file *m, void *pos)
 			   twopc.target_node_id);
 
 		if (twopc.initiator_node_id != resource->res_opts.node_id) {
-			u64 parents = 0;
-
-			seq_puts(m, "  parent list: ");
-			rcu_read_lock();
-			read_lock_irq(&resource->state_rwlock);
-			list_for_each_entry(connection, &resource->twopc_parents, twopc_parent_list) {
-				char *name = rcu_dereference((connection)->transport.net_conf)->name;
-				seq_printf(m, "%s, ", name);
-				parents |= NODE_MASK(connection->peer_node_id);
-			}
-			read_unlock_irq(&resource->state_rwlock);
-			seq_puts(m, "\n");
 			seq_puts(m, "  parent node mask: ");
+			rcu_read_lock();
 			for_each_connection_rcu(connection, resource) {
 				if (NODE_MASK(connection->peer_node_id) & resource->twopc_parent_nodes) {
 					char *name = rcu_dereference((connection)->transport.net_conf)->name;
@@ -553,11 +594,6 @@ static int resource_state_twopc_show(struct seq_file *m, void *pos)
 			rcu_read_unlock();
 			seq_puts(m, "\n");
 
-			if (parents != resource->twopc_parent_nodes)
-				seq_printf(m,
-					   "  !ATT twopc_parent_nodes: %llX != %llX\n",
-					   resource->twopc_parent_nodes,
-					   parents);
 			if (resource->twopc_prepare_reply_cmd)
 				seq_printf(m,
 					   "  Reply sent: %s\n",
@@ -906,9 +942,11 @@ static int connection_debug_show(struct seq_file *m, void *ignored)
 	seq_printf(m, "            rs_in_flight: %d KiB (%d sectors)\n", in_flight / 2, in_flight);
 
 	seq_printf(m, "             done_ee_cnt: %d\n"
-	              "           active_ee_cnt: %d\n",
-		atomic_read(&connection->done_ee_cnt),
-		atomic_read(&connection->active_ee_cnt));
+			"          backing_ee_cnt: %d\n"
+			"           active_ee_cnt: %d\n",
+			atomic_read(&connection->done_ee_cnt),
+			atomic_read(&connection->backing_ee_cnt),
+			atomic_read(&connection->active_ee_cnt));
 	seq_printf(m, "      agreed_pro_version: %d\n", connection->agreed_pro_version);
 	return 0;
 }
@@ -1139,6 +1177,7 @@ static void seq_printf_interval_tree(struct seq_file *m, struct rb_root *root)
 		seq_print_rq_state_bit(m, test_bit(INTERVAL_SUBMITTED, &i->flags), &sep, "submitted");
 		seq_print_rq_state_bit(m, test_bit(INTERVAL_BACKING_COMPLETED, &i->flags), &sep, "backing-completed");
 		seq_print_rq_state_bit(m, test_bit(INTERVAL_COMPLETED, &i->flags), &sep, "completed");
+		seq_print_rq_state_bit(m, test_bit(INTERVAL_CANCELED, &i->flags), &sep, "canceled");
 		seq_putc(m, '\n');
 
 		node = rb_next(node);
@@ -1814,9 +1853,9 @@ static const struct file_operations drbd_refcounts_fops = {
 
 static int drbd_compat_show(struct seq_file *m, void *ignored)
 {
-	seq_puts(m, "write_zeroes__no_capable\n");
-	seq_puts(m, "wb_congested_enum__no_present\n");
-	seq_puts(m, "strscpy__no_present\n");
+	seq_puts(m, "kvfree_rcu_mightsleep__no_present\n");
+	seq_puts(m, "sk_use_task_frag__no_present\n");
+	seq_puts(m, "timer_shutdown__no_present\n");
 	return 0;
 }
 

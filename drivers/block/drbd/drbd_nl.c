@@ -982,9 +982,30 @@ static bool after_primary_lost_events_settled(struct drbd_resource *resource)
 	return true;
 }
 
+static long drbd_max_ping_timeout(struct drbd_resource *resource)
+{
+	struct drbd_connection *connection;
+	long ping_timeout = 0;
+
+	rcu_read_lock();
+	for_each_connection_rcu(connection, resource)
+		ping_timeout = max(ping_timeout, (long) connection->transport.net_conf->ping_timeo);
+	rcu_read_unlock();
+
+	return ping_timeout;
+}
+
 static bool wait_up_to_date(struct drbd_resource *resource)
 {
-	long timeout = resource->res_opts.auto_promote_timeout * HZ / 10;
+	/*
+	 * Adding ping-timeout is necessary to ensure that we do not proceed
+	 * while the loss of some connection has not yet been detected. Ideally
+	 * we would use the maximum ping timeout from the entire cluster. Since
+	 * we do not have that, use the maximum from our connections on a
+	 * best-effort basis.
+	 */
+	long timeout = (resource->res_opts.auto_promote_timeout +
+			drbd_max_ping_timeout(resource)) * HZ / 10;
 	int initial_up_to_date, up_to_date;
 
 	initial_up_to_date = count_up_to_date(resource);
@@ -1068,9 +1089,10 @@ retry:
 
 		if (rv == SS_NO_UP_TO_DATE_DISK && !(flags & CS_FP_LOCAL_UP_TO_DATE)) {
 			struct drbd_connection *connection;
+			bool any_fencing_failed = false;
 			u64 im;
 
-			fenced_peers = true;
+			fenced_peers = false;
 			up(&resource->state_sem); /* Allow connect while fencing */
 			for_each_connection_ref(connection, im, resource) {
 				struct drbd_peer_device *peer_device;
@@ -1085,12 +1107,14 @@ retry:
 					if (device->disk_state[NOW] != D_CONSISTENT)
 						continue;
 
-					if (!conn_try_outdate_peer(connection))
-						fenced_peers = false;
+					if (conn_try_outdate_peer(connection))
+						fenced_peers = true;
+					else
+						any_fencing_failed = true;
 				}
 			}
 			down(&resource->state_sem);
-			if (fenced_peers) {
+			if (fenced_peers && !any_fencing_failed) {
 				flags |= CS_FP_LOCAL_UP_TO_DATE;
 				continue;
 			}
@@ -1153,8 +1177,9 @@ retry:
 			if (timeout == 0)
 				timeout = 1;
 
+			up(&resource->state_sem);
 			schedule_timeout_interruptible(timeout);
-			continue;
+			goto retry;
 		}
 
 		break;
@@ -1961,11 +1986,27 @@ static void decide_on_discard_support(struct drbd_device *device,
 	blk_queue_discard_granularity(q, 512);
 	max_discard_sectors = drbd_max_discard_sectors(device->resource);
 	blk_queue_max_discard_sectors(q, max_discard_sectors);
+	blk_queue_max_write_zeroes_sectors(q, max_discard_sectors);
 	return;
 
 not_supported:
 	blk_queue_discard_granularity(q, 0);
 	blk_queue_max_discard_sectors(q, 0);
+}
+
+static void fixup_write_zeroes(struct drbd_device *device, struct request_queue *q)
+{
+	/* Fixup max_write_zeroes_sectors after blk_stack_limits():
+	 * if we can handle "zeroes" efficiently on the protocol,
+	 * we want to do that, even if our backend does not announce
+	 * max_write_zeroes_sectors itself. */
+
+	/* If all peers announce WZEROES support, use it.  Otherwise, rather
+	 * send explicit zeroes than rely on some discard-zeroes-data magic. */
+	if (common_connection_features(device->resource) & DRBD_FF_WZEROES)
+		q->limits.max_write_zeroes_sectors = DRBD_MAX_BBIO_SECTORS;
+	else
+		q->limits.max_write_zeroes_sectors = 0;
 }
 
 static void fixup_discard_support(struct drbd_device *device, struct request_queue *q)
@@ -1979,49 +2020,51 @@ static void fixup_discard_support(struct drbd_device *device, struct request_que
 	}
 }
 
-static void drbd_setup_queue_param(struct drbd_device *device, struct drbd_backing_dev *bdev,
-				   unsigned int max_bio_size, struct o_qlim *o)
+void drbd_reconsider_queue_parameters(struct drbd_device *device, struct drbd_backing_dev *bdev)
 {
 	struct request_queue * const q = device->rq_queue;
-	unsigned int max_hw_sectors = max_bio_size >> 9;
+	struct queue_limits common_limits = { 0 }; /* sizeof(struct queue_limits) ~ 110 bytes */
+	struct queue_limits peer_limits = { 0 };
+	struct drbd_peer_device *peer_device;
 	struct request_queue *b = NULL;
+
+	blk_set_stacking_limits(&common_limits);
+	/* This is the workaround for "bio would need to, but cannot, be split" */
+	common_limits.seg_boundary_mask = PAGE_SIZE - 1;
+	common_limits.max_hw_sectors = device->device_conf.max_bio_size >> SECTOR_SHIFT;
+	common_limits.max_sectors = device->device_conf.max_bio_size >> SECTOR_SHIFT;
+	common_limits.physical_block_size = device->device_conf.block_size;
+	common_limits.logical_block_size = device->device_conf.block_size;
+	common_limits.io_min = device->device_conf.block_size;
+
+	rcu_read_lock();
+	for_each_peer_device_rcu(peer_device, device) {
+		if (!test_bit(HAVE_SIZES, &peer_device->flags) &&
+		    peer_device->repl_state[NOW] < L_ESTABLISHED)
+			continue;
+		blk_set_stacking_limits(&peer_limits);
+		peer_limits.logical_block_size = peer_device->q_limits.logical_block_size;
+		peer_limits.physical_block_size = peer_device->q_limits.physical_block_size;
+		peer_limits.alignment_offset = peer_device->q_limits.alignment_offset;
+		peer_limits.io_min = peer_device->q_limits.io_min;
+		peer_limits.io_opt = peer_device->q_limits.io_opt;
+		peer_limits.max_hw_sectors = peer_device->q_limits.max_bio_size >> SECTOR_SHIFT;
+		peer_limits.max_sectors = peer_device->q_limits.max_bio_size >> SECTOR_SHIFT;
+		blk_stack_limits(&common_limits, &peer_limits, 0);
+	}
+	rcu_read_unlock();
 
 	if (bdev) {
 		b = bdev->backing_bdev->bd_disk->queue;
-		max_hw_sectors = min(queue_max_hw_sectors(b), max_bio_size >> 9);
-		blk_set_stacking_limits(&q->limits);
-	}
-
-	blk_queue_max_hw_sectors(q, max_hw_sectors);
-	/* This is the workaround for "bio would need to, but cannot, be split" */
-	blk_queue_segment_boundary(q, PAGE_SIZE-1);
-	decide_on_discard_support(device, bdev);
-
-	if (b) {
-		blk_stack_limits(&q->limits, &b->limits, 0);
+		blk_stack_limits(&common_limits, &b->limits, 0);
 		disk_update_readahead(device->vdisk);
 	}
+	q->limits = common_limits;
+	blk_queue_max_hw_sectors(q, common_limits.max_hw_sectors);
+	decide_on_discard_support(device, bdev);
+
+	fixup_write_zeroes(device, q);
 	fixup_discard_support(device, q);
-}
-
-void drbd_reconsider_queue_parameters(struct drbd_device *device, struct drbd_backing_dev *bdev, struct o_qlim *o)
-{
-	unsigned int max_bio_size = device->device_conf.max_bio_size;
-	struct drbd_peer_device *peer_device;
-
-	if (bdev) {
-		max_bio_size = min(max_bio_size,
-			queue_max_hw_sectors(bdev->backing_bdev->bd_disk->queue) << 9);
-	}
-
-	read_lock_irq(&device->resource->state_rwlock);
-	for_each_peer_device(peer_device, device) {
-		if (peer_device->repl_state[NOW] >= L_ESTABLISHED)
-			max_bio_size = min(max_bio_size, peer_device->max_bio_size);
-	}
-	read_unlock_irq(&device->resource->state_rwlock);
-
-	drbd_setup_queue_param(device, bdev, max_bio_size, o);
 }
 
 /* Make sure IO is suspended before calling this function(). */
@@ -2271,7 +2314,7 @@ int drbd_adm_disk_opts(struct sk_buff *skb, struct genl_info *info)
 
 	if (old_disk_conf->discard_zeroes_if_aligned !=
 	    new_disk_conf->discard_zeroes_if_aligned)
-		drbd_reconsider_queue_parameters(device, device->ldev, NULL);
+		drbd_reconsider_queue_parameters(device, device->ldev);
 
 	drbd_md_sync_if_dirty(device);
 
@@ -2396,57 +2439,84 @@ static struct drbd_peer_md *day0_peer_md(struct drbd_device *device)
 	for (node_id = 0; node_id < DRBD_NODE_ID_MAX; node_id++) {
 		if (node_id == my_node_id)
 			continue;
-		if (peer_md[node_id].bitmap_index == -1)
+		/* Only totally unused slots definitely contain the day0 UUID. */
+		if (peer_md[node_id].bitmap_index == -1 && !peer_md[node_id].flags)
 			return &peer_md[node_id];
 	}
 	return NULL;
 }
 
-static int free_bitmap_index(struct drbd_device *device, int peer_node_id, u32 md_flags)
+/*
+ * Clear the slot for this peer in the metadata. If md_flags is empty, clear
+ * the slot completely. Otherwise make it a slot for a diskless peer. Also
+ * clear any bitmap associated with this peer.
+ */
+static int clear_peer_slot(struct drbd_device *device, int peer_node_id, u32 md_flags)
 {
 	struct drbd_peer_md *peer_md, *day0_md;
-	int freed_index, from_index;
+	struct meta_data_on_disk_9 *buffer;
+	int from_index, freed_index;
+	bool free_bitmap_slot;
 
 	if (!get_ldev(device))
 		return -ENODEV;
 
-	from_index = drbd_unallocated_index(device->ldev, device->bitmap->bm_max_peers);
-
 	peer_md = &device->ldev->md.peers[peer_node_id];
-	if (!(peer_md->flags & MDF_HAVE_BITMAP)) {
-		put_ldev(device);
-		return -ENOENT;
+	free_bitmap_slot = peer_md->flags & MDF_HAVE_BITMAP;
+	if (free_bitmap_slot) {
+		drbd_suspend_io(device, WRITE_ONLY);
+
+		/*
+		 * Unallocated slots are considered to track writes to the
+		 * device since day 0. In order to keep that promise, copy the
+		 * bitmap from an unallocated slot to this one, or set it to
+		 * all out-of-sync.
+		 */
+
+		from_index = drbd_unallocated_index(device->ldev, device->bitmap->bm_max_peers);
+		freed_index = peer_md->bitmap_index;
+	}
+	buffer = drbd_md_get_buffer(device, __func__); /* lock meta-data IO to superblock */
+
+	/* Look for day0 UUID before changing this peer slot to a day0 slot. */
+	day0_md = day0_peer_md(device);
+
+	peer_md->flags &= md_flags & ~MDF_HAVE_BITMAP;
+	peer_md->bitmap_index = -1;
+
+	if (free_bitmap_slot) {
+		/*
+		 * No drbd_bm_lock() here, as bitmap OPs might happen in parallel,
+		 * and this is no issue as new dirty bits will already go to
+		 * the slot we are copying to.
+		 */
+		if (from_index != -1)
+			drbd_bm_copy_slot(device, from_index, freed_index);
+		else
+			_drbd_bm_set_many_bits(device, freed_index, 0, -1UL);
+
+		drbd_bm_write(device, NULL);
 	}
 
-	freed_index = peer_md->bitmap_index;
-
-	/* unallocated slots are considered to track writes to the device since day 0.
-	   In order to keep that promise, copy the bitmap from an other unallocated slot
-	   to this one, or set it to all out-of-sync */
-
-	drbd_suspend_io(device, WRITE_ONLY);
-	drbd_bm_lock(device, "copy_bitmap()", BM_LOCK_ALL);
-
-	if (from_index != -1)
-		drbd_bm_copy_slot(device, from_index, freed_index);
-	else
-		_drbd_bm_set_many_bits(device, freed_index, 0, -1UL);
-
-	drbd_bm_write(device, NULL);
-	drbd_bm_unlock(device);
-
-	day0_md = day0_peer_md(device);
-	if (day0_md) {
+	/*
+	 * When we forget a peer, we clear the flags. In this case, reset the
+	 * bitmap UUID to the day0 UUID. Peer slots without any bitmap index or
+	 * any flags set should always contain the day0 UUID.
+	 */
+	if (!peer_md->flags && day0_md) {
 		peer_md->bitmap_uuid = day0_md->bitmap_uuid;
 		peer_md->bitmap_dagtag = day0_md->bitmap_dagtag;
 	} else {
 		peer_md->bitmap_uuid = 0;
 		peer_md->bitmap_dagtag = 0;
 	}
-	peer_md->flags = md_flags & ~MDF_HAVE_BITMAP;
-	peer_md->bitmap_index = -1;
-	drbd_md_sync(device);
-	drbd_resume_io(device);
+
+	clear_bit(MD_DIRTY, &device->flags);
+	drbd_md_write(device, buffer);
+	drbd_md_put_buffer(device);
+
+	if (free_bitmap_slot)
+		drbd_resume_io(device);
 
 	put_ldev(device);
 
@@ -2879,8 +2949,7 @@ int drbd_adm_attach(struct sk_buff *skb, struct genl_info *info)
 	struct drbd_config_context adm_ctx;
 	struct drbd_device *device;
 	struct drbd_resource *resource;
-	int err;
-	unsigned int retcode;
+	int err, retcode;
 	enum determine_dev_size dd;
 	sector_t min_md_device_sectors;
 	struct drbd_backing_dev *nbc; /* new_backing_conf */
@@ -3207,7 +3276,7 @@ int drbd_adm_attach(struct sk_buff *skb, struct genl_info *info)
 	device->read_cnt = 0;
 	device->writ_cnt = 0;
 
-	drbd_reconsider_queue_parameters(device, device->ldev, NULL);
+	drbd_reconsider_queue_parameters(device, device->ldev);
 
 	/* If I am currently not R_PRIMARY,
 	 * but meta data primary indicator is set,
@@ -3332,11 +3401,11 @@ static enum drbd_disk_state get_disk_state(struct drbd_device *device)
 	return disk_state;
 }
 
-static unsigned int adm_detach(struct drbd_device *device, bool force, bool intentional_diskless, struct sk_buff *reply_skb)
+static int adm_detach(struct drbd_device *device, bool force, bool intentional_diskless,
+		      struct sk_buff *reply_skb)
 {
-	unsigned int retcode;
 	const char *err_str = NULL;
-	int ret;
+	int ret, retcode;
 
 	device->device_conf.intentional_diskless = intentional_diskless;
 	if (force) {
@@ -3818,7 +3887,7 @@ int drbd_adm_peer_device_opts(struct sk_buff *skb, struct genl_info *info)
 			retcode = ERR_INVALID_REQUEST;
 			goto fail_ret_set;
 		}
-		err = free_bitmap_index(device, peer_device->node_id, MDF_NODE_EXISTS);
+		err = clear_peer_slot(device, peer_device->node_id, MDF_NODE_EXISTS);
 		if (!err) {
 			peer_device->bitmap_index = -1;
 			notify = true;
@@ -3886,7 +3955,7 @@ static void connection_to_info(struct connection_info *info,
 }
 
 #define str_to_info(info, field, str) ({ \
-	strlcpy(info->field, str, sizeof(info->field)); \
+	strscpy(info->field, str, sizeof(info->field)); \
 	info->field ## _len = min(strlen(str), sizeof(info->field)); \
 })
 
@@ -4726,12 +4795,11 @@ int drbd_adm_resize(struct sk_buff *skb, struct genl_info *info)
 	struct disk_conf *old_disk_conf, *new_disk_conf = NULL;
 	struct resize_parms rs;
 	struct drbd_device *device;
-	unsigned int retcode;
 	enum determine_dev_size dd;
 	bool change_al_layout = false;
 	enum dds_flags ddsf;
 	sector_t u_size;
-	int err;
+	int err, retcode;
 	struct drbd_peer_device *peer_device;
 	bool resolve_by_node_id = true;
 	bool has_up_to_date_primary;
@@ -6068,6 +6136,8 @@ int drbd_adm_new_c_uuid(struct sk_buff *skb, struct genl_info *info)
 					set_bit(CONSIDER_RESYNC, &peer_device->flags);
 					drbd_send_uuids(peer_device, UUID_FLAG_RESYNC, 0);
 					drbd_send_current_state(peer_device);
+				} else {
+					drbd_send_uuids(peer_device, 0, 0);
 				}
 
 				drbd_print_uuids(peer_device, "forced resync UUID");
@@ -6087,8 +6157,7 @@ int drbd_adm_new_c_uuid(struct sk_buff *skb, struct genl_info *info)
 		for_each_peer_device(peer_device, device) {
 			if (NODE_MASK(peer_device->node_id) & nodes) {
 				_drbd_uuid_set_bitmap(peer_device, 0);
-				if (NODE_MASK(peer_device->node_id) & diskful)
-					drbd_send_uuids(peer_device, UUID_FLAG_SKIP_INITIAL_SYNC, 0);
+				drbd_send_uuids(peer_device, UUID_FLAG_SKIP_INITIAL_SYNC, 0);
 				drbd_print_uuids(peer_device, "cleared bitmap UUID");
 			}
 		}
@@ -6343,6 +6412,12 @@ int drbd_adm_new_minor(struct sk_buff *skb, struct genl_info *info)
 	}
 	if (adm_ctx.volume > DRBD_VOLUME_MAX) {
 		drbd_msg_put_info(adm_ctx.reply_skb, "requested volume id out of range");
+		retcode = ERR_INVALID_REQUEST;
+		goto out;
+	}
+	if (device_conf.block_size != 512 && device_conf.block_size != 1024 &&
+	    device_conf.block_size != 2048 && device_conf.block_size != 4096) {
+		drbd_msg_put_info(adm_ctx.reply_skb, "block_size not 512, 1024, 2048, or 4096");
 		retcode = ERR_INVALID_REQUEST;
 		goto out;
 	}
@@ -6900,7 +6975,7 @@ void notify_helper(enum drbd_notification_type type,
 	struct drbd_genlmsghdr *dh;
 	int err;
 
-	strlcpy(helper_info.helper_name, name, sizeof(helper_info.helper_name));
+	strscpy(helper_info.helper_name, name, sizeof(helper_info.helper_name));
 	helper_info.helper_name_len = min(strlen(name), sizeof(helper_info.helper_name));
 	helper_info.helper_status = status;
 
@@ -7144,22 +7219,8 @@ int drbd_adm_forget_peer(struct sk_buff *skb, struct genl_info *info)
 		goto out;
 	}
 
-	idr_for_each_entry(&resource->devices, device, vnr) {
-		err = free_bitmap_index(device, peer_node_id, 0);
-		if (err == -ENODEV)
-			continue;
-		/* ignoring err == -ENOENT == no bitmap for that peer */
-
-		if (get_ldev(device)) {
-			struct drbd_peer_md *peer_md = &device->ldev->md.peers[peer_node_id];
-
-			if (peer_md->flags != 0) {
-				peer_md->flags = 0; /* Clearing MDF_NODE_EXISTS */
-				drbd_md_mark_dirty(device);
-			}
-			put_ldev(device);
-		}
-	}
+	idr_for_each_entry(&resource->devices, device, vnr)
+		clear_peer_slot(device, peer_node_id, 0);
 out:
 	mutex_unlock(&resource->adm_mutex);
 out_no_adm:
@@ -7233,7 +7294,7 @@ int drbd_adm_rename_resource(struct sk_buff *skb, struct genl_info *info)
 
 	drbd_info(resource, "Renaming to %s\n", parms.new_resource_name);
 
-	strlcpy(rename_resource_info.res_new_name, parms.new_resource_name, sizeof(rename_resource_info.res_new_name));
+	strscpy(rename_resource_info.res_new_name, parms.new_resource_name, sizeof(rename_resource_info.res_new_name));
 	rename_resource_info.res_new_name_len = min(strlen(parms.new_resource_name), sizeof(rename_resource_info.res_new_name));
 
 	mutex_lock(&notification_mutex);

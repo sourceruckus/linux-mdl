@@ -1141,7 +1141,7 @@ static void bm_page_io_async(struct drbd_bm_aio_ctx *ctx, int page_nr) __must_ho
 	sector_t first_bm_sect;
 	sector_t on_disk_sector;
 	unsigned int len;
-	unsigned int op = (ctx->flags & BM_AIO_READ) ? REQ_OP_READ : REQ_OP_WRITE;
+	enum req_op op = ctx->flags & BM_AIO_READ ? REQ_OP_READ : REQ_OP_WRITE;
 
 	first_bm_sect = device->ldev->md.md_offset + device->ldev->md.bm_offset;
 	on_disk_sector = first_bm_sect + (((sector_t)page_nr) << (PAGE_SHIFT-SECTOR_SHIFT));
@@ -1188,9 +1188,7 @@ static void bm_page_io_async(struct drbd_bm_aio_ctx *ctx, int page_nr) __must_ho
 	bio = bio_alloc_bioset(device->ldev->md_bdev, 1, op, GFP_NOIO,
 		&drbd_md_io_bio_set);
 	bio->bi_iter.bi_sector = on_disk_sector;
-	/* bio_add_page of a single page to an empty bio will always succeed,
-	 * according to api.  Do we want to assert that? */
-	bio_add_page(bio, page, len, 0);
+	__bio_add_page(bio, page, len, 0);
 	bio->bi_private = ctx;
 	bio->bi_end_io = drbd_bm_endio;
 
@@ -1540,11 +1538,10 @@ __bm_many_bits_op(struct drbd_device *device, unsigned int bitmap_index, unsigne
 
 		__bm_op(device, bitmap_index, bit, last_bit, op, NULL);
 		bit = last_bit + 1;
-		if (need_resched()) {
-			spin_unlock_irq(&bitmap->bm_lock);
+		spin_unlock_irq(&bitmap->bm_lock);
+		if (need_resched())
 			cond_resched();
-			spin_lock_irq(&bitmap->bm_lock);
-		}
+		spin_lock_irq(&bitmap->bm_lock);
 	}
 	spin_unlock_irq(&bitmap->bm_lock);
 }
@@ -1651,11 +1648,10 @@ void drbd_bm_copy_slot(struct drbd_device *device, unsigned int from_index, unsi
 
 		if (current_page_nr != from_page_nr) {
 			bm_unmap(bitmap, addr);
-			if (need_resched()) {
-				spin_unlock_irq(&bitmap->bm_lock);
+			spin_unlock_irq(&bitmap->bm_lock);
+			if (need_resched())
 				cond_resched();
-				spin_lock_irq(&bitmap->bm_lock);
-			}
+			spin_lock_irq(&bitmap->bm_lock);
 			current_page_nr = from_page_nr;
 			addr = bm_map(bitmap, current_page_nr);
 		}
