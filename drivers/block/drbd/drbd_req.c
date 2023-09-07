@@ -417,7 +417,7 @@ static void queue_conflicting_resync_write(
 {
 	struct drbd_peer_request *peer_req = container_of(i, struct drbd_peer_request, i);
 
-	list_add_tail(&peer_req->submit_list, &submit_conflict->resync_writes);
+	list_add_tail(&peer_req->w.list, &submit_conflict->resync_writes);
 }
 
 static void queue_conflicting_resync_read(
@@ -425,7 +425,7 @@ static void queue_conflicting_resync_read(
 {
 	struct drbd_peer_request *peer_req = container_of(i, struct drbd_peer_request, i);
 
-	list_add_tail(&peer_req->submit_list, &submit_conflict->resync_reads);
+	list_add_tail(&peer_req->w.list, &submit_conflict->resync_reads);
 }
 
 static void queue_conflicting_write(
@@ -441,7 +441,7 @@ static void queue_conflicting_peer_write(
 {
 	struct drbd_peer_request *peer_req = container_of(i, struct drbd_peer_request, i);
 
-	list_add_tail(&peer_req->submit_list, &submit_conflict->peer_writes);
+	list_add_tail(&peer_req->w.list, &submit_conflict->peer_writes);
 }
 
 /* Queue any conflicting requests in this interval to be submitted. */
@@ -769,11 +769,7 @@ static void advance_conn_req_next(struct drbd_connection *connection, struct drb
  * this will advance it to the next request fulfilling the condition.
  *
  * set_cache_ptr_if_null() may be called concurrently with itself and with
- * advance_cache_ptr(). However, advance_cache_ptr() must not be called
- * concurrently for a given caching pointer. If it were, the call for the older
- * request may advance the pointer to the newer request, although the newer
- * request has concurrently been modified such that it no longer fulfils the
- * condition.
+ * advance_cache_ptr().
  */
 static void set_cache_ptr_if_null(struct drbd_request **cache_ptr, struct drbd_request *req)
 {
@@ -798,10 +794,20 @@ static void advance_cache_ptr(struct drbd_connection *connection,
 	struct drbd_request *old_req;
 	struct drbd_request *found_req = NULL;
 
+	/*
+	 * Prevent concurrent updates of the same caching pointer. Otherwise if
+	 * this function is called concurrently for a given caching pointer,
+	 * the call for the older request may advance the pointer to the newer
+	 * request, although the newer request has concurrently been modified
+	 * such that it no longer fulfils the condition.
+	 */
+	spin_lock(&connection->advance_cache_ptr_lock); /* local IRQ already disabled */
+
 	rcu_read_lock();
 	old_req = rcu_dereference(*cache_ptr);
 	if (old_req != req) {
 		rcu_read_unlock();
+		spin_unlock(&connection->advance_cache_ptr_lock);
 		return;
 	}
 	list_for_each_entry_continue_rcu(req, &connection->resource->transfer_log, tl_requests) {
@@ -816,6 +822,8 @@ static void advance_cache_ptr(struct drbd_connection *connection,
 
 	cmpxchg(cache_ptr, old_req, found_req);
 	rcu_read_unlock();
+
+	spin_unlock(&connection->advance_cache_ptr_lock);
 }
 
 /* for wsame, discard, and zero-out requests, the payload (amount of data we
@@ -973,8 +981,7 @@ static void mod_rq_state(struct drbd_request *req, struct bio_and_error *m,
 				if (test_and_set_bit(AHEAD_TO_SYNC_SOURCE, &pd->flags))
 					continue; /* already done */
 				pd->start_resync_side = L_SYNC_SOURCE;
-				pd->start_resync_timer.expires = jiffies + HZ;
-				add_timer(&pd->start_resync_timer);
+				mod_timer(&pd->start_resync_timer, jiffies + HZ);
 			}
 		}
 
@@ -2186,16 +2193,16 @@ void drbd_do_submit_conflict(struct work_struct *ws)
 	 * for adding them to the conflict lists again once the
 	 * submit_conflict_queued flag has been cleared. */
 
-	list_for_each_entry_safe(peer_req, peer_req_tmp, &resync_writes, submit_list) {
-		list_del_init(&peer_req->submit_list);
+	list_for_each_entry_safe(peer_req, peer_req_tmp, &resync_writes, w.list) {
+		list_del_init(&peer_req->w.list);
 		if (!test_bit(INTERVAL_SENT, &peer_req->i.flags))
 			drbd_conflict_send_resync_request(peer_req);
 		else
 			drbd_conflict_submit_resync_request(peer_req);
 	}
 
-	list_for_each_entry_safe(peer_req, peer_req_tmp, &resync_reads, submit_list) {
-		list_del_init(&peer_req->submit_list);
+	list_for_each_entry_safe(peer_req, peer_req_tmp, &resync_reads, w.list) {
+		list_del_init(&peer_req->w.list);
 		drbd_conflict_submit_peer_read(peer_req);
 	}
 
@@ -2204,8 +2211,8 @@ void drbd_do_submit_conflict(struct work_struct *ws)
 		drbd_conflict_submit_write(req);
 	}
 
-	list_for_each_entry_safe(peer_req, peer_req_tmp, &peer_writes, submit_list) {
-		list_del_init(&peer_req->submit_list);
+	list_for_each_entry_safe(peer_req, peer_req_tmp, &peer_writes, w.list) {
+		list_del_init(&peer_req->w.list);
 		drbd_conflict_submit_peer_write(peer_req);
 	}
 }
@@ -2262,7 +2269,7 @@ static void __drbd_submit_peer_request(struct drbd_peer_request *peer_req)
 	peer_req->flags |= EE_IN_ACTLOG;
 	atomic_sub(interval_to_al_extents(&peer_req->i), &device->wait_for_actlog_ecnt);
 	atomic_dec(&device->wait_for_actlog);
-	list_del_init(&peer_req->submit_list);
+	list_del_init(&peer_req->w.list);
 
 	err = drbd_submit_peer_request(peer_req);
 
@@ -2277,7 +2284,7 @@ static void submit_fast_path(struct drbd_device *device, struct waiting_for_act_
 	struct drbd_peer_request *pr, *pr_tmp;
 
 	blk_start_plug(&plug);
-	list_for_each_entry_safe(pr, pr_tmp, &wfa->peer_requests.incoming, submit_list) {
+	list_for_each_entry_safe(pr, pr_tmp, &wfa->peer_requests.incoming, w.list) {
 		if (!drbd_al_begin_io_fastpath(pr->peer_device->device, &pr->i))
 			continue;
 
@@ -2312,7 +2319,7 @@ static struct drbd_peer_request *wfa_next_peer_request(struct waiting_for_act_lo
 {
 	struct list_head *lh = !list_empty(&wfa->peer_requests.more_incoming) ?
 			&wfa->peer_requests.more_incoming: &wfa->peer_requests.incoming;
-	return list_first_entry_or_null(lh, struct drbd_peer_request, submit_list);
+	return list_first_entry_or_null(lh, struct drbd_peer_request, w.list);
 }
 
 static bool prepare_al_transaction_nonblock(struct drbd_device *device,
@@ -2331,7 +2338,7 @@ static bool prepare_al_transaction_nonblock(struct drbd_device *device,
 
 	while ((peer_req = wfa_next_peer_request(wfa))) {
 		if (peer_req->peer_device->connection->cstate[NOW] < C_CONNECTED) {
-			list_move_tail(&peer_req->submit_list, &wfa->peer_requests.cleanup);
+			list_move_tail(&peer_req->w.list, &wfa->peer_requests.cleanup);
 			made_progress = true;
 			continue;
 		}
@@ -2341,7 +2348,7 @@ static bool prepare_al_transaction_nonblock(struct drbd_device *device,
 				drbd_err(device, "Unexpected error %d from drbd_al_begin_io_nonblock\n", err);
 			break;
 		}
-		list_move_tail(&peer_req->submit_list, &wfa->peer_requests.pending);
+		list_move_tail(&peer_req->w.list, &wfa->peer_requests.pending);
 		made_progress = true;
 	}
 	while ((req = wfa_next_request(wfa))) {
@@ -2367,7 +2374,7 @@ static void send_and_submit_pending(struct drbd_device *device, struct waiting_f
 	struct drbd_peer_request *pr, *pr_tmp;
 
 	blk_start_plug(&plug);
-	list_for_each_entry_safe(pr, pr_tmp, &wfa->peer_requests.pending, submit_list) {
+	list_for_each_entry_safe(pr, pr_tmp, &wfa->peer_requests.pending, w.list) {
 		__drbd_submit_peer_request(pr);
 	}
 	list_for_each_entry_safe(req, tmp, &wfa->requests.pending, list) {

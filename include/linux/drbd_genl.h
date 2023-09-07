@@ -184,6 +184,9 @@ GENL_struct(DRBD_NLA_NET_CONF, 5, net_conf,
 	__str_field_def(35, DRBD_F_INVARIANT, transport_name, SHARED_SECRET_MAX)
 	__u32_field_def(36, 0 /* OPTIONAL */, max_buffers, DRBD_MAX_BUFFERS_DEF)
 	__flg_field_def(37, 0 /* OPTIONAL */, allow_remote_read, DRBD_ALLOW_REMOTE_READ_DEF)
+	__flg_field_def(38, 0 /* OPTIONAL */, tls, DRBD_TLS_DEF)
+	__s32_field_def(39, 0 /* OPTIONAL */, tls_privkey, DRBD_TLS_PRIVKEY_DEF)
+	__s32_field_def(40, 0 /* OPTIONAL */, tls_certificate, DRBD_TLS_CERTIFICATE_DEF)
 )
 
 GENL_struct(DRBD_NLA_SET_ROLE_PARMS, 6, set_role_parms,
@@ -224,6 +227,7 @@ GENL_struct(DRBD_NLA_DETACH_PARMS, 13, detach_parms,
 GENL_struct(DRBD_NLA_DEVICE_CONF, 14, device_conf,
 	__u32_field_def(1, DRBD_F_INVARIANT,	max_bio_size, DRBD_MAX_BIO_SIZE_DEF)
 	__flg_field_def(2, 0 /* OPTIONAL */, intentional_diskless, DRBD_DISK_DISKLESS_DEF)
+	__u32_field_def(3, 0 /* OPTIONAL */, block_size, DRBD_BLOCK_SIZE_DEF)
 )
 
 GENL_struct(DRBD_NLA_RESOURCE_INFO, 15, resource_info,

@@ -308,9 +308,18 @@
 #define DRBD_QUORUM_DEF QOU_OFF /* kernel min/max includes symbolic values */
 #define DRBD_QUORUM_SCALE '1' /* nodes */
 
+#define DRBD_BLOCK_SIZE_MIN 512
+#define DRBD_BLOCK_SIZE_MAX 4096
+#define DRBD_BLOCK_SIZE_DEF 512
+#define DRBD_BLOCK_SIZE_SCALE '1' /* Bytes */
+
 /* By default freeze IO, if set error all IOs as quick as possible */
 #define DRBD_ON_NO_QUORUM_DEF ONQ_SUSPEND_IO
 
 #define DRBD_ON_SUSP_PRI_OUTD_DEF SPO_DISCONNECT
+
+#define DRBD_TLS_DEF 0U /* disabled by default */
+#define DRBD_TLS_PRIVKEY_DEF 0 /* disabled by default */
+#define DRBD_TLS_CERTIFICATE_DEF 0 /* disabled by default */
 
 #endif

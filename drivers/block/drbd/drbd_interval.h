@@ -20,6 +20,8 @@ enum drbd_interval_type {
 	INTERVAL_PEERS_IN_SYNC_LOCK,
 };
 
+#define INTERVAL_TYPE_MASK(type) (1 << (type))
+
 enum drbd_interval_flags {
 	/*
 	 * Whether this peer request has been sent yet. For resync writes, the
@@ -57,6 +59,9 @@ enum drbd_interval_flags {
 
 	/* For verify requests: whether this has conflicts. */
 	INTERVAL_CONFLICT,
+
+	/* For resync requests: whether this was canceled while waiting for conflict resolution. */
+	INTERVAL_CANCELED,
 };
 
 /* Intervals used to manage conflicts between application requests and various
