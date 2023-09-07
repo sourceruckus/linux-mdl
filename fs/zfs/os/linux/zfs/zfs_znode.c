@@ -134,6 +134,9 @@ zfs_znode_cache_constructor(void *buf, void *arg, int kmflags)
 	zp->z_acl_cached = NULL;
 	zp->z_xattr_cached = NULL;
 	zp->z_xattr_parent = 0;
+	zp->z_sync_writes_cnt = 0;
+	zp->z_async_writes_cnt = 0;
+
 	return (0);
 }
 
@@ -151,9 +154,12 @@ zfs_znode_cache_destructor(void *buf, void *arg)
 	rw_destroy(&zp->z_xattr_lock);
 	zfs_rangelock_fini(&zp->z_rangelock);
 
-	ASSERT(zp->z_dirlocks == NULL);
-	ASSERT(zp->z_acl_cached == NULL);
-	ASSERT(zp->z_xattr_cached == NULL);
+	ASSERT3P(zp->z_dirlocks, ==, NULL);
+	ASSERT3P(zp->z_acl_cached, ==, NULL);
+	ASSERT3P(zp->z_xattr_cached, ==, NULL);
+
+	ASSERT0(atomic_load_32(&zp->z_sync_writes_cnt));
+	ASSERT0(atomic_load_32(&zp->z_async_writes_cnt));
 }
 
 static int
@@ -162,8 +168,7 @@ zfs_znode_hold_cache_constructor(void *buf, void *arg, int kmflags)
 	znode_hold_t *zh = buf;
 
 	mutex_init(&zh->zh_lock, NULL, MUTEX_DEFAULT, NULL);
-	zfs_refcount_create(&zh->zh_refcount);
-	zh->zh_obj = ZFS_NO_OBJECT;
+	zh->zh_refcount = 0;
 
 	return (0);
 }
@@ -174,7 +179,6 @@ zfs_znode_hold_cache_destructor(void *buf, void *arg)
 	znode_hold_t *zh = buf;
 
 	mutex_destroy(&zh->zh_lock);
-	zfs_refcount_destroy(&zh->zh_refcount);
 }
 
 void
@@ -273,26 +277,26 @@ zfs_znode_hold_enter(zfsvfs_t *zfsvfs, uint64_t obj)
 	boolean_t found = B_FALSE;
 
 	zh_new = kmem_cache_alloc(znode_hold_cache, KM_SLEEP);
-	zh_new->zh_obj = obj;
 	search.zh_obj = obj;
 
 	mutex_enter(&zfsvfs->z_hold_locks[i]);
 	zh = avl_find(&zfsvfs->z_hold_trees[i], &search, NULL);
 	if (likely(zh == NULL)) {
 		zh = zh_new;
+		zh->zh_obj = obj;
 		avl_add(&zfsvfs->z_hold_trees[i], zh);
 	} else {
 		ASSERT3U(zh->zh_obj, ==, obj);
 		found = B_TRUE;
 	}
-	zfs_refcount_add(&zh->zh_refcount, NULL);
+	zh->zh_refcount++;
+	ASSERT3S(zh->zh_refcount, >, 0);
 	mutex_exit(&zfsvfs->z_hold_locks[i]);
 
 	if (found == B_TRUE)
 		kmem_cache_free(znode_hold_cache, zh_new);
 
 	ASSERT(MUTEX_NOT_HELD(&zh->zh_lock));
-	ASSERT3S(zfs_refcount_count(&zh->zh_refcount), >, 0);
 	mutex_enter(&zh->zh_lock);
 
 	return (zh);
@@ -305,11 +309,11 @@ zfs_znode_hold_exit(zfsvfs_t *zfsvfs, znode_hold_t *zh)
 	boolean_t remove = B_FALSE;
 
 	ASSERT(zfs_znode_held(zfsvfs, zh->zh_obj));
-	ASSERT3S(zfs_refcount_count(&zh->zh_refcount), >, 0);
 	mutex_exit(&zh->zh_lock);
 
 	mutex_enter(&zfsvfs->z_hold_locks[i]);
-	if (zfs_refcount_remove(&zh->zh_refcount, NULL) == 0) {
+	ASSERT3S(zh->zh_refcount, >, 0);
+	if (--zh->zh_refcount == 0) {
 		avl_remove(&zfsvfs->z_hold_trees[i], zh);
 		remove = B_TRUE;
 	}
@@ -542,7 +546,9 @@ zfs_znode_alloc(zfsvfs_t *zfsvfs, dmu_buf_t *db, int blksz,
 	ASSERT3P(zp->z_xattr_cached, ==, NULL);
 	zp->z_unlinked = B_FALSE;
 	zp->z_atime_dirty = B_FALSE;
+#if !defined(HAVE_FILEMAP_RANGE_HAS_PAGE)
 	zp->z_is_mapped = B_FALSE;
+#endif
 	zp->z_is_ctldir = B_FALSE;
 	zp->z_suspended = B_FALSE;
 	zp->z_sa_hdl = NULL;
@@ -551,6 +557,8 @@ zfs_znode_alloc(zfsvfs_t *zfsvfs, dmu_buf_t *db, int blksz,
 	zp->z_blksz = blksz;
 	zp->z_seq = 0x7A4653;
 	zp->z_sync_cnt = 0;
+	zp->z_sync_writes_cnt = 0;
+	zp->z_async_writes_cnt = 0;
 
 	zfs_znode_sa_init(zfsvfs, zp, db, obj_type, hdl);
 
@@ -1630,7 +1638,7 @@ zfs_free_range(znode_t *zp, uint64_t off, uint64_t len)
 	 * Zero partial page cache entries.  This must be done under a
 	 * range lock in order to keep the ARC and page cache in sync.
 	 */
-	if (zp->z_is_mapped) {
+	if (zn_has_cached_data(zp, off, off + len - 1)) {
 		loff_t first_page, last_page, page_len;
 		loff_t first_page_offset, last_page_offset;
 
