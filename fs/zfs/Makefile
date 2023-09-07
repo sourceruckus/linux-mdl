@@ -82,9 +82,9 @@ modules_install-Linux:
 	$(MAKE) -C /scrap/linux-mdl-5.15 M="$$PWD" modules_install \
 		INSTALL_MOD_PATH=$(INSTALL_MOD_PATH) \
 		INSTALL_MOD_DIR=$(INSTALL_MOD_DIR) \
-		KERNELRELEASE=5.15.104-mdl+
+		KERNELRELEASE=5.15.130-mdl+
 	@# Remove extraneous build products when packaging
-	kmoddir=$(INSTALL_MOD_PATH)/lib/modules/5.15.104-mdl+; \
+	kmoddir=$(INSTALL_MOD_PATH)/lib/modules/5.15.130-mdl+; \
 	if [ -n "$(DESTDIR)" ]; then \
 		find $$kmoddir -name 'modules.*' -delete; \
 	fi
@@ -94,11 +94,11 @@ modules_install-Linux:
 	@# Naturally, depmod is less than amused by this.
 	@# So if we find it missing or with one of these present,
 	@# we check for the alternate path for the System.map
-	sysmap=$(INSTALL_MOD_PATH)/boot/System.map-5.15.104-mdl+; \
+	sysmap=$(INSTALL_MOD_PATH)/boot/System.map-5.15.130-mdl+; \
 	{ [ -f "$$sysmap" ] && [ $$(wc -l < "$$sysmap") -ge 100 ]; } || \
-		sysmap=$(INSTALL_MOD_PATH)/usr/lib/debug/boot/System.map-5.15.104-mdl+; \
+		sysmap=$(INSTALL_MOD_PATH)/usr/lib/debug/boot/System.map-5.15.130-mdl+; \
 	if [ -f $$sysmap ]; then \
-		depmod -ae -F $$sysmap 5.15.104-mdl+; \
+		depmod -ae -F $$sysmap 5.15.130-mdl+; \
 	fi
 
 modules_install-FreeBSD:
@@ -109,7 +109,7 @@ modules_install: modules_install-Linux
 
 modules_uninstall-Linux:
 	@# Uninstall the kernel modules
-	kmoddir=$(INSTALL_MOD_PATH)/lib/modules/5.15.104-mdl+; \
+	kmoddir=$(INSTALL_MOD_PATH)/lib/modules/5.15.130-mdl+; \
 	for objdir in $(ZFS_MODULES); do \
 		$(RM) -R $$kmoddir/$(INSTALL_MOD_DIR)/$$objdir; \
 	done

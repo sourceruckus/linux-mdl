@@ -2287,7 +2287,7 @@ zio_nowait(zio_t *zio)
 	ASSERT3P(zio->io_executor, ==, NULL);
 
 	if (zio->io_child_type == ZIO_CHILD_LOGICAL &&
-	    zio_unique_parent(zio) == NULL) {
+	    list_is_empty(&zio->io_parent_list)) {
 		zio_t *pio;
 
 		/*
@@ -3928,7 +3928,7 @@ zio_vdev_io_done(zio_t *zio)
 
 	ops->vdev_op_io_done(zio);
 
-	if (unexpected_error)
+	if (unexpected_error && vd->vdev_remove_wanted == B_FALSE)
 		VERIFY(vdev_probe(vd, zio) == NULL);
 
 	return (zio);
