@@ -84,7 +84,13 @@
 #define HAVE_BDEV_CHECK_MEDIA_CHANGE 1
 
 /* bdev_*_io_acct() available */
-#define HAVE_BDEV_IO_ACCT 1
+/* #undef HAVE_BDEV_IO_ACCT_63 */
+
+/* bdev_*_io_acct() available */
+#define HAVE_BDEV_IO_ACCT_OLD 1
+
+/* bdev_kobj() exists */
+#define HAVE_BDEV_KOBJ 1
 
 /* bdev_max_discard_sectors() is available */
 #define HAVE_BDEV_MAX_DISCARD_SECTORS 1
@@ -224,6 +230,9 @@
 /* copy_to_iter() is available */
 #define HAVE_COPY_TO_ITER 1
 
+/* cpu_has_feature() is GPL-only */
+/* #undef HAVE_CPU_HAS_FEATURE_GPL_ONLY */
+
 /* yes */
 #define HAVE_CPU_HOTPLUG 1
 
@@ -279,6 +288,9 @@
 /* fault_in_iov_iter_readable() is available */
 #define HAVE_FAULT_IN_IOV_ITER_READABLE 1
 
+/* filemap_range_has_page() is available */
+/* #undef HAVE_FILEMAP_RANGE_HAS_PAGE */
+
 /* fops->aio_fsync() exists */
 /* #undef HAVE_FILE_AIO_FSYNC */
 
@@ -287,6 +299,9 @@
 
 /* file_inode() is available */
 #define HAVE_FILE_INODE 1
+
+/* flush_dcache_page() is GPL-only */
+/* #undef HAVE_FLUSH_DCACHE_PAGE_GPL_ONLY */
 
 /* iops->follow_link() cookie */
 /* #undef HAVE_FOLLOW_LINK_COOKIE */
@@ -299,6 +314,9 @@
 
 /* fops->fsync() without dentry */
 /* #undef HAVE_FSYNC_WITHOUT_DENTRY */
+
+/* generic_fillattr requires struct mnt_idmap* */
+/* #undef HAVE_GENERIC_FILLATTR_IDMAP */
 
 /* generic_fillattr requires struct user_namespace* */
 #define HAVE_GENERIC_FILLATTR_USERNS 1
@@ -345,6 +363,12 @@
 /* Define if you have the iconv() function and it works. */
 /* #undef HAVE_ICONV */
 
+/* iops->getattr() takes struct mnt_idmap* */
+/* #undef HAVE_IDMAP_IOPS_GETATTR */
+
+/* iops->setattr() takes struct mnt_idmap* */
+/* #undef HAVE_IDMAP_IOPS_SETATTR */
+
 /* Define if compiler supports -Wimplicit-fallthrough */
 #define HAVE_IMPLICIT_FALLTHROUGH 1
 
@@ -357,8 +381,11 @@
 /* inode_owner_or_capable() exists */
 /* #undef HAVE_INODE_OWNER_OR_CAPABLE */
 
+/* inode_owner_or_capable() takes mnt_idmap */
+/* #undef HAVE_INODE_OWNER_OR_CAPABLE_IDMAP */
+
 /* inode_owner_or_capable() takes user_ns */
-#define HAVE_INODE_OWNER_OR_CAPABLE_IDMAPPED 1
+#define HAVE_INODE_OWNER_OR_CAPABLE_USERNS 1
 
 /* inode_set_flags() exists */
 #define HAVE_INODE_SET_FLAGS 1
@@ -378,17 +405,35 @@
 /* in_compat_syscall() is available */
 #define HAVE_IN_COMPAT_SYSCALL 1
 
+/* iops->create() takes struct mnt_idmap* */
+/* #undef HAVE_IOPS_CREATE_IDMAP */
+
 /* iops->create() takes struct user_namespace* */
 #define HAVE_IOPS_CREATE_USERNS 1
+
+/* iops->mkdir() takes struct mnt_idmap* */
+/* #undef HAVE_IOPS_MKDIR_IDMAP */
 
 /* iops->mkdir() takes struct user_namespace* */
 #define HAVE_IOPS_MKDIR_USERNS 1
 
+/* iops->mknod() takes struct mnt_idmap* */
+/* #undef HAVE_IOPS_MKNOD_IDMAP */
+
 /* iops->mknod() takes struct user_namespace* */
 #define HAVE_IOPS_MKNOD_USERNS 1
 
+/* iops->rename() takes struct mnt_idmap* */
+/* #undef HAVE_IOPS_RENAME_IDMAP */
+
 /* iops->rename() takes struct user_namespace* */
 #define HAVE_IOPS_RENAME_USERNS 1
+
+/* iops->setattr() exists */
+/* #undef HAVE_IOPS_SETATTR */
+
+/* iops->symlink() takes struct mnt_idmap* */
+/* #undef HAVE_IOPS_SYMLINK_IDMAP */
 
 /* iops->symlink() takes struct user_namespace* */
 #define HAVE_IOPS_SYMLINK_USERNS 1
@@ -531,6 +576,9 @@
 /* folio_wait_bit() exists */
 #define HAVE_PAGEMAP_FOLIO_WAIT_BIT 1
 
+/* part_to_dev() exists */
+/* #undef HAVE_PART_TO_DEV */
+
 /* iops->getattr() takes a path */
 /* #undef HAVE_PATH_IOPS_GETATTR */
 
@@ -576,6 +624,9 @@
 /* qat is enabled and existed */
 /* #undef HAVE_QAT */
 
+/* struct reclaim_state has reclaimed */
+/* #undef HAVE_RECLAIM_STATE_RECLAIMED */
+
 /* register_shrinker is vararg */
 #define HAVE_REGISTER_SHRINKER_VARARG 1
 
@@ -618,6 +669,9 @@
 /* Define to 1 if you have the <security/pam_modules.h> header file. */
 /* #undef HAVE_SECURITY_PAM_MODULES_H */
 
+/* setattr_prepare() accepts mnt_idmap */
+/* #undef HAVE_SETATTR_PREPARE_IDMAP */
+
 /* setattr_prepare() is available, doesn't accept user_namespace */
 /* #undef HAVE_SETATTR_PREPARE_NO_USERNS */
 
@@ -626,6 +680,9 @@
 
 /* iops->set_acl() exists, takes 3 args */
 #define HAVE_SET_ACL 1
+
+/* iops->set_acl() takes 4 args, arg1 is struct mnt_idmap * */
+/* #undef HAVE_SET_ACL_IDMAP_DENTRY */
 
 /* iops->set_acl() takes 4 args */
 #define HAVE_SET_ACL_USERNS 1
@@ -720,6 +777,9 @@
 /* i_op->tmpfile() uses old dentry signature */
 /* #undef HAVE_TMPFILE_DENTRY */
 
+/* i_op->tmpfile() has mnt_idmap */
+/* #undef HAVE_TMPFILE_IDMAP */
+
 /* i_op->tmpfile() has userns */
 #define HAVE_TMPFILE_USERNS 1
 
@@ -740,6 +800,9 @@
 
 /* iops->getattr() takes struct user_namespace* */
 #define HAVE_USERNS_IOPS_GETATTR 1
+
+/* iops->setattr() takes struct user_namespace* */
+#define HAVE_USERNS_IOPS_SETATTR 1
 
 /* iops->getattr() takes a vfsmount */
 /* #undef HAVE_VFSMOUNT_IOPS_GETATTR */
@@ -795,6 +858,9 @@
 /* wq_head->head and wq_entry->entry exist */
 #define HAVE_WAIT_QUEUE_HEAD_ENTRY 1
 
+/* int (*writepage_t)() takes struct folio* */
+/* #undef HAVE_WRITEPAGE_T_FOLIO */
+
 /* xattr_handler->get() wants dentry */
 /* #undef HAVE_XATTR_GET_DENTRY */
 
@@ -827,6 +893,9 @@
 
 /* xattr_handler->set() wants xattr_handler */
 /* #undef HAVE_XATTR_SET_HANDLER */
+
+/* xattr_handler->set() takes mnt_idmap */
+/* #undef HAVE_XATTR_SET_IDMAP */
 
 /* xattr_handler->set() takes user_namespace */
 #define HAVE_XATTR_SET_USERNS 1
@@ -934,7 +1003,7 @@
 /* #undef ZFS_IS_GPL_COMPATIBLE */
 
 /* Define the project alias string. */
-#define ZFS_META_ALIAS "zfs-2.1.9-1"
+#define ZFS_META_ALIAS "zfs-2.1.12-1"
 
 /* Define the project author. */
 #define ZFS_META_AUTHOR "OpenZFS"
@@ -943,7 +1012,7 @@
 /* #undef ZFS_META_DATA */
 
 /* Define the maximum compatible kernel version. */
-#define ZFS_META_KVER_MAX "6.1"
+#define ZFS_META_KVER_MAX "6.3"
 
 /* Define the minimum compatible kernel version. */
 #define ZFS_META_KVER_MIN "3.10"
@@ -967,7 +1036,7 @@
 #define ZFS_META_RELEASE "1"
 
 /* Define the project version. */
-#define ZFS_META_VERSION "2.1.9"
+#define ZFS_META_VERSION "2.1.12"
 
 /* count is located in percpu_ref.data */
 #define ZFS_PERCPU_REF_COUNT_IN_DATA 1

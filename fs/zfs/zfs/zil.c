@@ -92,6 +92,14 @@
 int zfs_commit_timeout_pct = 5;
 
 /*
+ * Minimal time we care to delay commit waiting for more ZIL records.
+ * At least FreeBSD kernel can't sleep for less than 2us at its best.
+ * So requests to sleep for less then 5us is a waste of CPU time with
+ * a risk of significant log latency increase due to oversleep.
+ */
+static unsigned long zil_min_commit_timeout = 5000;
+
+/*
  * See zil.h for more information about these fields.
  */
 zil_stats_t zil_stats = {
@@ -218,11 +226,10 @@ zil_init_log_chain(zilog_t *zilog, blkptr_t *bp)
  */
 static int
 zil_read_log_block(zilog_t *zilog, boolean_t decrypt, const blkptr_t *bp,
-    blkptr_t *nbp, void *dst, char **end)
+    blkptr_t *nbp, char **begin, char **end, arc_buf_t **abuf)
 {
 	enum zio_flag zio_flags = ZIO_FLAG_CANFAIL;
 	arc_flags_t aflags = ARC_FLAG_WAIT;
-	arc_buf_t *abuf = NULL;
 	zbookmark_phys_t zb;
 	int error;
 
@@ -239,7 +246,7 @@ zil_read_log_block(zilog_t *zilog, boolean_t decrypt, const blkptr_t *bp,
 	    ZB_ZIL_OBJECT, ZB_ZIL_LEVEL, bp->blk_cksum.zc_word[ZIL_ZC_SEQ]);
 
 	error = arc_read(NULL, zilog->zl_spa, bp, arc_getbuf_func,
-	    &abuf, ZIO_PRIORITY_SYNC_READ, zio_flags, &aflags, &zb);
+	    abuf, ZIO_PRIORITY_SYNC_READ, zio_flags, &aflags, &zb);
 
 	if (error == 0) {
 		zio_cksum_t cksum = bp->blk_cksum;
@@ -254,23 +261,23 @@ zil_read_log_block(zilog_t *zilog, boolean_t decrypt, const blkptr_t *bp,
 		 */
 		cksum.zc_word[ZIL_ZC_SEQ]++;
 
+		uint64_t size = BP_GET_LSIZE(bp);
 		if (BP_GET_CHECKSUM(bp) == ZIO_CHECKSUM_ZILOG2) {
-			zil_chain_t *zilc = abuf->b_data;
+			zil_chain_t *zilc = (*abuf)->b_data;
 			char *lr = (char *)(zilc + 1);
-			uint64_t len = zilc->zc_nused - sizeof (zil_chain_t);
 
 			if (bcmp(&cksum, &zilc->zc_next_blk.blk_cksum,
-			    sizeof (cksum)) || BP_IS_HOLE(&zilc->zc_next_blk)) {
+			    sizeof (cksum)) || BP_IS_HOLE(&zilc->zc_next_blk) ||
+			    zilc->zc_nused < sizeof (*zilc) ||
+			    zilc->zc_nused > size) {
 				error = SET_ERROR(ECKSUM);
 			} else {
-				ASSERT3U(len, <=, SPA_OLD_MAXBLOCKSIZE);
-				bcopy(lr, dst, len);
-				*end = (char *)dst + len;
+				*begin = lr;
+				*end = lr + zilc->zc_nused - sizeof (*zilc);
 				*nbp = zilc->zc_next_blk;
 			}
 		} else {
-			char *lr = abuf->b_data;
-			uint64_t size = BP_GET_LSIZE(bp);
+			char *lr = (*abuf)->b_data;
 			zil_chain_t *zilc = (zil_chain_t *)(lr + size) - 1;
 
 			if (bcmp(&cksum, &zilc->zc_next_blk.blk_cksum,
@@ -278,15 +285,11 @@ zil_read_log_block(zilog_t *zilog, boolean_t decrypt, const blkptr_t *bp,
 			    (zilc->zc_nused > (size - sizeof (*zilc)))) {
 				error = SET_ERROR(ECKSUM);
 			} else {
-				ASSERT3U(zilc->zc_nused, <=,
-				    SPA_OLD_MAXBLOCKSIZE);
-				bcopy(lr, dst, zilc->zc_nused);
-				*end = (char *)dst + zilc->zc_nused;
+				*begin = lr;
+				*end = lr + zilc->zc_nused;
 				*nbp = zilc->zc_next_blk;
 			}
 		}
-
-		arc_buf_destroy(abuf, &abuf);
 	}
 
 	return (error);
@@ -354,7 +357,6 @@ zil_parse(zilog_t *zilog, zil_parse_blk_func_t *parse_blk_func,
 	uint64_t blk_count = 0;
 	uint64_t lr_count = 0;
 	blkptr_t blk, next_blk;
-	char *lrbuf, *lrp;
 	int error = 0;
 
 	bzero(&next_blk, sizeof (blkptr_t));
@@ -374,13 +376,13 @@ zil_parse(zilog_t *zilog, zil_parse_blk_func_t *parse_blk_func,
 	 * If the log has been claimed, stop if we encounter a sequence
 	 * number greater than the highest claimed sequence number.
 	 */
-	lrbuf = zio_buf_alloc(SPA_OLD_MAXBLOCKSIZE);
 	zil_bp_tree_init(zilog);
 
 	for (blk = zh->zh_log; !BP_IS_HOLE(&blk); blk = next_blk) {
 		uint64_t blk_seq = blk.blk_cksum.zc_word[ZIL_ZC_SEQ];
 		int reclen;
-		char *end = NULL;
+		char *lrp, *end;
+		arc_buf_t *abuf = NULL;
 
 		if (blk_seq > claim_blk_seq)
 			break;
@@ -396,8 +398,10 @@ zil_parse(zilog_t *zilog, zil_parse_blk_func_t *parse_blk_func,
 			break;
 
 		error = zil_read_log_block(zilog, decrypt, &blk, &next_blk,
-		    lrbuf, &end);
+		    &lrp, &end, &abuf);
 		if (error != 0) {
+			if (abuf)
+				arc_buf_destroy(abuf, &abuf);
 			if (claimed) {
 				char name[ZFS_MAX_DATASET_NAME_LEN];
 
@@ -410,7 +414,7 @@ zil_parse(zilog_t *zilog, zil_parse_blk_func_t *parse_blk_func,
 			break;
 		}
 
-		for (lrp = lrbuf; lrp < end; lrp += reclen) {
+		for (; lrp < end; lrp += reclen) {
 			lr_t *lr = (lr_t *)lrp;
 			reclen = lr->lrc_reclen;
 			ASSERT3U(reclen, >=, sizeof (lr_t));
@@ -424,6 +428,7 @@ zil_parse(zilog_t *zilog, zil_parse_blk_func_t *parse_blk_func,
 			max_lr_seq = lr->lrc_seq;
 			lr_count++;
 		}
+		arc_buf_destroy(abuf, &abuf);
 	}
 done:
 	zilog->zl_parse_error = error;
@@ -433,7 +438,6 @@ done:
 	zilog->zl_parse_lr_count = lr_count;
 
 	zil_bp_tree_fini(zilog);
-	zio_buf_free(lrbuf, SPA_OLD_MAXBLOCKSIZE);
 
 	return (error);
 }
@@ -1155,7 +1159,8 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
 	lwb->lwb_tx = NULL;
 
 	ASSERT3U(lwb->lwb_issued_timestamp, >, 0);
-	zilog->zl_last_lwb_latency = gethrtime() - lwb->lwb_issued_timestamp;
+	zilog->zl_last_lwb_latency = (zilog->zl_last_lwb_latency * 3 +
+	    gethrtime() - lwb->lwb_issued_timestamp) / 4;
 
 	lwb->lwb_root_zio = NULL;
 
@@ -1584,6 +1589,7 @@ zil_lwb_write_issue(zilog_t *zilog, lwb_t *lwb)
 		wsz = P2ROUNDUP_TYPED(lwb->lwb_nused, ZIL_MIN_BLKSZ, uint64_t);
 		ASSERT3U(wsz, <=, lwb->lwb_sz);
 		zio_shrink(lwb->lwb_write_zio, wsz);
+		wsz = lwb->lwb_write_zio->io_size;
 
 	} else {
 		wsz = lwb->lwb_sz;
@@ -2283,8 +2289,9 @@ zil_process_commit_list(zilog_t *zilog)
 	spa_t *spa = zilog->zl_spa;
 	list_t nolwb_itxs;
 	list_t nolwb_waiters;
-	lwb_t *lwb;
+	lwb_t *lwb, *plwb;
 	itx_t *itx;
+	boolean_t first = B_TRUE;
 
 	ASSERT(MUTEX_HELD(&zilog->zl_issuer_lock));
 
@@ -2306,6 +2313,9 @@ zil_process_commit_list(zilog_t *zilog)
 		ASSERT3S(lwb->lwb_state, !=, LWB_STATE_ISSUED);
 		ASSERT3S(lwb->lwb_state, !=, LWB_STATE_WRITE_DONE);
 		ASSERT3S(lwb->lwb_state, !=, LWB_STATE_FLUSH_DONE);
+		first = (lwb->lwb_state != LWB_STATE_OPENED) &&
+		    ((plwb = list_prev(&zilog->zl_lwb_list, lwb)) == NULL ||
+		    plwb->lwb_state == LWB_STATE_FLUSH_DONE);
 	}
 
 	while ((itx = list_head(&zilog->zl_itx_commit_list)) != NULL) {
@@ -2476,7 +2486,23 @@ zil_process_commit_list(zilog_t *zilog)
 		 * try and pack as many itxs into as few lwbs as
 		 * possible, without significantly impacting the latency
 		 * of each individual itx.
+		 *
+		 * If we had no already running or open LWBs, it can be
+		 * the workload is single-threaded.  And if the ZIL write
+		 * latency is very small or if the LWB is almost full, it
+		 * may be cheaper to bypass the delay.
 		 */
+		if (lwb->lwb_state == LWB_STATE_OPENED && first) {
+			hrtime_t sleep = zilog->zl_last_lwb_latency *
+			    zfs_commit_timeout_pct / 100;
+			if (sleep < zil_min_commit_timeout ||
+			    lwb->lwb_sz - lwb->lwb_nused < lwb->lwb_sz / 8) {
+				lwb = zil_lwb_write_issue(zilog, lwb);
+				zilog->zl_cur_used = 0;
+				if (lwb == NULL)
+					zil_commit_writer_stall(zilog);
+			}
+		}
 	}
 }
 
@@ -2819,7 +2845,14 @@ static void
 zil_commit_itx_assign(zilog_t *zilog, zil_commit_waiter_t *zcw)
 {
 	dmu_tx_t *tx = dmu_tx_create(zilog->zl_os);
-	VERIFY0(dmu_tx_assign(tx, TXG_WAIT));
+
+	/*
+	 * Since we are not going to create any new dirty data, and we
+	 * can even help with clearing the existing dirty data, we
+	 * should not be subject to the dirty data based delays. We
+	 * use TXG_NOTHROTTLE to bypass the delay mechanism.
+	 */
+	VERIFY0(dmu_tx_assign(tx, TXG_WAIT | TXG_NOTHROTTLE));
 
 	itx_t *itx = zil_itx_create(TX_COMMIT, sizeof (lr_t));
 	itx->itx_sync = B_TRUE;
@@ -3725,6 +3758,9 @@ EXPORT_SYMBOL(zil_set_logbias);
 /* BEGIN CSTYLED */
 ZFS_MODULE_PARAM(zfs, zfs_, commit_timeout_pct, INT, ZMOD_RW,
 	"ZIL block open timeout percentage");
+
+ZFS_MODULE_PARAM(zfs_zil, zil_, min_commit_timeout, ULONG, ZMOD_RW,
+	"Minimum delay we care for ZIL block commit");
 
 ZFS_MODULE_PARAM(zfs_zil, zil_, replay_disable, INT, ZMOD_RW,
 	"Disable intent logging replay");

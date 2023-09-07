@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -19,30 +19,11 @@
  * CDDL HEADER END
  */
 
-/*
- * Copyright (c) 2016 by Delphix. All rights reserved.
- */
+#ifndef _OS_LINUX_SPL_MISC_H
+#define	_OS_LINUX_SPL_MISC_H
 
-#ifndef _SYS_VDEV_INITIALIZE_H
-#define	_SYS_VDEV_INITIALIZE_H
+#include <linux/kobject.h>
 
-#include <sys/spa.h>
+extern void spl_signal_kobj_evt(struct block_device *bdev);
 
-#ifdef	__cplusplus
-extern "C" {
 #endif
-
-extern void vdev_initialize(vdev_t *vd);
-extern void vdev_uninitialize(vdev_t *vd);
-extern void vdev_initialize_stop(vdev_t *vd,
-    vdev_initializing_state_t tgt_state, list_t *vd_list);
-extern void vdev_initialize_stop_all(vdev_t *vd,
-    vdev_initializing_state_t tgt_state);
-extern void vdev_initialize_stop_wait(spa_t *spa, list_t *vd_list);
-extern void vdev_initialize_restart(vdev_t *vd);
-
-#ifdef	__cplusplus
-}
-#endif
-
-#endif	/* _SYS_VDEV_INITIALIZE_H */
