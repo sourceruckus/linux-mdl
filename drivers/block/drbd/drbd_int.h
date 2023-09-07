@@ -72,10 +72,35 @@ enum {
  */
 #define DRBD_SIGKILL SIGHUP
 
+/* For compatibility with protocol < 122 */
 #define ID_SKIP         (4710ULL)
 #define ID_IN_SYNC      (4711ULL)
 #define ID_OUT_OF_SYNC  (4712ULL)
 #define ID_SYNCER (-1ULL)
+
+static inline enum ov_result drbd_block_id_to_ov_result(u64 block_id)
+{
+	switch (block_id) {
+	case ID_IN_SYNC:
+		return OV_RESULT_IN_SYNC;
+	case ID_OUT_OF_SYNC:
+		return OV_RESULT_OUT_OF_SYNC;
+	default:
+		return OV_RESULT_SKIP;
+	}
+}
+
+static inline u64 drbd_ov_result_to_block_id(enum ov_result result)
+{
+	switch (result) {
+	case OV_RESULT_IN_SYNC:
+		return ID_IN_SYNC;
+	case OV_RESULT_OUT_OF_SYNC:
+		return ID_OUT_OF_SYNC;
+	default:
+		return ID_SKIP;
+	}
+}
 
 #define UUID_NEW_BM_OFFSET ((u64)0x0001000000000000ULL)
 
@@ -405,14 +430,17 @@ struct digest_info {
 struct drbd_peer_request {
 	struct drbd_work w;
 	struct drbd_peer_device *peer_device;
-	struct list_head recv_order; /* peer writes, resync requests initiated locally */
-	/* Used by the submitter workqueues for:
-	 * * Processing conflicts
-	 * * Writes that are blocked on the activity log */
-	struct list_head submit_list;
+	struct list_head recv_order; /* see peer_requests, peer_reads, resync_requests */
 
-	unsigned int depend_dagtag_node_id;
-	u64 depend_dagtag;
+	union {
+		struct { /* read requests */
+			unsigned int depend_dagtag_node_id;
+			u64 depend_dagtag;
+		};
+		struct { /* resync target requests */
+			unsigned int requested_size;
+		};
+	};
 
 	struct drbd_page_chain_head page_chain;
 	unsigned int opf; /* to be used as bi_opf */
@@ -423,10 +451,8 @@ struct drbd_peer_request {
 		struct { /* regular peer_request */
 			struct drbd_epoch *epoch; /* for writes */
 			unsigned long submit_jif;
-			union {
-				u64 block_id;
-				struct digest_info *digest;
-			};
+			u64 block_id;
+			struct digest_info *digest;
 			u64 dagtag_sector;
 
 		};
@@ -484,6 +510,9 @@ enum {
 	/* The peer wants a write ACK for this (wire proto C) */
 	__EE_SEND_WRITE_ACK,
 
+	/* in on connection->net_ee */
+	__EE_ON_NET_LIST,
+
 	/* this is/was a write same request */
 	__EE_WRITE_SAME,
 
@@ -494,14 +523,11 @@ enum {
 	/* Hold reference in activity log */
 	__EE_IN_ACTLOG,
 
-	/* On resync target: This is a DISCARD and we can not merge it with requests behind */
-	__EE_RS_TRIM_LIMITED_BEHIND,
+	/* SyncTarget: This is the last resync request. */
+	__EE_LAST_RESYNC_REQUEST,
 
-	/* On resync target: This is a DISCARD and we can not merge it with requests before */
-	__EE_RS_TRIM_LIMITED_FRONT,
-
-	/* On resync target: This is a DISCARD was submitted */
-	__EE_RS_TRIM_SUBMITTED,
+	/* This peer_req->recv_order is on some list */
+	__EE_ON_RECV_ORDER,
 };
 #define EE_MAY_SET_IN_SYNC     (1<<__EE_MAY_SET_IN_SYNC)
 #define EE_SET_OUT_OF_SYNC     (1<<__EE_SET_OUT_OF_SYNC)
@@ -512,12 +538,12 @@ enum {
 #define EE_WAS_ERROR           (1<<__EE_WAS_ERROR)
 #define EE_HAS_DIGEST          (1<<__EE_HAS_DIGEST)
 #define EE_SEND_WRITE_ACK	(1<<__EE_SEND_WRITE_ACK)
+#define EE_ON_NET_LIST		(1<<__EE_ON_NET_LIST)
 #define EE_WRITE_SAME		(1<<__EE_WRITE_SAME)
 #define EE_RS_THIN_REQ		(1<<__EE_RS_THIN_REQ)
 #define EE_IN_ACTLOG		(1<<__EE_IN_ACTLOG)
-#define EE_RS_TRIM_LIMITED_BEHIND	(1<<__EE_RS_TRIM_LIMITED_BEHIND)
-#define EE_RS_TRIM_LIMITED_FRONT	(1<<__EE_RS_TRIM_LIMITED_FRONT)
-#define EE_RS_TRIM_SUBMITTED	(1<<__EE_RS_TRIM_SUBMITTED)
+#define EE_LAST_RESYNC_REQUEST	(1<<__EE_LAST_RESYNC_REQUEST)
+#define EE_ON_RECV_ORDER	(1<<__EE_ON_RECV_ORDER)
 
 /* flag bits per device */
 enum device_flag {
@@ -550,6 +576,7 @@ enum device_flag {
 	TIEBREAKER_QUORUM,	/* Tiebreaker keeps quorum; used to avoid too verbose logging */
 	DESTROYING_DEV,
 	TRY_TO_GET_RESYNC,
+	OUTDATE_ON_2PC_COMMIT,
 };
 
 /* flag bits per peer device */
@@ -915,7 +942,6 @@ struct drbd_resource {
 	const char **state_change_err_str;
 	bool remote_state_change;  /* remote state change in progress */
 	enum drbd_packet twopc_prepare_reply_cmd; /* this node's answer to the prepare phase or 0 */
-	struct list_head twopc_parents;  /* prepared on behalf of peer */
 	u64 twopc_parent_nodes;
 	struct twopc_reply twopc_reply;
 	struct timer_list twopc_timer;
@@ -1064,23 +1090,21 @@ struct drbd_connection {
 
 	atomic64_t last_dagtag_sector;
 
-	atomic_t active_ee_cnt;
+	atomic_t active_ee_cnt; /* Peer write requests waiting for activity log or backing disk. */
+	atomic_t backing_ee_cnt; /* Other peer requests waiting for conflicts or backing disk. */
+	atomic_t done_ee_cnt;
 	spinlock_t peer_reqs_lock;
 
-	/* Write/SyncTarget peer requests */
+	/* Lists using drbd_peer_request.recv_order (see also drbd_peer_device.resync_requests) */
 	struct list_head peer_requests; /* All peer writes in the order we received them */
-	struct list_head resync_request_ee; /* Resync request (L_SYNC_TARGET/L_VERIFY_S) waiting for reply */
-	struct list_head active_ee; /* IO in progress (P_DATA gets written to disk) */
-	struct list_head sync_ee;   /* IO in progress (P_RS_DATA_REPLY gets written to disk), or resync request waiting for conflicts. */
-	struct list_head done_ee;   /* Need to send P_WRITE_ACK/P_RS_WRITE_ACK */
+	struct list_head peer_reads; /* All reads in the order we received them */
 
-	/* Read/SyncSource peer requests */
+	/* Lists using drbd_peer_request.w.list */
+	struct list_head done_ee;   /* Need to send P_WRITE_ACK/P_RS_WRITE_ACK */
 	struct list_head dagtag_wait_ee; /* Resync read waiting for dagtag to be reached */
-	struct list_head read_ee;   /* P_DATA_REQUEST/P_RS_DATA_REQUEST/P_OV_REQUEST/P_OV_REPLY being read */
 	struct list_head resync_ack_ee;   /* P_RS_DATA_REPLY sent, waiting for P_RS_WRITE_ACK */
 	struct list_head net_ee;    /* zero-copy network send in progress */
 
-	atomic_t done_ee_cnt;
 	struct work_struct send_acks_work;
 	struct work_struct send_ping_ack_work;
 	struct work_struct send_ping_work;
@@ -1143,6 +1167,8 @@ struct drbd_connection {
 	/* The oldest request that is or was queued for this peer, but is not
 	 * done towards it. */
 	struct drbd_request *req_not_net_done;
+	/* Protects the caching pointers from being advanced concurrently. */
+	spinlock_t advance_cache_ptr_lock;
 
 	unsigned int s_cb_nr; /* keeps counting up */
 	unsigned int r_cb_nr; /* keeps counting up */
@@ -1178,7 +1204,6 @@ struct drbd_connection {
 	} after_reconciliation;
 
 	unsigned int peer_node_id;
-	struct list_head twopc_parent_list;
 
 	struct drbd_mutable_buffer reassemble_buffer;
 	union {
@@ -1226,7 +1251,6 @@ struct drbd_peer_device {
 	atomic_t packet_seq;
 	unsigned int peer_seq;
 	spinlock_t peer_seq_lock;
-	unsigned int max_bio_size;
 	uint64_t d_size;  /* size of disk */
 	uint64_t u_size;  /* user requested size */
 	uint64_t c_size;  /* current exported size */
@@ -1256,6 +1280,17 @@ struct drbd_peer_device {
 
 	/* Protected by connection->peer_reqs_lock */
 	struct list_head resync_requests; /* Resync requests in the order we sent them */
+	/*
+	 * If not NULL, all requests in resync_requests until this one have
+	 * been received. Discards are only counted as "received" once merging
+	 * is complete.
+	 */
+	struct drbd_peer_request *received_last;
+	/*
+	 * If not NULL, all requests in resync_requests after received_last
+	 * until this one are discards.
+	 */
+	struct drbd_peer_request *discard_last;
 
 	/* use checksums for *this* resync */
 	bool use_csums;
@@ -1330,6 +1365,14 @@ struct drbd_peer_device {
 		bool was_ahead;
 	} todo;
 	union drbd_state connect_state;
+	struct {
+		unsigned int	physical_block_size;
+		unsigned int	logical_block_size;
+		unsigned int	alignment_offset;
+		unsigned int	io_min;
+		unsigned int	io_opt;
+		unsigned int	max_bio_size;
+	} q_limits;
 };
 
 struct conflict_worker {
@@ -1628,7 +1671,8 @@ extern int drbd_send_dblock(struct drbd_peer_device *, struct drbd_request *req)
 extern int drbd_send_drequest(struct drbd_peer_device *,
 			      sector_t sector, int size, u64 block_id);
 extern int drbd_send_rs_request(struct drbd_peer_device *, enum drbd_packet cmd,
-			      sector_t sector, int size, unsigned int dagtag_node_id, u64 dagtag);
+			      sector_t sector, int size, u64 block_id,
+			      unsigned int dagtag_node_id, u64 dagtag);
 extern void *drbd_prepare_drequest_csum(struct drbd_peer_request *peer_req, enum drbd_packet cmd,
 		int digest_size, unsigned int dagtag_node_id, u64 dagtag);
 
@@ -1664,6 +1708,7 @@ extern u64 _drbd_uuid_pull_history(struct drbd_peer_device *peer_device) __must_
 extern void drbd_uuid_resync_starting(struct drbd_peer_device *peer_device); __must_hold(local);
 extern u64 drbd_uuid_resync_finished(struct drbd_peer_device *peer_device) __must_hold(local);
 extern void drbd_uuid_detect_finished_resyncs(struct drbd_peer_device *peer_device) __must_hold(local);
+extern bool drbd_uuid_set_exposed(struct drbd_device *device, u64 val, bool log);
 extern u64 drbd_weak_nodes_device(struct drbd_device *device);
 extern void drbd_md_set_flag(struct drbd_device *device, enum mdf_flag) __must_hold(local);
 extern void drbd_md_clear_flag(struct drbd_device *device, enum mdf_flag)__must_hold(local);
@@ -1963,7 +2008,7 @@ drbd_determine_dev_size(struct drbd_device *, sector_t peer_current_size,
 			enum dds_flags, struct resize_parms *) __must_hold(local);
 extern void resync_after_online_grow(struct drbd_peer_device *);
 extern void drbd_reconsider_queue_parameters(struct drbd_device *device,
-			struct drbd_backing_dev *bdev, struct o_qlim *o);
+			struct drbd_backing_dev *bdev);
 extern bool barrier_pending(struct drbd_resource *resource);
 extern enum drbd_state_rv drbd_set_role(struct drbd_resource *, enum drbd_role, bool, struct sk_buff *);
 extern bool conn_try_outdate_peer(struct drbd_connection *connection);
@@ -1988,7 +2033,8 @@ extern void verify_progress(struct drbd_peer_device *peer_device,
 extern void *drbd_md_get_buffer(struct drbd_device *device, const char *intent);
 extern void drbd_md_put_buffer(struct drbd_device *device);
 extern int drbd_md_sync_page_io(struct drbd_device *device,
-		struct drbd_backing_dev *bdev, sector_t sector, int op);
+		struct drbd_backing_dev *bdev, sector_t sector,
+		unsigned int op);
 extern bool drbd_al_active(struct drbd_device *device, sector_t sector, unsigned int size);
 extern void drbd_ov_out_of_sync_found(struct drbd_peer_device *, sector_t, int);
 extern void wait_until_done_or_force_detached(struct drbd_device *device,
@@ -2043,6 +2089,7 @@ extern int w_send_uuids(struct drbd_work *, int);
 extern void resync_timer_fn(struct timer_list *t);
 extern void start_resync_timer_fn(struct timer_list *t);
 
+extern int drbd_unmerge_discard(struct drbd_peer_request *peer_req_main, struct list_head *list);
 extern void drbd_endio_write_sec_final(struct drbd_peer_request *peer_req);
 
 /* bi_end_io handlers */
@@ -2095,12 +2142,12 @@ extern void drbd_queue_update_peers(struct drbd_peer_device *peer_device,
 		sector_t sector_start, sector_t sector_end);
 extern int drbd_issue_discard_or_zero_out(struct drbd_device *device,
 		sector_t start, unsigned int nr_sectors, int flags);
-extern void drbd_send_ack_be(struct drbd_peer_device *peer_device, enum drbd_packet cmd,
+extern int drbd_send_ack_be(struct drbd_peer_device *peer_device, enum drbd_packet cmd,
 		      sector_t sector, int size, u64 block_id);
 extern int drbd_send_ack(struct drbd_peer_device *, enum drbd_packet,
 			 struct drbd_peer_request *);
-extern int drbd_send_ack_ex(struct drbd_peer_device *, enum drbd_packet,
-			    sector_t sector, int blksize, u64 block_id);
+extern int drbd_send_ov_result(struct drbd_peer_device *peer_device, sector_t sector, int blksize,
+		u64 block_id, enum ov_result result);
 extern int drbd_receiver(struct drbd_thread *thi);
 extern void drbd_unsuccessful_resync_request(struct drbd_peer_request *peer_req, bool failed);
 extern void drbd_send_ping_wf(struct work_struct *ws);
@@ -2116,11 +2163,9 @@ extern int drbd_submit_peer_request(struct drbd_peer_request *);
 extern void drbd_cleanup_after_failed_submit_peer_write(struct drbd_peer_request *peer_req);
 extern void drbd_cleanup_peer_requests_wfa(struct drbd_device *device, struct list_head *cleanup);
 extern void drbd_remove_peer_req_interval(struct drbd_peer_request *peer_req);
-extern int drbd_free_peer_reqs(struct drbd_connection *, struct list_head *, bool is_net_ee);
+extern int drbd_free_peer_reqs(struct drbd_connection *connection, struct list_head *peer_reqs);
 extern struct drbd_peer_request *drbd_alloc_peer_req(struct drbd_peer_device *, gfp_t) __must_hold(local);
-extern void __drbd_free_peer_req(struct drbd_peer_request *, int);
-#define drbd_free_peer_req(pr) __drbd_free_peer_req(pr, 0)
-#define drbd_free_net_peer_req(pr) __drbd_free_peer_req(pr, 1)
+extern void drbd_free_peer_req(struct drbd_peer_request *peer_req);
 extern void _drbd_clear_done_ee(struct drbd_device *device, struct list_head *to_be_freed);
 extern int drbd_connected(struct drbd_peer_device *);
 extern void conn_connect2(struct drbd_connection *);
@@ -2134,9 +2179,8 @@ extern enum drbd_state_rv drbd_support_2pc_resize(struct drbd_resource *resource
 extern enum determine_dev_size
 drbd_commit_size_change(struct drbd_device *device, struct resize_parms *rs, u64 nodes_to_reach);
 extern void drbd_try_to_get_resynced(struct drbd_device *device);
-extern bool drbd_rs_discard_ready(struct drbd_peer_request *peer_req);
-extern void drbd_submit_rs_discard(struct drbd_peer_request *peer_req);
-extern void drbd_flush_queued_rs_discards(struct drbd_peer_device *peer_device);
+extern void drbd_process_rs_discards(struct drbd_peer_device *peer_device, bool submit_all);
+extern void drbd_last_resync_request(struct drbd_peer_device *peer_device, bool submit_all);
 
 static inline sector_t drbd_get_capacity(struct block_device *bdev)
 {
@@ -2371,8 +2415,10 @@ extern void drbd_flush_workqueue(struct drbd_work_queue *work_queue);
 extern void *__conn_prepare_command(struct drbd_connection *, int, enum drbd_stream);
 extern void *conn_prepare_command(struct drbd_connection *, int, enum drbd_stream);
 extern void *drbd_prepare_command(struct drbd_peer_device *, int, enum drbd_stream);
-extern int __send_command(struct drbd_connection *, int, enum drbd_packet, enum drbd_stream);
-extern int send_command(struct drbd_connection *, int, enum drbd_packet, enum drbd_stream);
+extern int __send_command(struct drbd_connection *connection, int vnr,
+			  enum drbd_packet cmd, int stream_and_flags);
+extern int send_command(struct drbd_connection *connection, int vnt,
+			enum drbd_packet cmd, int stream_and_flags);
 extern int drbd_send_command(struct drbd_peer_device *, enum drbd_packet, enum drbd_stream);
 
 extern int drbd_send_ping(struct drbd_connection *connection);
@@ -2615,13 +2661,6 @@ static inline bool may_inc_ap_bio(struct drbd_device *device)
 	return true;
 }
 
-static inline bool drbd_set_exposed_data_uuid(struct drbd_device *device, u64 val)
-{
-	bool changed = (device->exposed_data_uuid & ~UUID_PRIMARY) != (val & ~UUID_PRIMARY);
-	device->exposed_data_uuid = val;
-	return changed;
-}
-
 static inline u64 drbd_current_uuid(struct drbd_device *device)
 {
 	if (!device->ldev)
@@ -2685,6 +2724,18 @@ static inline struct net *drbd_net_assigned_to_connection(struct drbd_connection
 }
 
 #define NODE_MASK(id) ((u64)1 << (id))
+
+static inline void drbd_list_del_resync_request(struct drbd_peer_request *peer_req)
+{
+	peer_req->flags &= ~EE_ON_RECV_ORDER;
+	list_del(&peer_req->recv_order);
+
+	if (peer_req == peer_req->peer_device->received_last)
+		peer_req->peer_device->received_last = NULL;
+
+	if (peer_req == peer_req->peer_device->discard_last)
+		peer_req->peer_device->discard_last = NULL;
+}
 
 /*
  * drbd_interval_same_peer - determine whether "interval" is for the same peer as "i"
