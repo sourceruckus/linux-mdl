@@ -1,7 +1,7 @@
 -*- org -*-
 
 * TODO
-- play with CONFIG_FW_LOADER_DEBUG! might not need by fw loading patch anymore!
+- play with CONFIG_FW_LOADER_DEBUG! might not need my fw loading patch anymore!
 - OpenZFS latest
 - DRBD latest
 - Test OpenZFS 2.2.0-rc3?
