@@ -1,4 +1,3 @@
-/* BEGIN CSTYLED */
 /*
 ** $Id: lobject.h,v 2.71.1.2 2014/05/07 14:14:58 roberto Exp $
 ** Type definitions for Lua objects
@@ -514,14 +513,14 @@ typedef struct UpVal {
 typedef struct CClosure {
   ClosureHeader;
   lua_CFunction f;
-  TValue upvalue[1];  /* list of upvalues */
+  TValue upvalue[];  /* list of upvalues */
 } CClosure;
 
 
 typedef struct LClosure {
   ClosureHeader;
   struct Proto *p;
-  UpVal *upvals[1];  /* list of upvalues */
+  UpVal *upvals[];  /* list of upvalues */
 } LClosure;
 
 
@@ -602,4 +601,3 @@ LUAI_FUNC void luaO_chunkid (char *out, const char *source, size_t len);
 
 
 #endif
-/* END CSTYLED */

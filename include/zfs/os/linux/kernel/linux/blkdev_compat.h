@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -34,6 +34,11 @@
 #include <linux/hdreg.h>
 #include <linux/major.h>
 #include <linux/msdos_fs.h>	/* for SECTOR_* */
+#include <linux/bio.h>
+
+#ifdef HAVE_BLK_MQ
+#include <linux/blk-mq.h>
+#endif
 
 #ifndef HAVE_BLK_QUEUE_FLAG_SET
 static inline void
@@ -121,7 +126,8 @@ typedef int bvec_iterator_t;
 #endif
 
 static inline void
-bio_set_flags_failfast(struct block_device *bdev, int *flags)
+bio_set_flags_failfast(struct block_device *bdev, int *flags, bool dev,
+    bool transport, bool driver)
 {
 #ifdef CONFIG_BUG
 	/*
@@ -143,7 +149,12 @@ bio_set_flags_failfast(struct block_device *bdev, int *flags)
 #endif /* BLOCK_EXT_MAJOR */
 #endif /* CONFIG_BUG */
 
-	*flags |= REQ_FAILFAST_MASK;
+	if (dev)
+		*flags |= REQ_FAILFAST_DEV;
+	if (transport)
+		*flags |= REQ_FAILFAST_TRANSPORT;
+	if (driver)
+		*flags |= REQ_FAILFAST_DRIVER;
 }
 
 /*
@@ -170,7 +181,11 @@ bi_status_to_errno(blk_status_t status)
 		return (ENOLINK);
 	case BLK_STS_TARGET:
 		return (EREMOTEIO);
+#ifdef HAVE_BLK_STS_RESV_CONFLICT
+	case BLK_STS_RESV_CONFLICT:
+#else
 	case BLK_STS_NEXUS:
+#endif
 		return (EBADE);
 	case BLK_STS_MEDIUM:
 		return (ENODATA);
@@ -204,7 +219,11 @@ errno_to_bi_status(int error)
 	case EREMOTEIO:
 		return (BLK_STS_TARGET);
 	case EBADE:
+#ifdef HAVE_BLK_STS_RESV_CONFLICT
+		return (BLK_STS_RESV_CONFLICT);
+#else
 		return (BLK_STS_NEXUS);
+#endif
 	case ENODATA:
 		return (BLK_STS_MEDIUM);
 	case EILSEQ:
@@ -326,6 +345,9 @@ zfs_check_media_change(struct block_device *bdev)
 	return (0);
 }
 #define	vdev_bdev_reread_part(bdev)	zfs_check_media_change(bdev)
+#elif defined(HAVE_DISK_CHECK_MEDIA_CHANGE)
+#define	vdev_bdev_reread_part(bdev)	disk_check_media_change(bdev->bd_disk)
+#define	zfs_check_media_change(bdev)	disk_check_media_change(bdev->bd_disk)
 #else
 /*
  * This is encountered if check_disk_change() and bdev_check_media_change()
@@ -375,6 +397,12 @@ vdev_lookup_bdev(const char *path, dev_t *dev)
 #error "Unsupported kernel"
 #endif
 }
+
+#if defined(HAVE_BLK_MODE_T)
+#define	blk_mode_is_open_write(flag)	((flag) & BLK_OPEN_WRITE)
+#else
+#define	blk_mode_is_open_write(flag)	((flag) & FMODE_WRITE)
+#endif
 
 /*
  * Kernels without bio_set_op_attrs use bi_rw for the bio flags.
@@ -535,9 +563,11 @@ static inline boolean_t
 bdev_discard_supported(struct block_device *bdev)
 {
 #if defined(HAVE_BDEV_MAX_DISCARD_SECTORS)
-	return (!!bdev_max_discard_sectors(bdev));
+	return (bdev_max_discard_sectors(bdev) > 0 &&
+	    bdev_discard_granularity(bdev) > 0);
 #elif defined(HAVE_BLK_QUEUE_DISCARD)
-	return (!!blk_queue_discard(bdev_get_queue(bdev)));
+	return (blk_queue_discard(bdev_get_queue(bdev)) > 0 &&
+	    bdev_get_queue(bdev)->limits.discard_granularity > 0);
 #else
 #error "Unsupported kernel"
 #endif
@@ -644,4 +674,110 @@ blk_generic_alloc_queue(make_request_fn make_request, int node_id)
 }
 #endif /* !HAVE_SUBMIT_BIO_IN_BLOCK_DEVICE_OPERATIONS */
 
+/*
+ * All the io_*() helper functions below can operate on a bio, or a rq, but
+ * not both.  The older submit_bio() codepath will pass a bio, and the
+ * newer blk-mq codepath will pass a rq.
+ */
+static inline int
+io_data_dir(struct bio *bio, struct request *rq)
+{
+#ifdef HAVE_BLK_MQ
+	if (rq != NULL) {
+		if (op_is_write(req_op(rq))) {
+			return (WRITE);
+		} else {
+			return (READ);
+		}
+	}
+#else
+	ASSERT3P(rq, ==, NULL);
+#endif
+	return (bio_data_dir(bio));
+}
+
+static inline int
+io_is_flush(struct bio *bio, struct request *rq)
+{
+#ifdef HAVE_BLK_MQ
+	if (rq != NULL)
+		return (req_op(rq) == REQ_OP_FLUSH);
+#else
+	ASSERT3P(rq, ==, NULL);
+#endif
+	return (bio_is_flush(bio));
+}
+
+static inline int
+io_is_discard(struct bio *bio, struct request *rq)
+{
+#ifdef HAVE_BLK_MQ
+	if (rq != NULL)
+		return (req_op(rq) == REQ_OP_DISCARD);
+#else
+	ASSERT3P(rq, ==, NULL);
+#endif
+	return (bio_is_discard(bio));
+}
+
+static inline int
+io_is_secure_erase(struct bio *bio, struct request *rq)
+{
+#ifdef HAVE_BLK_MQ
+	if (rq != NULL)
+		return (req_op(rq) == REQ_OP_SECURE_ERASE);
+#else
+	ASSERT3P(rq, ==, NULL);
+#endif
+	return (bio_is_secure_erase(bio));
+}
+
+static inline int
+io_is_fua(struct bio *bio, struct request *rq)
+{
+#ifdef HAVE_BLK_MQ
+	if (rq != NULL)
+		return (rq->cmd_flags & REQ_FUA);
+#else
+	ASSERT3P(rq, ==, NULL);
+#endif
+	return (bio_is_fua(bio));
+}
+
+
+static inline uint64_t
+io_offset(struct bio *bio, struct request *rq)
+{
+#ifdef HAVE_BLK_MQ
+	if (rq != NULL)
+		return (blk_rq_pos(rq) << 9);
+#else
+	ASSERT3P(rq, ==, NULL);
+#endif
+	return (BIO_BI_SECTOR(bio) << 9);
+}
+
+static inline uint64_t
+io_size(struct bio *bio, struct request *rq)
+{
+#ifdef HAVE_BLK_MQ
+	if (rq != NULL)
+		return (blk_rq_bytes(rq));
+#else
+	ASSERT3P(rq, ==, NULL);
+#endif
+	return (BIO_BI_SIZE(bio));
+}
+
+static inline int
+io_has_data(struct bio *bio, struct request *rq)
+{
+#ifdef HAVE_BLK_MQ
+	if (rq != NULL)
+		return (bio_has_data(rq->bio));
+#else
+	ASSERT3P(rq, ==, NULL);
+#endif
+	return (bio_has_data(bio));
+}
 #endif /* _ZFS_BLKDEV_H */

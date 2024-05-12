@@ -70,8 +70,6 @@ typedef enum kmem_cbrc {
 #define	KMC_REAP_CHUNK		INT_MAX
 #define	KMC_DEFAULT_SEEKS	1
 
-#define	KMC_RECLAIM_ONCE	0x1	/* Force a single shrinker pass */
-
 extern struct list_head spl_kmem_cache_list;
 extern struct rw_semaphore spl_kmem_cache_sem;
 
@@ -98,9 +96,6 @@ extern struct rw_semaphore spl_kmem_cache_sem;
 #define	SPL_MAX_KMEM_ORDER_NR_PAGES	(KMALLOC_MAX_SIZE >> PAGE_SHIFT)
 #endif
 
-#define	POINTER_IS_VALID(p)		0	/* Unimplemented */
-#define	POINTER_INVALIDATE(pp)			/* Unimplemented */
-
 typedef int (*spl_kmem_ctor_t)(void *, void *, int);
 typedef void (*spl_kmem_dtor_t)(void *, void *);
 
@@ -111,7 +106,7 @@ typedef struct spl_kmem_magazine {
 	uint32_t		skm_refill;	/* Batch refill size */
 	struct spl_kmem_cache	*skm_cache;	/* Owned by cache */
 	unsigned int		skm_cpu;	/* Owned by cpu */
-	void			*skm_objs[0];	/* Object pointers */
+	void			*skm_objs[];	/* Object pointers */
 } spl_kmem_magazine_t;
 
 typedef struct spl_kmem_obj {
@@ -183,7 +178,7 @@ typedef struct spl_kmem_cache {
 } spl_kmem_cache_t;
 #define	kmem_cache_t		spl_kmem_cache_t
 
-extern spl_kmem_cache_t *spl_kmem_cache_create(char *name, size_t size,
+extern spl_kmem_cache_t *spl_kmem_cache_create(const char *name, size_t size,
     size_t align, spl_kmem_ctor_t ctor, spl_kmem_dtor_t dtor,
     void *reclaim, void *priv, void *vmp, int flags);
 extern void spl_kmem_cache_set_move(spl_kmem_cache_t *,
@@ -201,6 +196,14 @@ extern uint64_t spl_kmem_cache_entry_size(kmem_cache_t *cache);
     spl_kmem_cache_create(name, size, align, ctor, dtor, rclm, priv, vmp, fl)
 #define	kmem_cache_set_move(skc, move)	spl_kmem_cache_set_move(skc, move)
 #define	kmem_cache_destroy(skc)		spl_kmem_cache_destroy(skc)
+/*
+ * This is necessary to be compatible with other kernel modules
+ * or in-tree filesystem that may define kmem_cache_alloc,
+ * like bcachefs does it now.
+ */
+#ifdef kmem_cache_alloc
+#undef kmem_cache_alloc
+#endif
 #define	kmem_cache_alloc(skc, flags)	spl_kmem_cache_alloc(skc, flags)
 #define	kmem_cache_free(skc, obj)	spl_kmem_cache_free(skc, obj)
 #define	kmem_cache_reap_now(skc)	spl_kmem_cache_reap_now(skc)

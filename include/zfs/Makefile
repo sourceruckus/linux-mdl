@@ -134,16 +134,20 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-discard-granularity.m4 \
 	$(top_srcdir)/config/kernel-encode-fh-inode.m4 \
 	$(top_srcdir)/config/kernel-evict-inode.m4 \
+	$(top_srcdir)/config/kernel-fadvise.m4 \
 	$(top_srcdir)/config/kernel-fallocate.m4 \
 	$(top_srcdir)/config/kernel-file-dentry.m4 \
 	$(top_srcdir)/config/kernel-file-inode.m4 \
+	$(top_srcdir)/config/kernel-filemap-splice-read.m4 \
 	$(top_srcdir)/config/kernel-filemap.m4 \
 	$(top_srcdir)/config/kernel-flush_dcache_page.m4 \
 	$(top_srcdir)/config/kernel-fmode-t.m4 \
 	$(top_srcdir)/config/kernel-follow-down-one.m4 \
 	$(top_srcdir)/config/kernel-fpu.m4 \
 	$(top_srcdir)/config/kernel-fst-mount.m4 \
+	$(top_srcdir)/config/kernel-fsync-bdev.m4 \
 	$(top_srcdir)/config/kernel-fsync.m4 \
+	$(top_srcdir)/config/kernel-generic_fadvise.m4 \
 	$(top_srcdir)/config/kernel-generic_fillattr.m4 \
 	$(top_srcdir)/config/kernel-generic_io_acct.m4 \
 	$(top_srcdir)/config/kernel-generic_readlink.m4 \
@@ -153,11 +157,14 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-global_page_state.m4 \
 	$(top_srcdir)/config/kernel-group-info.m4 \
 	$(top_srcdir)/config/kernel-hotplug.m4 \
+	$(top_srcdir)/config/kernel-iattr-vfsid.m4 \
+	$(top_srcdir)/config/kernel-idmap_mnt_api.m4 \
 	$(top_srcdir)/config/kernel-in-compat-syscall.m4 \
 	$(top_srcdir)/config/kernel-inode-create.m4 \
 	$(top_srcdir)/config/kernel-inode-getattr.m4 \
 	$(top_srcdir)/config/kernel-inode-lock.m4 \
 	$(top_srcdir)/config/kernel-inode-lookup.m4 \
+	$(top_srcdir)/config/kernel-inode-permission.m4 \
 	$(top_srcdir)/config/kernel-inode-set-flags.m4 \
 	$(top_srcdir)/config/kernel-inode-set-iversion.m4 \
 	$(top_srcdir)/config/kernel-inode-setattr.m4 \
@@ -177,6 +184,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-misc-minor.m4 \
 	$(top_srcdir)/config/kernel-mkdir.m4 \
 	$(top_srcdir)/config/kernel-mknod.m4 \
+	$(top_srcdir)/config/kernel-mm-page-size.m4 \
 	$(top_srcdir)/config/kernel-objtool.m4 \
 	$(top_srcdir)/config/kernel-pagemap-folio_wait_bit.m4 \
 	$(top_srcdir)/config/kernel-pde-data.m4 \
@@ -185,6 +193,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-put-link.m4 \
 	$(top_srcdir)/config/kernel-readpages.m4 \
 	$(top_srcdir)/config/kernel-reclaim_state.m4 \
+	$(top_srcdir)/config/kernel-register_sysctl_table.m4 \
 	$(top_srcdir)/config/kernel-rename.m4 \
 	$(top_srcdir)/config/kernel-revalidate-disk-size.m4 \
 	$(top_srcdir)/config/kernel-rw.m4 \
@@ -200,6 +209,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-signal-stop.m4 \
 	$(top_srcdir)/config/kernel-special-state.m4 \
 	$(top_srcdir)/config/kernel-stdarg.m4 \
+	$(top_srcdir)/config/kernel-strlcpy.m4 \
 	$(top_srcdir)/config/kernel-super-userns.m4 \
 	$(top_srcdir)/config/kernel-symlink.m4 \
 	$(top_srcdir)/config/kernel-sysfs.m4 \
@@ -208,9 +218,12 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-totalhigh_pages.m4 \
 	$(top_srcdir)/config/kernel-totalram-pages-func.m4 \
 	$(top_srcdir)/config/kernel-truncate-setsize.m4 \
+	$(top_srcdir)/config/kernel-user-ns-inum.m4 \
 	$(top_srcdir)/config/kernel-userns-capabilities.m4 \
 	$(top_srcdir)/config/kernel-usleep_range.m4 \
 	$(top_srcdir)/config/kernel-vfs-direct_IO.m4 \
+	$(top_srcdir)/config/kernel-vfs-extended-file_range.m4 \
+	$(top_srcdir)/config/kernel-vfs-file_range.m4 \
 	$(top_srcdir)/config/kernel-vfs-filemap_dirty_folio.m4 \
 	$(top_srcdir)/config/kernel-vfs-fsync.m4 \
 	$(top_srcdir)/config/kernel-vfs-getattr.m4 \
@@ -236,6 +249,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/nls.m4 $(top_srcdir)/config/pkg.m4 \
 	$(top_srcdir)/config/po.m4 $(top_srcdir)/config/progtest.m4 \
 	$(top_srcdir)/config/toolchain-simd.m4 \
+	$(top_srcdir)/config/user-aio.h.m4 \
 	$(top_srcdir)/config/user-clock_gettime.m4 \
 	$(top_srcdir)/config/user-dracut.m4 \
 	$(top_srcdir)/config/user-gettext.m4 \
@@ -259,8 +273,14 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/zfs-meta.m4 $(top_srcdir)/configure.ac
 am__configure_deps = $(am__aclocal_m4_deps) $(CONFIGURE_DEPENDENCIES) \
 	$(ACLOCAL_M4)
-DIST_COMMON = $(srcdir)/Makefile.am $(am__kernel_HEADERS_DIST) \
-	$(am__libzfs_HEADERS_DIST) $(am__DIST_COMMON)
+DIST_COMMON = $(srcdir)/Makefile.am $(am__kernel_linux_HEADERS_DIST) \
+	$(am__kernel_spl_ia32_HEADERS_DIST) \
+	$(am__kernel_spl_rpc_HEADERS_DIST) \
+	$(am__kernel_spl_sys_HEADERS_DIST) \
+	$(am__kernel_sys_HEADERS_DIST) \
+	$(am__nobase_kernel_HEADERS_DIST) \
+	$(am__nobase_libzfs_HEADERS_DIST) $(am__noinst_HEADERS_DIST) \
+	$(am__DIST_COMMON)
 mkinstalldirs = $(install_sh) -d
 CONFIG_HEADER = $(top_builddir)/zfs_config.h
 CONFIG_CLEAN_FILES =
@@ -279,21 +299,27 @@ am__v_at_0 = @
 am__v_at_1 = 
 SOURCES =
 DIST_SOURCES =
-RECURSIVE_TARGETS = all-recursive check-recursive cscopelist-recursive \
-	ctags-recursive dvi-recursive html-recursive info-recursive \
-	install-data-recursive install-dvi-recursive \
-	install-exec-recursive install-html-recursive \
-	install-info-recursive install-pdf-recursive \
-	install-ps-recursive install-recursive installcheck-recursive \
-	installdirs-recursive pdf-recursive ps-recursive \
-	tags-recursive uninstall-recursive
 am__can_run_installinfo = \
   case $$AM_UPDATE_INFO_DIR in \
     n|no|NO) false;; \
     *) (install-info --version) >/dev/null 2>&1;; \
   esac
-am__kernel_HEADERS_DIST = cityhash.h zfeature_common.h zfs_comutil.h \
-	zfs_deleg.h zfs_fletcher.h zfs_namecheck.h zfs_prop.h
+am__kernel_linux_HEADERS_DIST = os/linux/kernel/linux/blkdev_compat.h \
+	os/linux/kernel/linux/compiler_compat.h \
+	os/linux/kernel/linux/dcache_compat.h \
+	os/linux/kernel/linux/kmap_compat.h \
+	os/linux/kernel/linux/mm_compat.h \
+	os/linux/kernel/linux/mod_compat.h \
+	os/linux/kernel/linux/page_compat.h \
+	os/linux/kernel/linux/percpu_compat.h \
+	os/linux/kernel/linux/simd.h \
+	os/linux/kernel/linux/simd_aarch64.h \
+	os/linux/kernel/linux/simd_arm.h \
+	os/linux/kernel/linux/simd_powerpc.h \
+	os/linux/kernel/linux/simd_x86.h \
+	os/linux/kernel/linux/utsname_compat.h \
+	os/linux/kernel/linux/vfs_compat.h \
+	os/linux/kernel/linux/xattr_compat.h
 am__vpath_adj_setup = srcdirstrip=`echo "$(srcdir)" | sed 's|.|.|g'`;
 am__vpath_adj = case $$p in \
     $(srcdir)/*) f=`echo "$$p" | sed "s|^$$srcdirstrip/||"`;; \
@@ -321,21 +347,208 @@ am__uninstall_files_from_dir = { \
     || { echo " ( cd '$$dir' && rm -f" $$files ")"; \
          $(am__cd) "$$dir" && rm -f $$files; }; \
   }
-am__installdirs = "$(DESTDIR)$(kerneldir)" "$(DESTDIR)$(libzfsdir)"
-am__libzfs_HEADERS_DIST = cityhash.h zfeature_common.h zfs_comutil.h \
-	zfs_deleg.h zfs_fletcher.h zfs_namecheck.h zfs_prop.h \
-	libnvpair.h libuutil_common.h libuutil.h libuutil_impl.h \
-	libzfs.h libzfsbootenv.h libzfs_core.h libzfs_impl.h \
+am__installdirs = "$(DESTDIR)$(kernel_linuxdir)" \
+	"$(DESTDIR)$(kernel_spl_ia32dir)" \
+	"$(DESTDIR)$(kernel_spl_rpcdir)" \
+	"$(DESTDIR)$(kernel_spl_sysdir)" "$(DESTDIR)$(kernel_sysdir)" \
+	"$(DESTDIR)$(kerneldir)" "$(DESTDIR)$(libzfsdir)"
+am__kernel_spl_ia32_HEADERS_DIST =  \
+	os/linux/spl/sys/ia32/asm_linkage.h
+am__kernel_spl_rpc_HEADERS_DIST = os/linux/spl/rpc/types.h \
+	os/linux/spl/rpc/xdr.h
+am__kernel_spl_sys_HEADERS_DIST = os/linux/spl/sys/acl.h \
+	os/linux/spl/sys/atomic.h os/linux/spl/sys/byteorder.h \
+	os/linux/spl/sys/callb.h os/linux/spl/sys/callo.h \
+	os/linux/spl/sys/cmn_err.h os/linux/spl/sys/condvar.h \
+	os/linux/spl/sys/cred.h os/linux/spl/sys/ctype.h \
+	os/linux/spl/sys/debug.h os/linux/spl/sys/disp.h \
+	os/linux/spl/sys/dkio.h os/linux/spl/sys/errno.h \
+	os/linux/spl/sys/fcntl.h os/linux/spl/sys/file.h \
+	os/linux/spl/sys/inttypes.h os/linux/spl/sys/isa_defs.h \
+	os/linux/spl/sys/kmem.h os/linux/spl/sys/kmem_cache.h \
+	os/linux/spl/sys/kstat.h os/linux/spl/sys/list.h \
+	os/linux/spl/sys/misc.h os/linux/spl/sys/mod_os.h \
+	os/linux/spl/sys/mutex.h os/linux/spl/sys/param.h \
+	os/linux/spl/sys/proc.h os/linux/spl/sys/processor.h \
+	os/linux/spl/sys/procfs_list.h os/linux/spl/sys/random.h \
+	os/linux/spl/sys/rwlock.h os/linux/spl/sys/shrinker.h \
+	os/linux/spl/sys/sid.h os/linux/spl/sys/signal.h \
+	os/linux/spl/sys/simd.h os/linux/spl/sys/stat.h \
+	os/linux/spl/sys/string.h os/linux/spl/sys/sunddi.h \
+	os/linux/spl/sys/sysmacros.h os/linux/spl/sys/systeminfo.h \
+	os/linux/spl/sys/taskq.h os/linux/spl/sys/thread.h \
+	os/linux/spl/sys/time.h os/linux/spl/sys/timer.h \
+	os/linux/spl/sys/trace.h os/linux/spl/sys/trace_spl.h \
+	os/linux/spl/sys/trace_taskq.h os/linux/spl/sys/tsd.h \
+	os/linux/spl/sys/types.h os/linux/spl/sys/types32.h \
+	os/linux/spl/sys/uio.h os/linux/spl/sys/user.h \
+	os/linux/spl/sys/vfs.h os/linux/spl/sys/vmem.h \
+	os/linux/spl/sys/vmsystm.h os/linux/spl/sys/vnode.h \
+	os/linux/spl/sys/wait.h os/linux/spl/sys/wmsum.h \
+	os/linux/spl/sys/zmod.h os/linux/spl/sys/zone.h
+am__kernel_sys_HEADERS_DIST = os/linux/zfs/sys/policy.h \
+	os/linux/zfs/sys/trace_acl.h os/linux/zfs/sys/trace_arc.h \
+	os/linux/zfs/sys/trace_common.h \
+	os/linux/zfs/sys/trace_dbgmsg.h os/linux/zfs/sys/trace_dbuf.h \
+	os/linux/zfs/sys/trace_dmu.h os/linux/zfs/sys/trace_dnode.h \
+	os/linux/zfs/sys/trace_multilist.h \
+	os/linux/zfs/sys/trace_rrwlock.h os/linux/zfs/sys/trace_txg.h \
+	os/linux/zfs/sys/trace_vdev.h os/linux/zfs/sys/trace_zfs.h \
+	os/linux/zfs/sys/trace_zil.h os/linux/zfs/sys/trace_zio.h \
+	os/linux/zfs/sys/trace_zrlock.h \
+	os/linux/zfs/sys/zfs_bootenv_os.h \
+	os/linux/zfs/sys/zfs_context_os.h \
+	os/linux/zfs/sys/zfs_ctldir.h os/linux/zfs/sys/zfs_dir.h \
+	os/linux/zfs/sys/zfs_vfsops_os.h \
+	os/linux/zfs/sys/zfs_vnops_os.h \
+	os/linux/zfs/sys/zfs_znode_impl.h os/linux/zfs/sys/zpl.h
+am__nobase_kernel_HEADERS_DIST = cityhash.h zfeature_common.h \
+	zfs_comutil.h zfs_deleg.h zfs_fletcher.h zfs_namecheck.h \
+	zfs_prop.h sys/abd.h sys/abd_impl.h sys/aggsum.h sys/arc.h \
+	sys/arc_impl.h sys/asm_linkage.h sys/avl.h sys/avl_impl.h \
+	sys/bitmap.h sys/bitops.h sys/blake3.h sys/blkptr.h \
+	sys/bplist.h sys/bpobj.h sys/bptree.h sys/bqueue.h sys/btree.h \
+	sys/brt.h sys/brt_impl.h sys/dataset_kstats.h sys/dbuf.h \
+	sys/ddt.h sys/dmu.h sys/dmu_impl.h sys/dmu_objset.h \
+	sys/dmu_recv.h sys/dmu_redact.h sys/dmu_send.h \
+	sys/dmu_traverse.h sys/dmu_tx.h sys/dmu_zfetch.h sys/dnode.h \
+	sys/dsl_bookmark.h sys/dsl_crypt.h sys/dsl_dataset.h \
+	sys/dsl_deadlist.h sys/dsl_deleg.h sys/dsl_destroy.h \
+	sys/dsl_dir.h sys/dsl_pool.h sys/dsl_prop.h sys/dsl_scan.h \
+	sys/dsl_synctask.h sys/dsl_userhold.h sys/edonr.h \
+	sys/efi_partition.h sys/frame.h sys/hkdf.h sys/metaslab.h \
+	sys/metaslab_impl.h sys/mmp.h sys/mntent.h sys/mod.h \
+	sys/multilist.h sys/nvpair.h sys/nvpair_impl.h sys/objlist.h \
+	sys/pathname.h sys/qat.h sys/range_tree.h sys/rrwlock.h \
+	sys/sa.h sys/sa_impl.h sys/sha2.h sys/skein.h sys/spa.h \
+	sys/spa_checkpoint.h sys/spa_checksum.h sys/spa_impl.h \
+	sys/spa_log_spacemap.h sys/space_map.h sys/space_reftree.h \
+	sys/sysevent.h sys/txg.h sys/txg_impl.h sys/u8_textprep.h \
+	sys/u8_textprep_data.h sys/uberblock.h sys/uberblock_impl.h \
+	sys/uio_impl.h sys/unique.h sys/uuid.h sys/vdev.h \
+	sys/vdev_disk.h sys/vdev_draid.h sys/vdev_file.h \
+	sys/vdev_impl.h sys/vdev_indirect_births.h \
+	sys/vdev_indirect_mapping.h sys/vdev_initialize.h \
+	sys/vdev_raidz.h sys/vdev_raidz_impl.h sys/vdev_rebuild.h \
+	sys/vdev_removal.h sys/vdev_trim.h sys/xvattr.h sys/zap.h \
+	sys/zap_impl.h sys/zap_leaf.h sys/zcp.h sys/zcp_global.h \
+	sys/zcp_iter.h sys/zcp_prop.h sys/zcp_set.h sys/zfeature.h \
+	sys/zfs_acl.h sys/zfs_bootenv.h sys/zfs_chksum.h \
+	sys/zfs_context.h sys/zfs_debug.h sys/zfs_delay.h \
+	sys/zfs_file.h sys/zfs_fuid.h sys/zfs_impl.h sys/zfs_project.h \
+	sys/zfs_quota.h sys/zfs_racct.h sys/zfs_ratelimit.h \
+	sys/zfs_refcount.h sys/zfs_rlock.h sys/zfs_sa.h sys/zfs_stat.h \
+	sys/zfs_sysfs.h sys/zfs_vfsops.h sys/zfs_vnops.h \
+	sys/zfs_znode.h sys/zil.h sys/zil_impl.h sys/zio.h \
+	sys/zio_checksum.h sys/zio_compress.h sys/zio_crypt.h \
+	sys/zio_impl.h sys/zio_priority.h sys/zrlock.h sys/zthr.h \
+	sys/crypto/api.h sys/crypto/common.h sys/crypto/icp.h \
+	sys/fm/protocol.h sys/fm/util.h sys/fm/fs/zfs.h sys/fs/zfs.h \
+	sys/lua/lauxlib.h sys/lua/lua.h sys/lua/luaconf.h \
+	sys/lua/lualib.h sys/sysevent/dev.h sys/sysevent/eventdefs.h \
+	sys/zstd/zstd.h sys/zfs_ioctl.h sys/zfs_ioctl_impl.h \
+	sys/zfs_onexit.h sys/zvol.h sys/zvol_impl.h
+am__nobase_libzfs_HEADERS_DIST = cityhash.h zfeature_common.h \
+	zfs_comutil.h zfs_deleg.h zfs_fletcher.h zfs_namecheck.h \
+	zfs_prop.h sys/abd.h sys/abd_impl.h sys/aggsum.h sys/arc.h \
+	sys/arc_impl.h sys/asm_linkage.h sys/avl.h sys/avl_impl.h \
+	sys/bitmap.h sys/bitops.h sys/blake3.h sys/blkptr.h \
+	sys/bplist.h sys/bpobj.h sys/bptree.h sys/bqueue.h sys/btree.h \
+	sys/brt.h sys/brt_impl.h sys/dataset_kstats.h sys/dbuf.h \
+	sys/ddt.h sys/dmu.h sys/dmu_impl.h sys/dmu_objset.h \
+	sys/dmu_recv.h sys/dmu_redact.h sys/dmu_send.h \
+	sys/dmu_traverse.h sys/dmu_tx.h sys/dmu_zfetch.h sys/dnode.h \
+	sys/dsl_bookmark.h sys/dsl_crypt.h sys/dsl_dataset.h \
+	sys/dsl_deadlist.h sys/dsl_deleg.h sys/dsl_destroy.h \
+	sys/dsl_dir.h sys/dsl_pool.h sys/dsl_prop.h sys/dsl_scan.h \
+	sys/dsl_synctask.h sys/dsl_userhold.h sys/edonr.h \
+	sys/efi_partition.h sys/frame.h sys/hkdf.h sys/metaslab.h \
+	sys/metaslab_impl.h sys/mmp.h sys/mntent.h sys/mod.h \
+	sys/multilist.h sys/nvpair.h sys/nvpair_impl.h sys/objlist.h \
+	sys/pathname.h sys/qat.h sys/range_tree.h sys/rrwlock.h \
+	sys/sa.h sys/sa_impl.h sys/sha2.h sys/skein.h sys/spa.h \
+	sys/spa_checkpoint.h sys/spa_checksum.h sys/spa_impl.h \
+	sys/spa_log_spacemap.h sys/space_map.h sys/space_reftree.h \
+	sys/sysevent.h sys/txg.h sys/txg_impl.h sys/u8_textprep.h \
+	sys/u8_textprep_data.h sys/uberblock.h sys/uberblock_impl.h \
+	sys/uio_impl.h sys/unique.h sys/uuid.h sys/vdev.h \
+	sys/vdev_disk.h sys/vdev_draid.h sys/vdev_file.h \
+	sys/vdev_impl.h sys/vdev_indirect_births.h \
+	sys/vdev_indirect_mapping.h sys/vdev_initialize.h \
+	sys/vdev_raidz.h sys/vdev_raidz_impl.h sys/vdev_rebuild.h \
+	sys/vdev_removal.h sys/vdev_trim.h sys/xvattr.h sys/zap.h \
+	sys/zap_impl.h sys/zap_leaf.h sys/zcp.h sys/zcp_global.h \
+	sys/zcp_iter.h sys/zcp_prop.h sys/zcp_set.h sys/zfeature.h \
+	sys/zfs_acl.h sys/zfs_bootenv.h sys/zfs_chksum.h \
+	sys/zfs_context.h sys/zfs_debug.h sys/zfs_delay.h \
+	sys/zfs_file.h sys/zfs_fuid.h sys/zfs_impl.h sys/zfs_project.h \
+	sys/zfs_quota.h sys/zfs_racct.h sys/zfs_ratelimit.h \
+	sys/zfs_refcount.h sys/zfs_rlock.h sys/zfs_sa.h sys/zfs_stat.h \
+	sys/zfs_sysfs.h sys/zfs_vfsops.h sys/zfs_vnops.h \
+	sys/zfs_znode.h sys/zil.h sys/zil_impl.h sys/zio.h \
+	sys/zio_checksum.h sys/zio_compress.h sys/zio_crypt.h \
+	sys/zio_impl.h sys/zio_priority.h sys/zrlock.h sys/zthr.h \
+	sys/crypto/api.h sys/crypto/common.h sys/crypto/icp.h \
+	sys/fm/protocol.h sys/fm/util.h sys/fm/fs/zfs.h sys/fs/zfs.h \
+	sys/lua/lauxlib.h sys/lua/lua.h sys/lua/luaconf.h \
+	sys/lua/lualib.h sys/sysevent/dev.h sys/sysevent/eventdefs.h \
+	sys/zstd/zstd.h libnvpair.h libuutil.h libuutil_common.h \
+	libuutil_impl.h libzfs.h libzfs_core.h libzfsbootenv.h \
 	libzutil.h thread_pool.h
-HEADERS = $(kernel_HEADERS) $(libzfs_HEADERS)
-RECURSIVE_CLEAN_TARGETS = mostlyclean-recursive clean-recursive	\
-  distclean-recursive maintainer-clean-recursive
-am__recursive_targets = \
-  $(RECURSIVE_TARGETS) \
-  $(RECURSIVE_CLEAN_TARGETS) \
-  $(am__extra_recursive_targets)
-AM_RECURSIVE_TARGETS = $(am__recursive_targets:-recursive=) TAGS CTAGS \
-	distdir
+am__noinst_HEADERS_DIST = os/freebsd/linux/compiler.h \
+	os/freebsd/linux/types.h os/freebsd/spl/acl/acl_common.h \
+	os/freebsd/spl/sys/ia32/asm_linkage.h os/freebsd/spl/sys/acl.h \
+	os/freebsd/spl/sys/acl_impl.h os/freebsd/spl/sys/atomic.h \
+	os/freebsd/spl/sys/byteorder.h os/freebsd/spl/sys/callb.h \
+	os/freebsd/spl/sys/ccompat.h os/freebsd/spl/sys/ccompile.h \
+	os/freebsd/spl/sys/cmn_err.h os/freebsd/spl/sys/condvar.h \
+	os/freebsd/spl/sys/cred.h os/freebsd/spl/sys/ctype.h \
+	os/freebsd/spl/sys/debug.h os/freebsd/spl/sys/dirent.h \
+	os/freebsd/spl/sys/disp.h os/freebsd/spl/sys/dkio.h \
+	os/freebsd/spl/sys/fcntl.h os/freebsd/spl/sys/file.h \
+	os/freebsd/spl/sys/freebsd_rwlock.h os/freebsd/spl/sys/idmap.h \
+	os/freebsd/spl/sys/inttypes.h os/freebsd/spl/sys/isa_defs.h \
+	os/freebsd/spl/sys/kmem.h os/freebsd/spl/sys/kmem_cache.h \
+	os/freebsd/spl/sys/kstat.h os/freebsd/spl/sys/list.h \
+	os/freebsd/spl/sys/list_impl.h os/freebsd/spl/sys/lock.h \
+	os/freebsd/spl/sys/misc.h os/freebsd/spl/sys/mod_os.h \
+	os/freebsd/spl/sys/mode.h os/freebsd/spl/sys/mount.h \
+	os/freebsd/spl/sys/mutex.h os/freebsd/spl/sys/param.h \
+	os/freebsd/spl/sys/policy.h os/freebsd/spl/sys/proc.h \
+	os/freebsd/spl/sys/processor.h \
+	os/freebsd/spl/sys/procfs_list.h os/freebsd/spl/sys/random.h \
+	os/freebsd/spl/sys/rwlock.h os/freebsd/spl/sys/sdt.h \
+	os/freebsd/spl/sys/sid.h os/freebsd/spl/sys/sig.h \
+	os/freebsd/spl/sys/simd.h os/freebsd/spl/sys/simd_aarch64.h \
+	os/freebsd/spl/sys/simd_arm.h \
+	os/freebsd/spl/sys/simd_powerpc.h \
+	os/freebsd/spl/sys/simd_x86.h os/freebsd/spl/sys/spl_condvar.h \
+	os/freebsd/spl/sys/string.h os/freebsd/spl/sys/sunddi.h \
+	os/freebsd/spl/sys/sysmacros.h os/freebsd/spl/sys/systeminfo.h \
+	os/freebsd/spl/sys/systm.h os/freebsd/spl/sys/taskq.h \
+	os/freebsd/spl/sys/thread.h os/freebsd/spl/sys/time.h \
+	os/freebsd/spl/sys/timer.h os/freebsd/spl/sys/trace.h \
+	os/freebsd/spl/sys/trace_zfs.h os/freebsd/spl/sys/types.h \
+	os/freebsd/spl/sys/types32.h os/freebsd/spl/sys/uio.h \
+	os/freebsd/spl/sys/uuid.h os/freebsd/spl/sys/vfs.h \
+	os/freebsd/spl/sys/vm.h os/freebsd/spl/sys/vmsystm.h \
+	os/freebsd/spl/sys/vnode.h os/freebsd/spl/sys/vnode_impl.h \
+	os/freebsd/spl/sys/wmsum.h os/freebsd/spl/sys/zmod.h \
+	os/freebsd/spl/sys/zone.h os/freebsd/zfs/sys/arc_os.h \
+	os/freebsd/zfs/sys/freebsd_crypto.h \
+	os/freebsd/zfs/sys/freebsd_event.h \
+	os/freebsd/zfs/sys/vdev_os.h \
+	os/freebsd/zfs/sys/zfs_bootenv_os.h \
+	os/freebsd/zfs/sys/zfs_context_os.h \
+	os/freebsd/zfs/sys/zfs_ctldir.h os/freebsd/zfs/sys/zfs_dir.h \
+	os/freebsd/zfs/sys/zfs_ioctl_compat.h \
+	os/freebsd/zfs/sys/zfs_vfsops_os.h \
+	os/freebsd/zfs/sys/zfs_vnops_os.h \
+	os/freebsd/zfs/sys/zfs_znode_impl.h os/freebsd/zfs/sys/zpl.h
+HEADERS = $(kernel_linux_HEADERS) $(kernel_spl_ia32_HEADERS) \
+	$(kernel_spl_rpc_HEADERS) $(kernel_spl_sys_HEADERS) \
+	$(kernel_sys_HEADERS) $(nobase_kernel_HEADERS) \
+	$(nobase_libzfs_HEADERS) $(noinst_HEADERS)
 am__tagged_files = $(HEADERS) $(SOURCES) $(TAGS_FILES) $(LISP)
 # Read a list of newline-separated strings from the standard input,
 # and print each of them once, without duplicates.  Input order is
@@ -355,35 +568,14 @@ am__define_uniq_tagged_files = \
   done | $(am__uniquify_input)`
 ETAGS = etags
 CTAGS = ctags
-DIST_SUBDIRS = $(SUBDIRS)
-am__DIST_COMMON = $(srcdir)/Makefile.in
+am__DIST_COMMON = $(srcdir)/Makefile.in \
+	$(srcdir)/os/freebsd/Makefile.am \
+	$(srcdir)/os/linux/Makefile.am
 DISTFILES = $(DIST_COMMON) $(DIST_SOURCES) $(TEXINFOS) $(EXTRA_DIST)
-am__relativize = \
-  dir0=`pwd`; \
-  sed_first='s,^\([^/]*\)/.*$$,\1,'; \
-  sed_rest='s,^[^/]*/*,,'; \
-  sed_last='s,^.*/\([^/]*\)$$,\1,'; \
-  sed_butlast='s,/*[^/]*$$,,'; \
-  while test -n "$$dir1"; do \
-    first=`echo "$$dir1" | sed -e "$$sed_first"`; \
-    if test "$$first" != "."; then \
-      if test "$$first" = ".."; then \
-        dir2=`echo "$$dir0" | sed -e "$$sed_last"`/"$$dir2"; \
-        dir0=`echo "$$dir0" | sed -e "$$sed_butlast"`; \
-      else \
-        first2=`echo "$$dir2" | sed -e "$$sed_first"`; \
-        if test "$$first2" = "$$first"; then \
-          dir2=`echo "$$dir2" | sed -e "$$sed_rest"`; \
-        else \
-          dir2="../$$dir2"; \
-        fi; \
-        dir0="$$dir0"/"$$first"; \
-      fi; \
-    fi; \
-    dir1=`echo "$$dir1" | sed -e "$$sed_rest"`; \
-  done; \
-  reldir="$$dir2"
 ACLOCAL = ${SHELL} /scrap/zfs/config/missing aclocal-1.15
+AIO_H_CFLAGS = 
+AIO_H_LIBS =  -lrt
+AIO_H_PC = 
 ALIEN = alien
 ALIEN_MAJOR = 8
 ALIEN_MINOR = 95
@@ -405,6 +597,7 @@ CCAS = gcc
 CCASDEPMODE = depmode=gcc3
 CCASFLAGS = -g -O2
 CCDEPMODE = depmode=gcc3
+CFGOPTS = --prefix=/usr --sbindir=/sbin --sysconfdir=/etc --localstatedir=/var --with-systemdunitdir=/lib/systemd/system --with-systemdpresetdir=/lib/systemd/system-preset --with-systemdgeneratordir=/lib/systemd/system-generator --with-linux=/scrap/linux-mdl-6.1 --with-linux-obj=/scrap/linux-mdl-6.1 --enable-linux-builtin
 CFLAGS = -g -O2
 CHECKBASHISMS = 
 CODE_COVERAGE_CFLAGS = 
@@ -414,7 +607,7 @@ CODE_COVERAGE_ENABLED = no
 CODE_COVERAGE_LDFLAGS = 
 CODE_COVERAGE_LIBS = 
 CPP = gcc -E
-CPPCHECK = 
+CPPCHECK = @printf "skipping cppcheck because cppcheck is not installed\n"
 CPPFLAGS = 
 CPU_COUNT = 16
 CYGPATH_W = echo
@@ -448,6 +641,7 @@ ECHO_T =
 EGREP = /bin/grep -E
 EXEEXT = 
 FGREP = /bin/grep -F
+FORMAT_OVERFLOW = -Wformat-overflow
 FRAME_LARGER_THAN = -Wframe-larger-than=4096
 GCOV = 
 GENHTML = 
@@ -469,9 +663,11 @@ INSTALL_SCRIPT = ${INSTALL}
 INSTALL_STRIP_PROGRAM = $(install_sh) -c -s
 INTLLIBS = 
 INTL_MACOSX_LIBS = 
+IS_SYSV_RC = true
 KERNEL_CC = 
 KERNEL_DEBUG_CFLAGS = 
 KERNEL_DEBUG_CPPFLAGS = -UDEBUG -DNDEBUG
+KERNEL_INFINITE_RECURSION = 
 KERNEL_LD = 
 KERNEL_LLVM = 
 KERNEL_MAKE = 
@@ -510,7 +706,7 @@ LIBUUID_PC = uuid
 LINUX = /scrap/linux-mdl-6.1
 LINUX_OBJ = /scrap/linux-mdl-6.1
 LINUX_SYMBOLS = NONE
-LINUX_VERSION = 6.1.51-mdl+
+LINUX_VERSION = 6.1.60-mdl+
 LIPO = 
 LN_S = ln -s
 LTLIBICONV = -liconv
@@ -539,10 +735,10 @@ OTOOL64 =
 PACKAGE = zfs
 PACKAGE_BUGREPORT = 
 PACKAGE_NAME = zfs
-PACKAGE_STRING = zfs 2.1.12
+PACKAGE_STRING = zfs 2.2.4
 PACKAGE_TARNAME = zfs
 PACKAGE_URL = 
-PACKAGE_VERSION = 2.1.12
+PACKAGE_VERSION = 2.2.4
 PARALLEL = 
 PATH_SEPARATOR = :
 PKG_CONFIG = /usr/bin/pkg-config
@@ -556,6 +752,7 @@ PYTHON_EXTRA_LDFLAGS =
 PYTHON_EXTRA_LIBS = 
 PYTHON_LIBS = 
 PYTHON_PLATFORM = linux
+PYTHON_PLATFORM_SITE_PKG = 
 PYTHON_PREFIX = ${prefix}
 PYTHON_SHEBANG = python3
 PYTHON_SITE_PKG = 
@@ -570,11 +767,11 @@ RM = rm -f
 RPM = rpm
 RPMBUILD = rpmbuild
 RPMBUILD_VERSION = 4.14.1
-RPM_DEFINE_COMMON = --define "$(DEBUG_ZFS) 1" --define "$(DEBUGINFO_ZFS) 1" --define "$(DEBUG_KMEM_ZFS) 1" --define "$(DEBUG_KMEM_TRACKING_ZFS) 1" --define "$(ASAN_ZFS) 1"
+RPM_DEFINE_COMMON = --define "$(DEBUG_ZFS) 1" --define "$(DEBUGINFO_ZFS) 1" --define "$(DEBUG_KMEM_ZFS) 1" --define "$(DEBUG_KMEM_TRACKING_ZFS) 1" --define "$(ASAN_ZFS) 1" --define "$(UBSAN_ZFS) 1"
 RPM_DEFINE_DKMS = 
 RPM_DEFINE_INITRAMFS = --define "_initramfs 1"
 RPM_DEFINE_KMOD = --define "_wrong_version_format_terminate_build 0"
-RPM_DEFINE_UTIL =  --define "_initconfdir $(initconfdir)" --define "_dracutdir $(dracutdir)" --define "_udevdir $(udevdir)" --define "_udevruledir $(udevruledir)" $(DEFINE_SYSTEMD) $(DEFINE_PYZFS) $(DEFINE_PAM) $(DEFINE_PYTHON_VERSION) $(DEFINE_PYTHON_PKG_VERSION) --define "_lib $(MULTIARCH_LIBDIR)"
+RPM_DEFINE_UTIL =  --define "_initconfdir $(initconfdir)" --define "_dracutdir $(dracutdir)" --define "_udevdir $(udevdir)" --define "_udevruledir $(udevruledir)" --define "_bashcompletiondir $(bashcompletiondir)" $(DEFINE_SYSTEMD) $(DEFINE_PYZFS) $(DEFINE_PAM) $(DEFINE_PYTHON_VERSION) $(DEFINE_PYTHON_PKG_VERSION) --define "_lib $(MULTIARCH_LIBDIR)"
 RPM_SPEC_DIR = rpm/generic
 RPM_VERSION = 4.14.1
 SED = /bin/sed
@@ -586,23 +783,24 @@ SRPM_DEFINE_DKMS =
 SRPM_DEFINE_KMOD = 
 SRPM_DEFINE_UTIL = 
 STRIP = strip
-TARGET_CPU = x86_64
 TEST_JOBS = 16
+UBSAN_CFLAGS = 
+UBSAN_ENABLED = no
+UBSAN_LDFLAGS = 
+UBSAN_ZFS = _without_ubsan
 USE_NLS = yes
 VENDOR = ubuntu
-VERSION = 2.1.12
+VERSION = 2.2.4
 WITH_DEBUG = 
 WITH_INVARIANTS = 
 XGETTEXT = /usr/bin/xgettext
 XGETTEXT_015 = /usr/bin/xgettext
 XGETTEXT_EXTRA_OPTIONS = 
 ZFS_CONFIG = all
-ZFS_INIT_SYSTEMD = systemd
-ZFS_INIT_SYSV = init.d
-ZFS_META_ALIAS = zfs-2.1.12-1
+ZFS_META_ALIAS = zfs-2.2.4-1
 ZFS_META_AUTHOR = OpenZFS
 ZFS_META_DATA = 
-ZFS_META_KVER_MAX = 6.3
+ZFS_META_KVER_MAX = 6.8
 ZFS_META_KVER_MIN = 3.10
 ZFS_META_LICENSE = CDDL
 ZFS_META_LT_AGE = 
@@ -610,12 +808,10 @@ ZFS_META_LT_CURRENT =
 ZFS_META_LT_REVISION = 
 ZFS_META_NAME = zfs
 ZFS_META_RELEASE = 1
-ZFS_META_VERSION = 2.1.12
-ZFS_MODULE_LOAD = modules-load.d
+ZFS_META_VERSION = 2.2.4
 ZLIB_CFLAGS = 
 ZLIB_LIBS = -lz
 ZLIB_PC = zlib
-ZONENAME = echo global
 abs_builddir = /scrap/zfs/include
 abs_srcdir = /scrap/zfs/include
 abs_top_builddir = /scrap/zfs
@@ -625,11 +821,13 @@ ac_ct_CC = gcc
 ac_ct_DUMPBIN = 
 ac_inplace = --in-place
 ac_system = Linux
+ac_system_l = linux
 am__include = include
 am__leading_dot = .
 am__quote = 
 am__tar = tar --format=posix -chf - "$$tardir"
 am__untar = tar -xf -
+bashcompletiondir = /usr/share/bash-completion/completions
 bindir = ${exec_prefix}/bin
 build = x86_64-pc-linux-gnu
 build_alias = 
@@ -694,7 +892,217 @@ top_srcdir = ..
 udevdir = /lib/udev
 udevruledir = /lib/udev/rules.d
 zfsexecdir = ${exec_prefix}/libexec/zfs
-SUBDIRS = sys os
+#kernel_linuxdir = $(kerneldir)/linux
+#kernel_linux_HEADERS = \
+#	os/linux/kernel/linux/blkdev_compat.h \
+#	os/linux/kernel/linux/compiler_compat.h \
+#	os/linux/kernel/linux/dcache_compat.h \
+#	os/linux/kernel/linux/kmap_compat.h \
+#	os/linux/kernel/linux/mm_compat.h \
+#	os/linux/kernel/linux/mod_compat.h \
+#	os/linux/kernel/linux/page_compat.h \
+#	os/linux/kernel/linux/percpu_compat.h \
+#	os/linux/kernel/linux/simd.h \
+#	os/linux/kernel/linux/simd_aarch64.h \
+#	os/linux/kernel/linux/simd_arm.h \
+#	os/linux/kernel/linux/simd_powerpc.h \
+#	os/linux/kernel/linux/simd_x86.h \
+#	os/linux/kernel/linux/utsname_compat.h \
+#	os/linux/kernel/linux/vfs_compat.h \
+#	os/linux/kernel/linux/xattr_compat.h
+
+#kernel_sysdir = $(kerneldir)/sys
+#kernel_sys_HEADERS = \
+#	os/linux/zfs/sys/policy.h \
+#	os/linux/zfs/sys/trace_acl.h \
+#	os/linux/zfs/sys/trace_arc.h \
+#	os/linux/zfs/sys/trace_common.h \
+#	os/linux/zfs/sys/trace_dbgmsg.h \
+#	os/linux/zfs/sys/trace_dbuf.h \
+#	os/linux/zfs/sys/trace_dmu.h \
+#	os/linux/zfs/sys/trace_dnode.h \
+#	os/linux/zfs/sys/trace_multilist.h \
+#	os/linux/zfs/sys/trace_rrwlock.h \
+#	os/linux/zfs/sys/trace_txg.h \
+#	os/linux/zfs/sys/trace_vdev.h \
+#	os/linux/zfs/sys/trace_zfs.h \
+#	os/linux/zfs/sys/trace_zil.h \
+#	os/linux/zfs/sys/trace_zio.h \
+#	os/linux/zfs/sys/trace_zrlock.h \
+#	os/linux/zfs/sys/zfs_bootenv_os.h \
+#	os/linux/zfs/sys/zfs_context_os.h \
+#	os/linux/zfs/sys/zfs_ctldir.h \
+#	os/linux/zfs/sys/zfs_dir.h \
+#	os/linux/zfs/sys/zfs_vfsops_os.h \
+#	os/linux/zfs/sys/zfs_vnops_os.h \
+#	os/linux/zfs/sys/zfs_znode_impl.h \
+#	os/linux/zfs/sys/zpl.h
+
+#kernel_spl_rpcdir = $(kerneldir)/spl/rpc
+#kernel_spl_rpc_HEADERS = \
+#	os/linux/spl/rpc/types.h \
+#	os/linux/spl/rpc/xdr.h
+
+#kernel_spl_sysdir = $(kerneldir)/spl/sys
+#kernel_spl_sys_HEADERS = \
+#	os/linux/spl/sys/acl.h \
+#	os/linux/spl/sys/atomic.h \
+#	os/linux/spl/sys/byteorder.h \
+#	os/linux/spl/sys/callb.h \
+#	os/linux/spl/sys/callo.h \
+#	os/linux/spl/sys/cmn_err.h \
+#	os/linux/spl/sys/condvar.h \
+#	os/linux/spl/sys/cred.h \
+#	os/linux/spl/sys/ctype.h \
+#	os/linux/spl/sys/debug.h \
+#	os/linux/spl/sys/disp.h \
+#	os/linux/spl/sys/dkio.h \
+#	os/linux/spl/sys/errno.h \
+#	os/linux/spl/sys/fcntl.h \
+#	os/linux/spl/sys/file.h \
+#	os/linux/spl/sys/inttypes.h \
+#	os/linux/spl/sys/isa_defs.h \
+#	os/linux/spl/sys/kmem.h \
+#	os/linux/spl/sys/kmem_cache.h \
+#	os/linux/spl/sys/kstat.h \
+#	os/linux/spl/sys/list.h \
+#	os/linux/spl/sys/misc.h \
+#	os/linux/spl/sys/mod_os.h \
+#	os/linux/spl/sys/mutex.h \
+#	os/linux/spl/sys/param.h \
+#	os/linux/spl/sys/proc.h \
+#	os/linux/spl/sys/processor.h \
+#	os/linux/spl/sys/procfs_list.h \
+#	os/linux/spl/sys/random.h \
+#	os/linux/spl/sys/rwlock.h \
+#	os/linux/spl/sys/shrinker.h \
+#	os/linux/spl/sys/sid.h \
+#	os/linux/spl/sys/signal.h \
+#	os/linux/spl/sys/simd.h \
+#	os/linux/spl/sys/stat.h \
+#	os/linux/spl/sys/string.h \
+#	os/linux/spl/sys/sunddi.h \
+#	os/linux/spl/sys/sysmacros.h \
+#	os/linux/spl/sys/systeminfo.h \
+#	os/linux/spl/sys/taskq.h \
+#	os/linux/spl/sys/thread.h \
+#	os/linux/spl/sys/time.h \
+#	os/linux/spl/sys/timer.h \
+#	os/linux/spl/sys/trace.h \
+#	os/linux/spl/sys/trace_spl.h \
+#	os/linux/spl/sys/trace_taskq.h \
+#	os/linux/spl/sys/tsd.h \
+#	os/linux/spl/sys/types.h \
+#	os/linux/spl/sys/types32.h \
+#	os/linux/spl/sys/uio.h \
+#	os/linux/spl/sys/user.h \
+#	os/linux/spl/sys/vfs.h \
+#	os/linux/spl/sys/vmem.h \
+#	os/linux/spl/sys/vmsystm.h \
+#	os/linux/spl/sys/vnode.h \
+#	os/linux/spl/sys/wait.h \
+#	os/linux/spl/sys/wmsum.h \
+#	os/linux/spl/sys/zmod.h \
+#	os/linux/spl/sys/zone.h
+
+#kernel_spl_ia32dir = $(kernel_spl_sysdir)/ia32
+#kernel_spl_ia32_HEADERS = \
+#	os/linux/spl/sys/ia32/asm_linkage.h
+
+#noinst_HEADERS = \
+#	os/freebsd/linux/compiler.h \
+#	os/freebsd/linux/types.h \
+#	\
+#	os/freebsd/spl/acl/acl_common.h \
+#	\
+#	os/freebsd/spl/sys/ia32/asm_linkage.h \
+#	\
+#	os/freebsd/spl/sys/acl.h \
+#	os/freebsd/spl/sys/acl_impl.h \
+#	os/freebsd/spl/sys/atomic.h \
+#	os/freebsd/spl/sys/byteorder.h \
+#	os/freebsd/spl/sys/callb.h \
+#	os/freebsd/spl/sys/ccompat.h \
+#	os/freebsd/spl/sys/ccompile.h \
+#	os/freebsd/spl/sys/cmn_err.h \
+#	os/freebsd/spl/sys/condvar.h \
+#	os/freebsd/spl/sys/cred.h \
+#	os/freebsd/spl/sys/ctype.h \
+#	os/freebsd/spl/sys/debug.h \
+#	os/freebsd/spl/sys/dirent.h \
+#	os/freebsd/spl/sys/disp.h \
+#	os/freebsd/spl/sys/dkio.h \
+#	os/freebsd/spl/sys/fcntl.h \
+#	os/freebsd/spl/sys/file.h \
+#	os/freebsd/spl/sys/freebsd_rwlock.h \
+#	os/freebsd/spl/sys/idmap.h \
+#	os/freebsd/spl/sys/inttypes.h \
+#	os/freebsd/spl/sys/isa_defs.h \
+#	os/freebsd/spl/sys/kmem.h \
+#	os/freebsd/spl/sys/kmem_cache.h \
+#	os/freebsd/spl/sys/kstat.h \
+#	os/freebsd/spl/sys/list.h \
+#	os/freebsd/spl/sys/list_impl.h \
+#	os/freebsd/spl/sys/lock.h \
+#	os/freebsd/spl/sys/misc.h \
+#	os/freebsd/spl/sys/mod_os.h \
+#	os/freebsd/spl/sys/mode.h \
+#	os/freebsd/spl/sys/mount.h \
+#	os/freebsd/spl/sys/mutex.h \
+#	os/freebsd/spl/sys/param.h \
+#	os/freebsd/spl/sys/policy.h \
+#	os/freebsd/spl/sys/proc.h \
+#	os/freebsd/spl/sys/processor.h \
+#	os/freebsd/spl/sys/procfs_list.h \
+#	os/freebsd/spl/sys/random.h \
+#	os/freebsd/spl/sys/rwlock.h \
+#	os/freebsd/spl/sys/sdt.h \
+#	os/freebsd/spl/sys/sid.h \
+#	os/freebsd/spl/sys/sig.h \
+#	os/freebsd/spl/sys/simd.h \
+#	os/freebsd/spl/sys/simd_aarch64.h \
+#	os/freebsd/spl/sys/simd_arm.h \
+#	os/freebsd/spl/sys/simd_powerpc.h \
+#	os/freebsd/spl/sys/simd_x86.h \
+#	os/freebsd/spl/sys/spl_condvar.h \
+#	os/freebsd/spl/sys/string.h \
+#	os/freebsd/spl/sys/sunddi.h \
+#	os/freebsd/spl/sys/sysmacros.h \
+#	os/freebsd/spl/sys/systeminfo.h \
+#	os/freebsd/spl/sys/systm.h \
+#	os/freebsd/spl/sys/taskq.h \
+#	os/freebsd/spl/sys/thread.h \
+#	os/freebsd/spl/sys/time.h \
+#	os/freebsd/spl/sys/timer.h \
+#	os/freebsd/spl/sys/trace.h \
+#	os/freebsd/spl/sys/trace_zfs.h \
+#	os/freebsd/spl/sys/types.h \
+#	os/freebsd/spl/sys/types32.h \
+#	os/freebsd/spl/sys/uio.h \
+#	os/freebsd/spl/sys/uuid.h \
+#	os/freebsd/spl/sys/vfs.h \
+#	os/freebsd/spl/sys/vm.h \
+#	os/freebsd/spl/sys/vmsystm.h \
+#	os/freebsd/spl/sys/vnode.h \
+#	os/freebsd/spl/sys/vnode_impl.h \
+#	os/freebsd/spl/sys/wmsum.h \
+#	os/freebsd/spl/sys/zmod.h \
+#	os/freebsd/spl/sys/zone.h \
+#	\
+#	os/freebsd/zfs/sys/arc_os.h \
+#	os/freebsd/zfs/sys/freebsd_crypto.h \
+#	os/freebsd/zfs/sys/freebsd_event.h \
+#	os/freebsd/zfs/sys/vdev_os.h \
+#	os/freebsd/zfs/sys/zfs_bootenv_os.h \
+#	os/freebsd/zfs/sys/zfs_context_os.h \
+#	os/freebsd/zfs/sys/zfs_ctldir.h \
+#	os/freebsd/zfs/sys/zfs_dir.h \
+#	os/freebsd/zfs/sys/zfs_ioctl_compat.h \
+#	os/freebsd/zfs/sys/zfs_vfsops_os.h \
+#	os/freebsd/zfs/sys/zfs_vnops_os.h \
+#	os/freebsd/zfs/sys/zfs_znode_impl.h \
+#	os/freebsd/zfs/sys/zpl.h
+
 COMMON_H = \
 	cityhash.h \
 	zfeature_common.h \
@@ -702,28 +1110,191 @@ COMMON_H = \
 	zfs_deleg.h \
 	zfs_fletcher.h \
 	zfs_namecheck.h \
-	zfs_prop.h
+	zfs_prop.h \
+	\
+	sys/abd.h \
+	sys/abd_impl.h \
+	sys/aggsum.h \
+	sys/arc.h \
+	sys/arc_impl.h \
+	sys/asm_linkage.h \
+	sys/avl.h \
+	sys/avl_impl.h \
+	sys/bitmap.h \
+	sys/bitops.h \
+	sys/blake3.h \
+	sys/blkptr.h \
+	sys/bplist.h \
+	sys/bpobj.h \
+	sys/bptree.h \
+	sys/bqueue.h \
+	sys/btree.h \
+	sys/brt.h \
+	sys/brt_impl.h \
+	sys/dataset_kstats.h \
+	sys/dbuf.h \
+	sys/ddt.h \
+	sys/dmu.h \
+	sys/dmu_impl.h \
+	sys/dmu_objset.h \
+	sys/dmu_recv.h \
+	sys/dmu_redact.h \
+	sys/dmu_send.h \
+	sys/dmu_traverse.h \
+	sys/dmu_tx.h \
+	sys/dmu_zfetch.h \
+	sys/dnode.h \
+	sys/dsl_bookmark.h \
+	sys/dsl_crypt.h \
+	sys/dsl_dataset.h \
+	sys/dsl_deadlist.h \
+	sys/dsl_deleg.h \
+	sys/dsl_destroy.h \
+	sys/dsl_dir.h \
+	sys/dsl_pool.h \
+	sys/dsl_prop.h \
+	sys/dsl_scan.h \
+	sys/dsl_synctask.h \
+	sys/dsl_userhold.h \
+	sys/edonr.h \
+	sys/efi_partition.h \
+	sys/frame.h \
+	sys/hkdf.h \
+	sys/metaslab.h \
+	sys/metaslab_impl.h \
+	sys/mmp.h \
+	sys/mntent.h \
+	sys/mod.h \
+	sys/multilist.h \
+	sys/nvpair.h \
+	sys/nvpair_impl.h \
+	sys/objlist.h \
+	sys/pathname.h \
+	sys/qat.h \
+	sys/range_tree.h \
+	sys/rrwlock.h \
+	sys/sa.h \
+	sys/sa_impl.h \
+	sys/sha2.h \
+	sys/skein.h \
+	sys/spa.h \
+	sys/spa_checkpoint.h \
+	sys/spa_checksum.h \
+	sys/spa_impl.h \
+	sys/spa_log_spacemap.h \
+	sys/space_map.h \
+	sys/space_reftree.h \
+	sys/sysevent.h \
+	sys/txg.h \
+	sys/txg_impl.h \
+	sys/u8_textprep.h \
+	sys/u8_textprep_data.h \
+	sys/uberblock.h \
+	sys/uberblock_impl.h \
+	sys/uio_impl.h \
+	sys/unique.h \
+	sys/uuid.h \
+	sys/vdev.h \
+	sys/vdev_disk.h \
+	sys/vdev_draid.h \
+	sys/vdev_file.h \
+	sys/vdev_impl.h \
+	sys/vdev_indirect_births.h \
+	sys/vdev_indirect_mapping.h \
+	sys/vdev_initialize.h \
+	sys/vdev_raidz.h \
+	sys/vdev_raidz_impl.h \
+	sys/vdev_rebuild.h \
+	sys/vdev_removal.h \
+	sys/vdev_trim.h \
+	sys/xvattr.h \
+	sys/zap.h \
+	sys/zap_impl.h \
+	sys/zap_leaf.h \
+	sys/zcp.h \
+	sys/zcp_global.h \
+	sys/zcp_iter.h \
+	sys/zcp_prop.h \
+	sys/zcp_set.h \
+	sys/zfeature.h \
+	sys/zfs_acl.h \
+	sys/zfs_bootenv.h \
+	sys/zfs_chksum.h \
+	sys/zfs_context.h \
+	sys/zfs_debug.h \
+	sys/zfs_delay.h \
+	sys/zfs_file.h \
+	sys/zfs_fuid.h \
+	sys/zfs_impl.h \
+	sys/zfs_project.h \
+	sys/zfs_quota.h \
+	sys/zfs_racct.h \
+	sys/zfs_ratelimit.h \
+	sys/zfs_refcount.h \
+	sys/zfs_rlock.h \
+	sys/zfs_sa.h \
+	sys/zfs_stat.h \
+	sys/zfs_sysfs.h \
+	sys/zfs_vfsops.h \
+	sys/zfs_vnops.h \
+	sys/zfs_znode.h \
+	sys/zil.h \
+	sys/zil_impl.h \
+	sys/zio.h \
+	sys/zio_checksum.h \
+	sys/zio_compress.h \
+	sys/zio_crypt.h \
+	sys/zio_impl.h \
+	sys/zio_priority.h \
+	sys/zrlock.h \
+	sys/zthr.h \
+	\
+	sys/crypto/api.h \
+	sys/crypto/common.h \
+	sys/crypto/icp.h \
+	\
+	sys/fm/protocol.h \
+	sys/fm/util.h \
+	sys/fm/fs/zfs.h \
+	\
+	sys/fs/zfs.h \
+	\
+	sys/lua/lauxlib.h \
+	sys/lua/lua.h \
+	sys/lua/luaconf.h \
+	sys/lua/lualib.h \
+	\
+	sys/sysevent/dev.h \
+	sys/sysevent/eventdefs.h \
+	\
+	sys/zstd/zstd.h
+
+KERNEL_H = \
+	sys/zfs_ioctl.h \
+	sys/zfs_ioctl_impl.h \
+	sys/zfs_onexit.h \
+	sys/zvol.h \
+	sys/zvol_impl.h
 
 USER_H = \
 	libnvpair.h \
-	libuutil_common.h \
 	libuutil.h \
+	libuutil_common.h \
 	libuutil_impl.h \
 	libzfs.h \
-	libzfsbootenv.h \
 	libzfs_core.h \
-	libzfs_impl.h \
+	libzfsbootenv.h \
 	libzutil.h \
 	thread_pool.h
 
 libzfsdir = $(includedir)/libzfs
-libzfs_HEADERS = $(COMMON_H) $(USER_H)
-#kerneldir = /usr/src/zfs-$(VERSION)/include
-#kernel_HEADERS = $(COMMON_H)
-all: all-recursive
+nobase_libzfs_HEADERS = $(COMMON_H) $(USER_H)
+kerneldir = $(prefix)/src/zfs-$(VERSION)/include
+#nobase_kernel_HEADERS = $(COMMON_H) $(KERNEL_H)
+all: all-am
 
 .SUFFIXES:
-$(srcdir)/Makefile.in: # $(srcdir)/Makefile.am  $(am__configure_deps)
+$(srcdir)/Makefile.in: # $(srcdir)/Makefile.am $(srcdir)/os/linux/Makefile.am $(srcdir)/os/freebsd/Makefile.am $(am__configure_deps)
 	@for dep in $?; do \
 	  case '$(am__configure_deps)' in \
 	    *$$dep*) \
@@ -732,9 +1303,9 @@ $(srcdir)/Makefile.in: # $(srcdir)/Makefile.am  $(am__configure_deps)
 	      exit 1;; \
 	  esac; \
 	done; \
-	echo ' cd $(top_srcdir) && $(AUTOMAKE) --gnu include/Makefile'; \
+	echo ' cd $(top_srcdir) && $(AUTOMAKE) --foreign include/Makefile'; \
 	$(am__cd) $(top_srcdir) && \
-	  $(AUTOMAKE) --gnu include/Makefile
+	  $(AUTOMAKE) --foreign include/Makefile
 Makefile: $(srcdir)/Makefile.in $(top_builddir)/config.status
 	@case '$?' in \
 	  *config.status*) \
@@ -743,6 +1314,7 @@ Makefile: $(srcdir)/Makefile.in $(top_builddir)/config.status
 	    echo ' cd $(top_builddir) && $(SHELL) ./config.status $(subdir)/$@ $(am__depfiles_maybe)'; \
 	    cd $(top_builddir) && $(SHELL) ./config.status $(subdir)/$@ $(am__depfiles_maybe);; \
 	esac;
+$(srcdir)/os/linux/Makefile.am $(srcdir)/os/freebsd/Makefile.am $(am__empty):
 
 $(top_builddir)/config.status: $(top_srcdir)/configure $(CONFIG_STATUS_DEPENDENCIES)
 	cd $(top_builddir) && $(MAKE) $(AM_MAKEFLAGS) am--refresh
@@ -758,104 +1330,168 @@ mostlyclean-libtool:
 
 clean-libtool:
 	-rm -rf .libs _libs
-install-kernelHEADERS: $(kernel_HEADERS)
+install-kernel_linuxHEADERS: $(kernel_linux_HEADERS)
 	@$(NORMAL_INSTALL)
-	@list='$(kernel_HEADERS)'; test -n "$(kerneldir)" || list=; \
+	@list='$(kernel_linux_HEADERS)'; test -n "$(kernel_linuxdir)" || list=; \
+	if test -n "$$list"; then \
+	  echo " $(MKDIR_P) '$(DESTDIR)$(kernel_linuxdir)'"; \
+	  $(MKDIR_P) "$(DESTDIR)$(kernel_linuxdir)" || exit 1; \
+	fi; \
+	for p in $$list; do \
+	  if test -f "$$p"; then d=; else d="$(srcdir)/"; fi; \
+	  echo "$$d$$p"; \
+	done | $(am__base_list) | \
+	while read files; do \
+	  echo " $(INSTALL_HEADER) $$files '$(DESTDIR)$(kernel_linuxdir)'"; \
+	  $(INSTALL_HEADER) $$files "$(DESTDIR)$(kernel_linuxdir)" || exit $$?; \
+	done
+
+uninstall-kernel_linuxHEADERS:
+	@$(NORMAL_UNINSTALL)
+	@list='$(kernel_linux_HEADERS)'; test -n "$(kernel_linuxdir)" || list=; \
+	files=`for p in $$list; do echo $$p; done | sed -e 's|^.*/||'`; \
+	dir='$(DESTDIR)$(kernel_linuxdir)'; $(am__uninstall_files_from_dir)
+install-kernel_spl_ia32HEADERS: $(kernel_spl_ia32_HEADERS)
+	@$(NORMAL_INSTALL)
+	@list='$(kernel_spl_ia32_HEADERS)'; test -n "$(kernel_spl_ia32dir)" || list=; \
+	if test -n "$$list"; then \
+	  echo " $(MKDIR_P) '$(DESTDIR)$(kernel_spl_ia32dir)'"; \
+	  $(MKDIR_P) "$(DESTDIR)$(kernel_spl_ia32dir)" || exit 1; \
+	fi; \
+	for p in $$list; do \
+	  if test -f "$$p"; then d=; else d="$(srcdir)/"; fi; \
+	  echo "$$d$$p"; \
+	done | $(am__base_list) | \
+	while read files; do \
+	  echo " $(INSTALL_HEADER) $$files '$(DESTDIR)$(kernel_spl_ia32dir)'"; \
+	  $(INSTALL_HEADER) $$files "$(DESTDIR)$(kernel_spl_ia32dir)" || exit $$?; \
+	done
+
+uninstall-kernel_spl_ia32HEADERS:
+	@$(NORMAL_UNINSTALL)
+	@list='$(kernel_spl_ia32_HEADERS)'; test -n "$(kernel_spl_ia32dir)" || list=; \
+	files=`for p in $$list; do echo $$p; done | sed -e 's|^.*/||'`; \
+	dir='$(DESTDIR)$(kernel_spl_ia32dir)'; $(am__uninstall_files_from_dir)
+install-kernel_spl_rpcHEADERS: $(kernel_spl_rpc_HEADERS)
+	@$(NORMAL_INSTALL)
+	@list='$(kernel_spl_rpc_HEADERS)'; test -n "$(kernel_spl_rpcdir)" || list=; \
+	if test -n "$$list"; then \
+	  echo " $(MKDIR_P) '$(DESTDIR)$(kernel_spl_rpcdir)'"; \
+	  $(MKDIR_P) "$(DESTDIR)$(kernel_spl_rpcdir)" || exit 1; \
+	fi; \
+	for p in $$list; do \
+	  if test -f "$$p"; then d=; else d="$(srcdir)/"; fi; \
+	  echo "$$d$$p"; \
+	done | $(am__base_list) | \
+	while read files; do \
+	  echo " $(INSTALL_HEADER) $$files '$(DESTDIR)$(kernel_spl_rpcdir)'"; \
+	  $(INSTALL_HEADER) $$files "$(DESTDIR)$(kernel_spl_rpcdir)" || exit $$?; \
+	done
+
+uninstall-kernel_spl_rpcHEADERS:
+	@$(NORMAL_UNINSTALL)
+	@list='$(kernel_spl_rpc_HEADERS)'; test -n "$(kernel_spl_rpcdir)" || list=; \
+	files=`for p in $$list; do echo $$p; done | sed -e 's|^.*/||'`; \
+	dir='$(DESTDIR)$(kernel_spl_rpcdir)'; $(am__uninstall_files_from_dir)
+install-kernel_spl_sysHEADERS: $(kernel_spl_sys_HEADERS)
+	@$(NORMAL_INSTALL)
+	@list='$(kernel_spl_sys_HEADERS)'; test -n "$(kernel_spl_sysdir)" || list=; \
+	if test -n "$$list"; then \
+	  echo " $(MKDIR_P) '$(DESTDIR)$(kernel_spl_sysdir)'"; \
+	  $(MKDIR_P) "$(DESTDIR)$(kernel_spl_sysdir)" || exit 1; \
+	fi; \
+	for p in $$list; do \
+	  if test -f "$$p"; then d=; else d="$(srcdir)/"; fi; \
+	  echo "$$d$$p"; \
+	done | $(am__base_list) | \
+	while read files; do \
+	  echo " $(INSTALL_HEADER) $$files '$(DESTDIR)$(kernel_spl_sysdir)'"; \
+	  $(INSTALL_HEADER) $$files "$(DESTDIR)$(kernel_spl_sysdir)" || exit $$?; \
+	done
+
+uninstall-kernel_spl_sysHEADERS:
+	@$(NORMAL_UNINSTALL)
+	@list='$(kernel_spl_sys_HEADERS)'; test -n "$(kernel_spl_sysdir)" || list=; \
+	files=`for p in $$list; do echo $$p; done | sed -e 's|^.*/||'`; \
+	dir='$(DESTDIR)$(kernel_spl_sysdir)'; $(am__uninstall_files_from_dir)
+install-kernel_sysHEADERS: $(kernel_sys_HEADERS)
+	@$(NORMAL_INSTALL)
+	@list='$(kernel_sys_HEADERS)'; test -n "$(kernel_sysdir)" || list=; \
+	if test -n "$$list"; then \
+	  echo " $(MKDIR_P) '$(DESTDIR)$(kernel_sysdir)'"; \
+	  $(MKDIR_P) "$(DESTDIR)$(kernel_sysdir)" || exit 1; \
+	fi; \
+	for p in $$list; do \
+	  if test -f "$$p"; then d=; else d="$(srcdir)/"; fi; \
+	  echo "$$d$$p"; \
+	done | $(am__base_list) | \
+	while read files; do \
+	  echo " $(INSTALL_HEADER) $$files '$(DESTDIR)$(kernel_sysdir)'"; \
+	  $(INSTALL_HEADER) $$files "$(DESTDIR)$(kernel_sysdir)" || exit $$?; \
+	done
+
+uninstall-kernel_sysHEADERS:
+	@$(NORMAL_UNINSTALL)
+	@list='$(kernel_sys_HEADERS)'; test -n "$(kernel_sysdir)" || list=; \
+	files=`for p in $$list; do echo $$p; done | sed -e 's|^.*/||'`; \
+	dir='$(DESTDIR)$(kernel_sysdir)'; $(am__uninstall_files_from_dir)
+install-nobase_kernelHEADERS: $(nobase_kernel_HEADERS)
+	@$(NORMAL_INSTALL)
+	@list='$(nobase_kernel_HEADERS)'; test -n "$(kerneldir)" || list=; \
 	if test -n "$$list"; then \
 	  echo " $(MKDIR_P) '$(DESTDIR)$(kerneldir)'"; \
 	  $(MKDIR_P) "$(DESTDIR)$(kerneldir)" || exit 1; \
 	fi; \
-	for p in $$list; do \
-	  if test -f "$$p"; then d=; else d="$(srcdir)/"; fi; \
-	  echo "$$d$$p"; \
-	done | $(am__base_list) | \
-	while read files; do \
-	  echo " $(INSTALL_HEADER) $$files '$(DESTDIR)$(kerneldir)'"; \
-	  $(INSTALL_HEADER) $$files "$(DESTDIR)$(kerneldir)" || exit $$?; \
+	$(am__nobase_list) | while read dir files; do \
+	  xfiles=; for file in $$files; do \
+	    if test -f "$$file"; then xfiles="$$xfiles $$file"; \
+	    else xfiles="$$xfiles $(srcdir)/$$file"; fi; done; \
+	  test -z "$$xfiles" || { \
+	    test "x$$dir" = x. || { \
+	      echo " $(MKDIR_P) '$(DESTDIR)$(kerneldir)/$$dir'"; \
+	      $(MKDIR_P) "$(DESTDIR)$(kerneldir)/$$dir"; }; \
+	    echo " $(INSTALL_HEADER) $$xfiles '$(DESTDIR)$(kerneldir)/$$dir'"; \
+	    $(INSTALL_HEADER) $$xfiles "$(DESTDIR)$(kerneldir)/$$dir" || exit $$?; }; \
 	done
 
-uninstall-kernelHEADERS:
+uninstall-nobase_kernelHEADERS:
 	@$(NORMAL_UNINSTALL)
-	@list='$(kernel_HEADERS)'; test -n "$(kerneldir)" || list=; \
-	files=`for p in $$list; do echo $$p; done | sed -e 's|^.*/||'`; \
+	@list='$(nobase_kernel_HEADERS)'; test -n "$(kerneldir)" || list=; \
+	$(am__nobase_strip_setup); files=`$(am__nobase_strip)`; \
 	dir='$(DESTDIR)$(kerneldir)'; $(am__uninstall_files_from_dir)
-install-libzfsHEADERS: $(libzfs_HEADERS)
+install-nobase_libzfsHEADERS: $(nobase_libzfs_HEADERS)
 	@$(NORMAL_INSTALL)
-	@list='$(libzfs_HEADERS)'; test -n "$(libzfsdir)" || list=; \
+	@list='$(nobase_libzfs_HEADERS)'; test -n "$(libzfsdir)" || list=; \
 	if test -n "$$list"; then \
 	  echo " $(MKDIR_P) '$(DESTDIR)$(libzfsdir)'"; \
 	  $(MKDIR_P) "$(DESTDIR)$(libzfsdir)" || exit 1; \
 	fi; \
-	for p in $$list; do \
-	  if test -f "$$p"; then d=; else d="$(srcdir)/"; fi; \
-	  echo "$$d$$p"; \
-	done | $(am__base_list) | \
-	while read files; do \
-	  echo " $(INSTALL_HEADER) $$files '$(DESTDIR)$(libzfsdir)'"; \
-	  $(INSTALL_HEADER) $$files "$(DESTDIR)$(libzfsdir)" || exit $$?; \
+	$(am__nobase_list) | while read dir files; do \
+	  xfiles=; for file in $$files; do \
+	    if test -f "$$file"; then xfiles="$$xfiles $$file"; \
+	    else xfiles="$$xfiles $(srcdir)/$$file"; fi; done; \
+	  test -z "$$xfiles" || { \
+	    test "x$$dir" = x. || { \
+	      echo " $(MKDIR_P) '$(DESTDIR)$(libzfsdir)/$$dir'"; \
+	      $(MKDIR_P) "$(DESTDIR)$(libzfsdir)/$$dir"; }; \
+	    echo " $(INSTALL_HEADER) $$xfiles '$(DESTDIR)$(libzfsdir)/$$dir'"; \
+	    $(INSTALL_HEADER) $$xfiles "$(DESTDIR)$(libzfsdir)/$$dir" || exit $$?; }; \
 	done
 
-uninstall-libzfsHEADERS:
+uninstall-nobase_libzfsHEADERS:
 	@$(NORMAL_UNINSTALL)
-	@list='$(libzfs_HEADERS)'; test -n "$(libzfsdir)" || list=; \
-	files=`for p in $$list; do echo $$p; done | sed -e 's|^.*/||'`; \
+	@list='$(nobase_libzfs_HEADERS)'; test -n "$(libzfsdir)" || list=; \
+	$(am__nobase_strip_setup); files=`$(am__nobase_strip)`; \
 	dir='$(DESTDIR)$(libzfsdir)'; $(am__uninstall_files_from_dir)
-
-# This directory's subdirectories are mostly independent; you can cd
-# into them and run 'make' without going through this Makefile.
-# To change the values of 'make' variables: instead of editing Makefiles,
-# (1) if the variable is set in 'config.status', edit 'config.status'
-#     (which will cause the Makefiles to be regenerated when you run 'make');
-# (2) otherwise, pass the desired values on the 'make' command line.
-$(am__recursive_targets):
-	@fail=; \
-	if $(am__make_keepgoing); then \
-	  failcom='fail=yes'; \
-	else \
-	  failcom='exit 1'; \
-	fi; \
-	dot_seen=no; \
-	target=`echo $@ | sed s/-recursive//`; \
-	case "$@" in \
-	  distclean-* | maintainer-clean-*) list='$(DIST_SUBDIRS)' ;; \
-	  *) list='$(SUBDIRS)' ;; \
-	esac; \
-	for subdir in $$list; do \
-	  echo "Making $$target in $$subdir"; \
-	  if test "$$subdir" = "."; then \
-	    dot_seen=yes; \
-	    local_target="$$target-am"; \
-	  else \
-	    local_target="$$target"; \
-	  fi; \
-	  ($(am__cd) $$subdir && $(MAKE) $(AM_MAKEFLAGS) $$local_target) \
-	  || eval $$failcom; \
-	done; \
-	if test "$$dot_seen" = "no"; then \
-	  $(MAKE) $(AM_MAKEFLAGS) "$$target-am" || exit 1; \
-	fi; test -z "$$fail"
 
 ID: $(am__tagged_files)
 	$(am__define_uniq_tagged_files); mkid -fID $$unique
-tags: tags-recursive
+tags: tags-am
 TAGS: tags
 
 tags-am: $(TAGS_DEPENDENCIES) $(am__tagged_files)
 	set x; \
 	here=`pwd`; \
-	if ($(ETAGS) --etags-include --version) >/dev/null 2>&1; then \
-	  include_option=--etags-include; \
-	  empty_fix=.; \
-	else \
-	  include_option=--include; \
-	  empty_fix=; \
-	fi; \
-	list='$(SUBDIRS)'; for subdir in $$list; do \
-	  if test "$$subdir" = .; then :; else \
-	    test ! -f $$subdir/TAGS || \
-	      set "$$@" "$$include_option=$$here/$$subdir/TAGS"; \
-	  fi; \
-	done; \
 	$(am__define_uniq_tagged_files); \
 	shift; \
 	if test -z "$(ETAGS_ARGS)$$*$$unique"; then :; else \
@@ -868,7 +1504,7 @@ tags-am: $(TAGS_DEPENDENCIES) $(am__tagged_files)
 	      $$unique; \
 	  fi; \
 	fi
-ctags: ctags-recursive
+ctags: ctags-am
 
 CTAGS: ctags
 ctags-am: $(TAGS_DEPENDENCIES) $(am__tagged_files)
@@ -881,7 +1517,7 @@ GTAGS:
 	here=`$(am__cd) $(top_builddir) && pwd` \
 	  && $(am__cd) $(top_srcdir) \
 	  && gtags -i $(GTAGS_ARGS) "$$here"
-cscopelist: cscopelist-recursive
+cscopelist: cscopelist-am
 
 cscopelist-am: $(am__tagged_files)
 	list='$(am__tagged_files)'; \
@@ -930,48 +1566,22 @@ distdir: $(DISTFILES)
 	    || exit 1; \
 	  fi; \
 	done
-	@list='$(DIST_SUBDIRS)'; for subdir in $$list; do \
-	  if test "$$subdir" = .; then :; else \
-	    $(am__make_dryrun) \
-	      || test -d "$(distdir)/$$subdir" \
-	      || $(MKDIR_P) "$(distdir)/$$subdir" \
-	      || exit 1; \
-	    dir1=$$subdir; dir2="$(distdir)/$$subdir"; \
-	    $(am__relativize); \
-	    new_distdir=$$reldir; \
-	    dir1=$$subdir; dir2="$(top_distdir)"; \
-	    $(am__relativize); \
-	    new_top_distdir=$$reldir; \
-	    echo " (cd $$subdir && $(MAKE) $(AM_MAKEFLAGS) top_distdir="$$new_top_distdir" distdir="$$new_distdir" \\"; \
-	    echo "     am__remove_distdir=: am__skip_length_check=: am__skip_mode_fix=: distdir)"; \
-	    ($(am__cd) $$subdir && \
-	      $(MAKE) $(AM_MAKEFLAGS) \
-	        top_distdir="$$new_top_distdir" \
-	        distdir="$$new_distdir" \
-		am__remove_distdir=: \
-		am__skip_length_check=: \
-		am__skip_mode_fix=: \
-	        distdir) \
-	      || exit 1; \
-	  fi; \
-	done
 check-am: all-am
-check: check-recursive
+check: check-am
 all-am: Makefile $(HEADERS)
-installdirs: installdirs-recursive
-installdirs-am:
-	for dir in "$(DESTDIR)$(kerneldir)" "$(DESTDIR)$(libzfsdir)"; do \
+installdirs:
+	for dir in "$(DESTDIR)$(kernel_linuxdir)" "$(DESTDIR)$(kernel_spl_ia32dir)" "$(DESTDIR)$(kernel_spl_rpcdir)" "$(DESTDIR)$(kernel_spl_sysdir)" "$(DESTDIR)$(kernel_sysdir)" "$(DESTDIR)$(kerneldir)" "$(DESTDIR)$(libzfsdir)"; do \
 	  test -z "$$dir" || $(MKDIR_P) "$$dir"; \
 	done
-install: install-recursive
-install-exec: install-exec-recursive
-install-data: install-data-recursive
-uninstall: uninstall-recursive
+install: install-am
+install-exec: install-exec-am
+install-data: install-data-am
+uninstall: uninstall-am
 
 install-am: all-am
 	@$(MAKE) $(AM_MAKEFLAGS) install-exec-am install-data-am
 
-installcheck: installcheck-recursive
+installcheck: installcheck-am
 install-strip:
 	if test -z '$(STRIP)'; then \
 	  $(MAKE) $(AM_MAKEFLAGS) INSTALL_PROGRAM="$(INSTALL_STRIP_PROGRAM)" \
@@ -993,88 +1603,101 @@ distclean-generic:
 maintainer-clean-generic:
 	@echo "This command is intended for maintainers to use"
 	@echo "it deletes files that may require special tools to rebuild."
-clean: clean-recursive
+clean: clean-am
 
 clean-am: clean-generic clean-libtool mostlyclean-am
 
-distclean: distclean-recursive
+distclean: distclean-am
 	-rm -f Makefile
 distclean-am: clean-am distclean-generic distclean-tags
 
-dvi: dvi-recursive
+dvi: dvi-am
 
 dvi-am:
 
-html: html-recursive
+html: html-am
 
 html-am:
 
-info: info-recursive
+info: info-am
 
 info-am:
 
-install-data-am: install-kernelHEADERS install-libzfsHEADERS
+install-data-am: install-kernel_linuxHEADERS \
+	install-kernel_spl_ia32HEADERS install-kernel_spl_rpcHEADERS \
+	install-kernel_spl_sysHEADERS install-kernel_sysHEADERS \
+	install-nobase_kernelHEADERS install-nobase_libzfsHEADERS
 
-install-dvi: install-dvi-recursive
+install-dvi: install-dvi-am
 
 install-dvi-am:
 
 install-exec-am:
 
-install-html: install-html-recursive
+install-html: install-html-am
 
 install-html-am:
 
-install-info: install-info-recursive
+install-info: install-info-am
 
 install-info-am:
 
 install-man:
 
-install-pdf: install-pdf-recursive
+install-pdf: install-pdf-am
 
 install-pdf-am:
 
-install-ps: install-ps-recursive
+install-ps: install-ps-am
 
 install-ps-am:
 
 installcheck-am:
 
-maintainer-clean: maintainer-clean-recursive
+maintainer-clean: maintainer-clean-am
 	-rm -f Makefile
 maintainer-clean-am: distclean-am maintainer-clean-generic
 
-mostlyclean: mostlyclean-recursive
+mostlyclean: mostlyclean-am
 
 mostlyclean-am: mostlyclean-generic mostlyclean-libtool
 
-pdf: pdf-recursive
+pdf: pdf-am
 
 pdf-am:
 
-ps: ps-recursive
+ps: ps-am
 
 ps-am:
 
-uninstall-am: uninstall-kernelHEADERS uninstall-libzfsHEADERS
+uninstall-am: uninstall-kernel_linuxHEADERS \
+	uninstall-kernel_spl_ia32HEADERS \
+	uninstall-kernel_spl_rpcHEADERS \
+	uninstall-kernel_spl_sysHEADERS uninstall-kernel_sysHEADERS \
+	uninstall-nobase_kernelHEADERS uninstall-nobase_libzfsHEADERS
 
-.MAKE: $(am__recursive_targets) install-am install-strip
+.MAKE: install-am install-strip
 
-.PHONY: $(am__recursive_targets) CTAGS GTAGS TAGS all all-am check \
-	check-am clean clean-generic clean-libtool cscopelist-am ctags \
-	ctags-am distclean distclean-generic distclean-libtool \
-	distclean-tags distdir dvi dvi-am html html-am info info-am \
-	install install-am install-data install-data-am install-dvi \
-	install-dvi-am install-exec install-exec-am install-html \
-	install-html-am install-info install-info-am \
-	install-kernelHEADERS install-libzfsHEADERS install-man \
-	install-pdf install-pdf-am install-ps install-ps-am \
-	install-strip installcheck installcheck-am installdirs \
-	installdirs-am maintainer-clean maintainer-clean-generic \
-	mostlyclean mostlyclean-generic mostlyclean-libtool pdf pdf-am \
-	ps ps-am tags tags-am uninstall uninstall-am \
-	uninstall-kernelHEADERS uninstall-libzfsHEADERS
+.PHONY: CTAGS GTAGS TAGS all all-am check check-am clean clean-generic \
+	clean-libtool cscopelist-am ctags ctags-am distclean \
+	distclean-generic distclean-libtool distclean-tags distdir dvi \
+	dvi-am html html-am info info-am install install-am \
+	install-data install-data-am install-dvi install-dvi-am \
+	install-exec install-exec-am install-html install-html-am \
+	install-info install-info-am install-kernel_linuxHEADERS \
+	install-kernel_spl_ia32HEADERS install-kernel_spl_rpcHEADERS \
+	install-kernel_spl_sysHEADERS install-kernel_sysHEADERS \
+	install-man install-nobase_kernelHEADERS \
+	install-nobase_libzfsHEADERS install-pdf install-pdf-am \
+	install-ps install-ps-am install-strip installcheck \
+	installcheck-am installdirs maintainer-clean \
+	maintainer-clean-generic mostlyclean mostlyclean-generic \
+	mostlyclean-libtool pdf pdf-am ps ps-am tags tags-am uninstall \
+	uninstall-am uninstall-kernel_linuxHEADERS \
+	uninstall-kernel_spl_ia32HEADERS \
+	uninstall-kernel_spl_rpcHEADERS \
+	uninstall-kernel_spl_sysHEADERS uninstall-kernel_sysHEADERS \
+	uninstall-nobase_kernelHEADERS uninstall-nobase_libzfsHEADERS
 
 .PRECIOUS: Makefile
 

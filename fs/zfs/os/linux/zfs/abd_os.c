@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -21,6 +21,7 @@
 /*
  * Copyright (c) 2014 by Chunwei Chen. All rights reserved.
  * Copyright (c) 2019 by Delphix. All rights reserved.
+ * Copyright (c) 2023, 2024, Klara Inc.
  */
 
 /*
@@ -59,9 +60,19 @@
 #include <sys/zfs_znode.h>
 #ifdef _KERNEL
 #include <linux/kmap_compat.h>
+#include <linux/mm_compat.h>
 #include <linux/scatterlist.h>
+#include <linux/version.h>
+#endif
+
+#ifdef _KERNEL
+#if defined(MAX_ORDER)
+#define	ABD_MAX_ORDER	(MAX_ORDER)
+#elif defined(MAX_PAGE_ORDER)
+#define	ABD_MAX_ORDER	(MAX_PAGE_ORDER)
+#endif
 #else
-#define	MAX_ORDER	1
+#define	ABD_MAX_ORDER	(1)
 #endif
 
 typedef struct abd_stats {
@@ -71,7 +82,7 @@ typedef struct abd_stats {
 	kstat_named_t abdstat_scatter_cnt;
 	kstat_named_t abdstat_scatter_data_size;
 	kstat_named_t abdstat_scatter_chunk_waste;
-	kstat_named_t abdstat_scatter_orders[MAX_ORDER];
+	kstat_named_t abdstat_scatter_orders[ABD_MAX_ORDER];
 	kstat_named_t abdstat_scatter_page_multi_chunk;
 	kstat_named_t abdstat_scatter_page_multi_zone;
 	kstat_named_t abdstat_scatter_page_alloc_retry;
@@ -132,14 +143,14 @@ static abd_stats_t abd_stats = {
 	{ "scatter_sg_table_retry",		KSTAT_DATA_UINT64 },
 };
 
-struct {
+static struct {
 	wmsum_t abdstat_struct_size;
 	wmsum_t abdstat_linear_cnt;
 	wmsum_t abdstat_linear_data_size;
 	wmsum_t abdstat_scatter_cnt;
 	wmsum_t abdstat_scatter_data_size;
 	wmsum_t abdstat_scatter_chunk_waste;
-	wmsum_t abdstat_scatter_orders[MAX_ORDER];
+	wmsum_t abdstat_scatter_orders[ABD_MAX_ORDER];
 	wmsum_t abdstat_scatter_page_multi_chunk;
 	wmsum_t abdstat_scatter_page_multi_zone;
 	wmsum_t abdstat_scatter_page_alloc_retry;
@@ -148,8 +159,6 @@ struct {
 
 #define	abd_for_each_sg(abd, sg, n, i)	\
 	for_each_sg(ABD_SCATTER(abd).abd_sgl, sg, n, i)
-
-unsigned zfs_abd_scatter_max_order = MAX_ORDER - 1;
 
 /*
  * zfs_abd_scatter_min_size is the minimum allocation size to use scatter
@@ -173,7 +182,7 @@ unsigned zfs_abd_scatter_max_order = MAX_ORDER - 1;
  * By default we use linear allocations for 512B and 1KB, and scatter
  * allocations for larger (1.5KB and up).
  */
-int zfs_abd_scatter_min_size = 512 * 3;
+static int zfs_abd_scatter_min_size = 512 * 3;
 
 /*
  * We use a scattered SPA_MAXBLOCKSIZE sized ABD whose pages are
@@ -208,6 +217,7 @@ abd_alloc_struct_impl(size_t size)
 	 * In Linux we do not use the size passed in during ABD
 	 * allocation, so we just ignore it.
 	 */
+	(void) size;
 	abd_t *abd = kmem_cache_alloc(abd_cache, KM_PUSHPAGE);
 	ASSERT3P(abd, !=, NULL);
 	ABDSTAT_INCR(abdstat_struct_size, sizeof (abd_t));
@@ -223,6 +233,8 @@ abd_free_struct_impl(abd_t *abd)
 }
 
 #ifdef _KERNEL
+static unsigned zfs_abd_scatter_max_order = ABD_MAX_ORDER - 1;
+
 /*
  * Mark zfs data pages so they can be excluded from kernel crash dumps
  */
@@ -271,18 +283,21 @@ abd_alloc_chunks(abd_t *abd, size_t size)
 	struct page *page, *tmp_page = NULL;
 	gfp_t gfp = __GFP_NOWARN | GFP_NOIO;
 	gfp_t gfp_comp = (gfp | __GFP_NORETRY | __GFP_COMP) & ~__GFP_RECLAIM;
-	int max_order = MIN(zfs_abd_scatter_max_order, MAX_ORDER - 1);
-	int nr_pages = abd_chunkcnt_for_bytes(size);
-	int chunks = 0, zones = 0;
+	unsigned int max_order = MIN(zfs_abd_scatter_max_order,
+	    ABD_MAX_ORDER - 1);
+	unsigned int nr_pages = abd_chunkcnt_for_bytes(size);
+	unsigned int chunks = 0, zones = 0;
 	size_t remaining_size;
 	int nid = NUMA_NO_NODE;
-	int alloc_pages = 0;
+	unsigned int alloc_pages = 0;
 
 	INIT_LIST_HEAD(&pages);
 
+	ASSERT3U(alloc_pages, <, nr_pages);
+
 	while (alloc_pages < nr_pages) {
-		unsigned chunk_pages;
-		int order;
+		unsigned int chunk_pages;
+		unsigned int order;
 
 		order = MIN(highbit64(nr_pages - alloc_pages) - 1, max_order);
 		chunk_pages = (1U << order);
@@ -596,10 +611,8 @@ abd_free_chunks(abd_t *abd)
 	struct scatterlist *sg;
 
 	abd_for_each_sg(abd, sg, n, i) {
-		for (int j = 0; j < sg->length; j += PAGESIZE) {
-			struct page *p = nth_page(sg_page(sg), j >> PAGE_SHIFT);
-			umem_free(p, PAGESIZE);
-		}
+		struct page *p = nth_page(sg_page(sg), 0);
+		umem_free_aligned(p, PAGESIZE);
 	}
 	abd_free_sg_table(abd);
 }
@@ -705,7 +718,7 @@ abd_free_zero_scatter(void)
 	__free_page(abd_zero_page);
 #endif /* HAVE_ZERO_PAGE_GPL_ONLY */
 #else
-	umem_free(abd_zero_page, PAGESIZE);
+	umem_free_aligned(abd_zero_page, PAGESIZE);
 #endif /* _KERNEL */
 }
 
@@ -728,7 +741,7 @@ abd_kstats_update(kstat_t *ksp, int rw)
 	    wmsum_value(&abd_sums.abdstat_scatter_data_size);
 	as->abdstat_scatter_chunk_waste.value.ui64 =
 	    wmsum_value(&abd_sums.abdstat_scatter_chunk_waste);
-	for (int i = 0; i < MAX_ORDER; i++) {
+	for (int i = 0; i < ABD_MAX_ORDER; i++) {
 		as->abdstat_scatter_orders[i].value.ui64 =
 		    wmsum_value(&abd_sums.abdstat_scatter_orders[i]);
 	}
@@ -757,7 +770,7 @@ abd_init(void)
 	wmsum_init(&abd_sums.abdstat_scatter_cnt, 0);
 	wmsum_init(&abd_sums.abdstat_scatter_data_size, 0);
 	wmsum_init(&abd_sums.abdstat_scatter_chunk_waste, 0);
-	for (i = 0; i < MAX_ORDER; i++)
+	for (i = 0; i < ABD_MAX_ORDER; i++)
 		wmsum_init(&abd_sums.abdstat_scatter_orders[i], 0);
 	wmsum_init(&abd_sums.abdstat_scatter_page_multi_chunk, 0);
 	wmsum_init(&abd_sums.abdstat_scatter_page_multi_zone, 0);
@@ -767,7 +780,7 @@ abd_init(void)
 	abd_ksp = kstat_create("zfs", 0, "abdstats", "misc", KSTAT_TYPE_NAMED,
 	    sizeof (abd_stats) / sizeof (kstat_named_t), KSTAT_FLAG_VIRTUAL);
 	if (abd_ksp != NULL) {
-		for (i = 0; i < MAX_ORDER; i++) {
+		for (i = 0; i < ABD_MAX_ORDER; i++) {
 			snprintf(abd_stats.abdstat_scatter_orders[i].name,
 			    KSTAT_STRLEN, "scatter_order_%d", i);
 			abd_stats.abdstat_scatter_orders[i].data_type =
@@ -797,7 +810,7 @@ abd_fini(void)
 	wmsum_fini(&abd_sums.abdstat_scatter_cnt);
 	wmsum_fini(&abd_sums.abdstat_scatter_data_size);
 	wmsum_fini(&abd_sums.abdstat_scatter_chunk_waste);
-	for (int i = 0; i < MAX_ORDER; i++)
+	for (int i = 0; i < ABD_MAX_ORDER; i++)
 		wmsum_fini(&abd_sums.abdstat_scatter_orders[i]);
 	wmsum_fini(&abd_sums.abdstat_scatter_page_multi_chunk);
 	wmsum_fini(&abd_sums.abdstat_scatter_page_multi_zone);
@@ -846,6 +859,7 @@ abd_t *
 abd_get_offset_scatter(abd_t *abd, abd_t *sabd, size_t off,
     size_t size)
 {
+	(void) size;
 	int i = 0;
 	struct scatterlist *sg = NULL;
 
@@ -884,14 +898,9 @@ abd_iter_init(struct abd_iter *aiter, abd_t *abd)
 {
 	ASSERT(!abd_is_gang(abd));
 	abd_verify(abd);
+	memset(aiter, 0, sizeof (struct abd_iter));
 	aiter->iter_abd = abd;
-	aiter->iter_mapaddr = NULL;
-	aiter->iter_mapsize = 0;
-	aiter->iter_pos = 0;
-	if (abd_is_linear(abd)) {
-		aiter->iter_offset = 0;
-		aiter->iter_sg = NULL;
-	} else {
+	if (!abd_is_linear(abd)) {
 		aiter->iter_offset = ABD_SCATTER(abd).abd_offset;
 		aiter->iter_sg = ABD_SCATTER(abd).abd_sgl;
 	}
@@ -904,6 +913,7 @@ abd_iter_init(struct abd_iter *aiter, abd_t *abd)
 boolean_t
 abd_iter_at_end(struct abd_iter *aiter)
 {
+	ASSERT3U(aiter->iter_pos, <=, aiter->iter_abd->abd_size);
 	return (aiter->iter_pos == aiter->iter_abd->abd_size);
 }
 
@@ -915,8 +925,15 @@ abd_iter_at_end(struct abd_iter *aiter)
 void
 abd_iter_advance(struct abd_iter *aiter, size_t amount)
 {
+	/*
+	 * Ensure that last chunk is not in use. abd_iterate_*() must clear
+	 * this state (directly or abd_iter_unmap()) before advancing.
+	 */
 	ASSERT3P(aiter->iter_mapaddr, ==, NULL);
 	ASSERT0(aiter->iter_mapsize);
+	ASSERT3P(aiter->iter_page, ==, NULL);
+	ASSERT0(aiter->iter_page_doff);
+	ASSERT0(aiter->iter_page_dsize);
 
 	/* There's nothing left to advance to, so do nothing */
 	if (abd_iter_at_end(aiter))
@@ -998,6 +1015,106 @@ abd_cache_reap_now(void)
 }
 
 #if defined(_KERNEL)
+/*
+ * Yield the next page struct and data offset and size within it, without
+ * mapping it into the address space.
+ */
+void
+abd_iter_page(struct abd_iter *aiter)
+{
+	if (abd_iter_at_end(aiter)) {
+		aiter->iter_page = NULL;
+		aiter->iter_page_doff = 0;
+		aiter->iter_page_dsize = 0;
+		return;
+	}
+
+	struct page *page;
+	size_t doff, dsize;
+
+	if (abd_is_linear(aiter->iter_abd)) {
+		ASSERT3U(aiter->iter_pos, ==, aiter->iter_offset);
+
+		/* memory address at iter_pos */
+		void *paddr = ABD_LINEAR_BUF(aiter->iter_abd) + aiter->iter_pos;
+
+		/* struct page for address */
+		page = is_vmalloc_addr(paddr) ?
+		    vmalloc_to_page(paddr) : virt_to_page(paddr);
+
+		/* offset of address within the page */
+		doff = offset_in_page(paddr);
+
+		/* total data remaining in abd from this position */
+		dsize = aiter->iter_abd->abd_size - aiter->iter_offset;
+	} else {
+		ASSERT(!abd_is_gang(aiter->iter_abd));
+
+		/* current scatter page */
+		page = sg_page(aiter->iter_sg);
+
+		/* position within page */
+		doff = aiter->iter_offset;
+
+		/* remaining data in scatterlist */
+		dsize = MIN(aiter->iter_sg->length - aiter->iter_offset,
+		    aiter->iter_abd->abd_size - aiter->iter_pos);
+	}
+	ASSERT(page);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)
+	if (PageTail(page)) {
+		/*
+		 * This page is part of a "compound page", which is a group of
+		 * pages that can be referenced from a single struct page *.
+		 * Its organised as a "head" page, followed by a series of
+		 * "tail" pages.
+		 *
+		 * In OpenZFS, compound pages are allocated using the
+		 * __GFP_COMP flag, which we get from scatter ABDs and SPL
+		 * vmalloc slabs (ie >16K allocations). So a great many of the
+		 * IO buffers we get are going to be of this type.
+		 *
+		 * The tail pages are just regular PAGE_SIZE pages, and can be
+		 * safely used as-is. However, the head page has length
+		 * covering itself and all the tail pages. If this ABD chunk
+		 * spans multiple pages, then we can use the head page and a
+		 * >PAGE_SIZE length, which is far more efficient.
+		 *
+		 * To do this, we need to adjust the offset to be counted from
+		 * the head page. struct page for compound pages are stored
+		 * contiguously, so we can just adjust by a simple offset.
+		 *
+		 * Before kernel 4.5, compound page heads were refcounted
+		 * separately, such that moving back to the head page would
+		 * require us to take a reference to it and releasing it once
+		 * we're completely finished with it. In practice, that means
+		 * when our caller is done with the ABD, which we have no
+		 * insight into from here. Rather than contort this API to
+		 * track head page references on such ancient kernels, we just
+		 * compile this block out and use the tail pages directly. This
+		 * is slightly less efficient, but makes everything far
+		 * simpler.
+		 */
+		struct page *head = compound_head(page);
+		doff += ((page - head) * PAGESIZE);
+		page = head;
+	}
+#endif
+
+	/* final page and position within it */
+	aiter->iter_page = page;
+	aiter->iter_page_doff = doff;
+
+	/* amount of data in the chunk, up to the end of the page */
+	aiter->iter_page_dsize = MIN(dsize, page_size(page) - doff);
+}
+
+/*
+ * Note: ABD BIO functions only needed to support vdev_classic. See comments in
+ * vdev_disk.c.
+ */
+
 /*
  * bio_nr_pages for ABD.
  * @off is the offset in @abd
@@ -1152,4 +1269,5 @@ MODULE_PARM_DESC(zfs_abd_scatter_min_size,
 module_param(zfs_abd_scatter_max_order, uint, 0644);
 MODULE_PARM_DESC(zfs_abd_scatter_max_order,
 	"Maximum order allocation used for a scatter ABD.");
-#endif
+
+#endif /* _KERNEL */

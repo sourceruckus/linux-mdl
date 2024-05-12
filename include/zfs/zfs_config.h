@@ -44,6 +44,9 @@
 /* Define if host toolchain supports AES */
 #define HAVE_AES 1
 
+/* Define if you have [rt] */
+#define HAVE_AIO_H 1
+
 /* Define if host toolchain supports AVX */
 #define HAVE_AVX 1
 
@@ -83,6 +86,9 @@
 /* bdev_check_media_change() exists */
 #define HAVE_BDEV_CHECK_MEDIA_CHANGE 1
 
+/* bdev_file_open_by_path() exists */
+/* #undef HAVE_BDEV_FILE_OPEN_BY_PATH */
+
 /* bdev_*_io_acct() available */
 /* #undef HAVE_BDEV_IO_ACCT_63 */
 
@@ -97,6 +103,12 @@
 
 /* bdev_max_secure_erase_sectors() is available */
 #define HAVE_BDEV_MAX_SECURE_ERASE_SECTORS 1
+
+/* bdev_open_by_path() exists */
+/* #undef HAVE_BDEV_OPEN_BY_PATH */
+
+/* bdev_release() exists */
+/* #undef HAVE_BDEV_RELEASE */
 
 /* block_device_operations->submit_bio() returns void */
 #define HAVE_BDEV_SUBMIT_BIO_RETURNS_VOID 1
@@ -137,14 +149,32 @@
 /* bio_set_op_attrs is available */
 #define HAVE_BIO_SET_OP_ATTRS 1
 
+/* blkdev_get_by_path() exists and takes 4 args */
+/* #undef HAVE_BLKDEV_GET_BY_PATH_4ARG */
+
 /* blkdev_get_by_path() handles ERESTARTSYS */
 /* #undef HAVE_BLKDEV_GET_ERESTARTSYS */
 
+/* __blkdev_issue_discard(flags) is available */
+/* #undef HAVE_BLKDEV_ISSUE_DISCARD_ASYNC_FLAGS */
+
+/* __blkdev_issue_discard() is available */
+#define HAVE_BLKDEV_ISSUE_DISCARD_ASYNC_NOFLAGS 1
+
+/* blkdev_issue_discard(flags) is available */
+/* #undef HAVE_BLKDEV_ISSUE_DISCARD_FLAGS */
+
 /* blkdev_issue_discard() is available */
-/* #undef HAVE_BLKDEV_ISSUE_DISCARD */
+#define HAVE_BLKDEV_ISSUE_DISCARD_NOFLAGS 1
 
 /* blkdev_issue_secure_erase() is available */
 #define HAVE_BLKDEV_ISSUE_SECURE_ERASE 1
+
+/* blkdev_put() exists */
+#define HAVE_BLKDEV_PUT 1
+
+/* blkdev_put() accepts void* as arg 2 */
+/* #undef HAVE_BLKDEV_PUT_HOLDER */
 
 /* blkdev_reread_part() exists */
 /* #undef HAVE_BLKDEV_REREAD_PART */
@@ -158,6 +188,9 @@
 /* blk_alloc_disk() exists */
 #define HAVE_BLK_ALLOC_DISK 1
 
+/* blk_alloc_disk() exists and takes 2 args */
+/* #undef HAVE_BLK_ALLOC_DISK_2ARG */
+
 /* blk_alloc_queue() expects request function */
 /* #undef HAVE_BLK_ALLOC_QUEUE_REQUEST_FN */
 
@@ -166,6 +199,15 @@
 
 /* blk_cleanup_disk() exists */
 /* #undef HAVE_BLK_CLEANUP_DISK */
+
+/* blk_mode_t is defined */
+/* #undef HAVE_BLK_MODE_T */
+
+/* block multiqueue is available */
+#define HAVE_BLK_MQ 1
+
+/* block multiqueue hardware context is cached in struct request */
+#define HAVE_BLK_MQ_RQ_HCTX 1
 
 /* blk queue backing_dev_info is dynamic */
 /* #undef HAVE_BLK_QUEUE_BDI_DYNAMIC */
@@ -200,6 +242,12 @@
 /* blk_queue_write_cache() is GPL-only */
 /* #undef HAVE_BLK_QUEUE_WRITE_CACHE_GPL_ONLY */
 
+/* BLK_STS_RESV_CONFLICT is defined */
+/* #undef HAVE_BLK_STS_RESV_CONFLICT */
+
+/* Define if release() in block_device_operations takes 1 arg */
+/* #undef HAVE_BLOCK_DEVICE_OPERATIONS_RELEASE_1ARG */
+
 /* Define if revalidate_disk() in block_device_operations */
 /* #undef HAVE_BLOCK_DEVICE_OPERATIONS_REVALIDATE_DISK */
 
@@ -226,6 +274,9 @@
 
 /* copy_from_iter() is available */
 #define HAVE_COPY_FROM_ITER 1
+
+/* copy_splice_read exists */
+/* #undef HAVE_COPY_SPLICE_READ */
 
 /* copy_to_iter() is available */
 #define HAVE_COPY_TO_ITER 1
@@ -258,6 +309,9 @@
 /* sops->dirty_inode() wants flags */
 #define HAVE_DIRTY_INODE_WITH_FLAGS 1
 
+/* disk_check_media_change() exists */
+/* #undef HAVE_DISK_CHECK_MEDIA_CHANGE */
+
 /* disk_*_io_acct() available */
 /* #undef HAVE_DISK_IO_ACCT */
 
@@ -289,13 +343,16 @@
 #define HAVE_FAULT_IN_IOV_ITER_READABLE 1
 
 /* filemap_range_has_page() is available */
-/* #undef HAVE_FILEMAP_RANGE_HAS_PAGE */
+#define HAVE_FILEMAP_RANGE_HAS_PAGE 1
 
 /* fops->aio_fsync() exists */
 /* #undef HAVE_FILE_AIO_FSYNC */
 
 /* file_dentry() is available */
 #define HAVE_FILE_DENTRY 1
+
+/* fops->fadvise() exists */
+#define HAVE_FILE_FADVISE 1
 
 /* file_inode() is available */
 #define HAVE_FILE_INODE 1
@@ -309,14 +366,26 @@
 /* iops->follow_link() nameidata */
 /* #undef HAVE_FOLLOW_LINK_NAMEIDATA */
 
+/* Define if compiler supports -Wformat-overflow */
+#define HAVE_FORMAT_OVERFLOW 1
+
+/* fsync_bdev() is declared in include/blkdev.h */
+#define HAVE_FSYNC_BDEV 1
+
 /* fops->fsync() with range */
 #define HAVE_FSYNC_RANGE 1
 
 /* fops->fsync() without dentry */
 /* #undef HAVE_FSYNC_WITHOUT_DENTRY */
 
+/* yes */
+#define HAVE_GENERIC_FADVISE 1
+
 /* generic_fillattr requires struct mnt_idmap* */
 /* #undef HAVE_GENERIC_FILLATTR_IDMAP */
+
+/* generic_fillattr requires struct mnt_idmap* and u32 request_mask */
+/* #undef HAVE_GENERIC_FILLATTR_IDMAP_REQMASK */
 
 /* generic_fillattr requires struct user_namespace* */
 #define HAVE_GENERIC_FILLATTR_USERNS 1
@@ -360,6 +429,9 @@
 /* has_capability() is available */
 #define HAVE_HAS_CAPABILITY 1
 
+/* iattr->ia_vfsuid and iattr->ia_vfsgid exist */
+#define HAVE_IATTR_VFSID 1
+
 /* Define if you have the iconv() function and it works. */
 /* #undef HAVE_ICONV */
 
@@ -369,11 +441,26 @@
 /* iops->setattr() takes struct mnt_idmap* */
 /* #undef HAVE_IDMAP_IOPS_SETATTR */
 
+/* APIs for idmapped mount are present */
+#define HAVE_IDMAP_MNT_API 1
+
+/* mnt_idmap does not have user_namespace */
+/* #undef HAVE_IDMAP_NO_USERNS */
+
 /* Define if compiler supports -Wimplicit-fallthrough */
 #define HAVE_IMPLICIT_FALLTHROUGH 1
 
 /* Define if compiler supports -Winfinite-recursion */
 /* #undef HAVE_INFINITE_RECURSION */
+
+/* inode_get_atime() exists in linux/fs.h */
+/* #undef HAVE_INODE_GET_ATIME */
+
+/* inode_get_ctime() exists in linux/fs.h */
+#define HAVE_INODE_GET_CTIME 1
+
+/* inode_get_mtime() exists in linux/fs.h */
+/* #undef HAVE_INODE_GET_MTIME */
 
 /* yes */
 #define HAVE_INODE_LOCK_SHARED 1
@@ -387,11 +474,20 @@
 /* inode_owner_or_capable() takes user_ns */
 #define HAVE_INODE_OWNER_OR_CAPABLE_USERNS 1
 
+/* inode_set_atime_to_ts() exists in linux/fs.h */
+/* #undef HAVE_INODE_SET_ATIME_TO_TS */
+
+/* inode_set_ctime_to_ts() exists in linux/fs.h */
+#define HAVE_INODE_SET_CTIME_TO_TS 1
+
 /* inode_set_flags() exists */
 #define HAVE_INODE_SET_FLAGS 1
 
 /* inode_set_iversion() exists */
 #define HAVE_INODE_SET_IVERSION 1
+
+/* inode_set_mtime_to_ts() exists in linux/fs.h */
+/* #undef HAVE_INODE_SET_MTIME_TO_TS */
 
 /* inode->i_*time's are timespec64 */
 #define HAVE_INODE_TIMESPEC64_TIMES 1
@@ -422,6 +518,12 @@
 
 /* iops->mknod() takes struct user_namespace* */
 #define HAVE_IOPS_MKNOD_USERNS 1
+
+/* iops->permission() takes struct mnt_idmap* */
+/* #undef HAVE_IOPS_PERMISSION_IDMAP */
+
+/* iops->permission() takes struct user_namespace* */
+#define HAVE_IOPS_PERMISSION_USERNS 1
 
 /* iops->rename() takes struct mnt_idmap* */
 /* #undef HAVE_IOPS_RENAME_IDMAP */
@@ -462,6 +564,9 @@
 /* Define to 1 if you have the `issetugid' function. */
 /* #undef HAVE_ISSETUGID */
 
+/* iter_iov() is available */
+/* #undef HAVE_ITER_IOV */
+
 /* kernel has kernel_fpu_* functions */
 #define HAVE_KERNEL_FPU 1
 
@@ -474,14 +579,14 @@
 /* kernel has asm/fpu/internal.h */
 /* #undef HAVE_KERNEL_FPU_INTERNAL_HEADER */
 
-/* kernel has asm/fpu/xcr.h */
-#define HAVE_KERNEL_FPU_XCR_HEADER 1
-
-/* kernel fpu and XSAVE internal */
-/* #undef HAVE_KERNEL_FPU_XSAVE_INTERNAL */
-
 /* uncached_acl_sentinel() exists */
 #define HAVE_KERNEL_GET_ACL_HANDLE_CACHE 1
+
+/* Define if compiler supports -Winfinite-recursion */
+/* #undef HAVE_KERNEL_INFINITE_RECURSION */
+
+/* kernel has kernel_neon_* functions */
+/* #undef HAVE_KERNEL_NEON */
 
 /* kernel does stack verification */
 #define HAVE_KERNEL_OBJTOOL 1
@@ -491,6 +596,12 @@
 
 /* kernel_read() take loff_t pointer */
 #define HAVE_KERNEL_READ_PPOS 1
+
+/* strlcpy() exists */
+#define HAVE_KERNEL_STRLCPY 1
+
+/* strscpy() exists */
+#define HAVE_KERNEL_STRSCPY 1
 
 /* timer_list.function gets a timer_list */
 #define HAVE_KERNEL_TIMER_FUNCTION_TIMER_LIST 1
@@ -564,6 +675,9 @@
 /* Define to 1 if you have the `mlockall' function. */
 #define HAVE_MLOCKALL 1
 
+/* page_size() is available */
+#define HAVE_MM_PAGE_SIZE 1
+
 /* lookup_bdev() wants mode arg */
 /* #undef HAVE_MODE_LOOKUP_BDEV */
 
@@ -629,6 +743,15 @@
 
 /* register_shrinker is vararg */
 #define HAVE_REGISTER_SHRINKER_VARARG 1
+
+/* register_sysctl_table exists */
+#define HAVE_REGISTER_SYSCTL_TABLE 1
+
+/* iops->rename2() exists */
+/* #undef HAVE_RENAME2 */
+
+/* struct inode_operations_wrapper takes .rename2() */
+/* #undef HAVE_RENAME2_OPERATIONS_WRAPPER */
 
 /* iops->rename() wants flags */
 /* #undef HAVE_RENAME_WANTS_FLAGS */
@@ -696,6 +819,9 @@
 /* set_special_state() exists */
 #define HAVE_SET_SPECIAL_STATE 1
 
+/* shrinker_register exists */
+/* #undef HAVE_SHRINKER_REGISTER */
+
 /* struct shrink_control exists */
 #define HAVE_SHRINK_CONTROL_STRUCT 1
 
@@ -756,11 +882,20 @@
 /* submit_bio is member of struct block_device_operations */
 #define HAVE_SUBMIT_BIO_IN_BLOCK_DEVICE_OPERATIONS 1
 
+/* have super_block s_shrink */
+#define HAVE_SUPER_BLOCK_S_SHRINK 1
+
+/* have super_block s_shrink pointer */
+/* #undef HAVE_SUPER_BLOCK_S_SHRINK_PTR */
+
 /* super_setup_bdi_name() exits */
 #define HAVE_SUPER_SETUP_BDI_NAME 1
 
 /* super_block->s_user_ns exists */
 #define HAVE_SUPER_USER_NS 1
+
+/* sync_blockdev() is declared in include/blkdev.h */
+/* #undef HAVE_SYNC_BLOCKDEV */
 
 /* struct kobj_type has default_groups */
 #define HAVE_SYSFS_DEFAULT_GROUPS 1
@@ -804,8 +939,20 @@
 /* iops->setattr() takes struct user_namespace* */
 #define HAVE_USERNS_IOPS_SETATTR 1
 
+/* user_namespace->ns.inum exists */
+#define HAVE_USER_NS_COMMON_INUM 1
+
 /* iops->getattr() takes a vfsmount */
 /* #undef HAVE_VFSMOUNT_IOPS_GETATTR */
+
+/* fops->clone_file_range() is available */
+/* #undef HAVE_VFS_CLONE_FILE_RANGE */
+
+/* fops->copy_file_range() is available */
+#define HAVE_VFS_COPY_FILE_RANGE 1
+
+/* fops->dedupe_file_range() is available */
+/* #undef HAVE_VFS_DEDUPE_FILE_RANGE */
 
 /* aops->direct_IO() uses iovec */
 /* #undef HAVE_VFS_DIRECT_IO_IOVEC */
@@ -821,6 +968,12 @@
 
 /* filemap_dirty_folio exists */
 #define HAVE_VFS_FILEMAP_DIRTY_FOLIO 1
+
+/* file_operations_extend takes .copy_file_range() and .clone_file_range() */
+/* #undef HAVE_VFS_FILE_OPERATIONS_EXTEND */
+
+/* generic_copy_file_range() is available */
+#define HAVE_VFS_GENERIC_COPY_FILE_RANGE 1
 
 /* All required iov_iter interfaces are available */
 #define HAVE_VFS_IOV_ITER 1
@@ -840,11 +993,17 @@
 /* read_folio exists */
 #define HAVE_VFS_READ_FOLIO 1
 
+/* fops->remap_file_range() is available */
+#define HAVE_VFS_REMAP_FILE_RANGE 1
+
 /* fops->read/write_iter() are available */
 #define HAVE_VFS_RW_ITERATE 1
 
 /* __set_page_dirty_nobuffers exists */
 /* #undef HAVE_VFS_SET_PAGE_DIRTY_NOBUFFERS */
+
+/* splice_copy_file_range() is available */
+/* #undef HAVE_VFS_SPLICE_COPY_FILE_RANGE */
 
 /* __vmalloc page flags exists */
 /* #undef HAVE_VMALLOC_PAGE_KERNEL */
@@ -1003,7 +1162,7 @@
 /* #undef ZFS_IS_GPL_COMPATIBLE */
 
 /* Define the project alias string. */
-#define ZFS_META_ALIAS "zfs-2.1.12-1"
+#define ZFS_META_ALIAS "zfs-2.2.4-1"
 
 /* Define the project author. */
 #define ZFS_META_AUTHOR "OpenZFS"
@@ -1012,7 +1171,7 @@
 /* #undef ZFS_META_DATA */
 
 /* Define the maximum compatible kernel version. */
-#define ZFS_META_KVER_MAX "6.3"
+#define ZFS_META_KVER_MAX "6.8"
 
 /* Define the minimum compatible kernel version. */
 #define ZFS_META_KVER_MIN "3.10"
@@ -1036,8 +1195,9 @@
 #define ZFS_META_RELEASE "1"
 
 /* Define the project version. */
-#define ZFS_META_VERSION "2.1.12"
+#define ZFS_META_VERSION "2.2.4"
 
 /* count is located in percpu_ref.data */
 #define ZFS_PERCPU_REF_COUNT_IN_DATA 1
+
 

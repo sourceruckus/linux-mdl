@@ -3,19 +3,19 @@ include Kbuild
 INSTALL_MOD_DIR ?= extra
 INSTALL_MOD_PATH ?= $(DESTDIR)
 
-SUBDIR_TARGETS = icp lua zstd
-
 all: modules
 distclean maintainer-clean: clean
-install: modules_install
-uninstall: modules_uninstall
+install: modules_install data_install
+uninstall: modules_uninstall data_uninstall
 check:
 
 .PHONY: all distclean maintainer-clean install uninstall check distdir \
 	modules modules-Linux modules-FreeBSD modules-unknown \
 	clean clean-Linux clean-FreeBSD \
 	modules_install modules_install-Linux modules_install-FreeBSD \
+	data_install data_install-Linux data_install-FreeBSD \
 	modules_uninstall modules_uninstall-Linux modules_uninstall-FreeBSD \
+	data_uninstall data_uninstall-Linux data_uninstall-FreeBSD \
 	cppcheck cppcheck-Linux cppcheck-FreeBSD
 
 # For FreeBSD, use debug options from ./configure if not overridden.
@@ -51,7 +51,8 @@ endif
 FMAKE = env -u MAKEFLAGS make $(FMAKEFLAGS)
 
 modules-Linux:
-	list='$(SUBDIR_TARGETS)'; for td in $$list; do $(MAKE) -C $$td; done
+	mkdir -p $(sort $(dir $(spl-objs) $(spl-)))
+	mkdir -p $(sort $(dir $(zfs-objs) $(zfs-)))
 	$(MAKE) -C /scrap/linux-mdl-6.1 $(if ,CC=) \
 		$(if ,LD=) $(if ,LLVM=) \
 		M="$$PWD"  CONFIG_ZFS=m modules
@@ -77,16 +78,20 @@ clean-FreeBSD:
 
 clean: clean-Linux
 
-modules_install-Linux:
+.PHONY: modules_uninstall-Linux-legacy
+modules_uninstall-Linux-legacy:
+	$(RM) -r $(addprefix $(KMODDIR)/$(INSTALL_MOD_DIR)/,spl/ avl/ icp/ lua/ nvpair/ unicode/ zcommon/ zfs/ zstd/)
+
+KMODDIR := $(INSTALL_MOD_PATH)/lib/modules/6.1.60-mdl+
+modules_install-Linux: modules_uninstall-Linux-legacy
 	@# Install the kernel modules
 	$(MAKE) -C /scrap/linux-mdl-6.1 M="$$PWD" modules_install \
 		INSTALL_MOD_PATH=$(INSTALL_MOD_PATH) \
 		INSTALL_MOD_DIR=$(INSTALL_MOD_DIR) \
-		KERNELRELEASE=6.1.51-mdl+
+		KERNELRELEASE=6.1.60-mdl+
 	@# Remove extraneous build products when packaging
-	kmoddir=$(INSTALL_MOD_PATH)/lib/modules/6.1.51-mdl+; \
 	if [ -n "$(DESTDIR)" ]; then \
-		find $$kmoddir -name 'modules.*' -delete; \
+		find $(KMODDIR) -name 'modules.*' -delete; \
 	fi
 	@# Debian ships tiny fake System.map files that are
 	@# syntactically valid but just say
@@ -94,11 +99,11 @@ modules_install-Linux:
 	@# Naturally, depmod is less than amused by this.
 	@# So if we find it missing or with one of these present,
 	@# we check for the alternate path for the System.map
-	sysmap=$(INSTALL_MOD_PATH)/boot/System.map-6.1.51-mdl+; \
+	sysmap=$(INSTALL_MOD_PATH)/boot/System.map-6.1.60-mdl+; \
 	{ [ -f "$$sysmap" ] && [ $$(wc -l < "$$sysmap") -ge 100 ]; } || \
-		sysmap=$(INSTALL_MOD_PATH)/usr/lib/debug/boot/System.map-6.1.51-mdl+; \
+		sysmap=$(INSTALL_MOD_PATH)/usr/lib/debug/boot/System.map-6.1.60-mdl+; \
 	if [ -f $$sysmap ]; then \
-		depmod -ae -F $$sysmap 6.1.51-mdl+; \
+		depmod -ae -F $$sysmap 6.1.60-mdl+; \
 	fi
 
 modules_install-FreeBSD:
@@ -107,20 +112,34 @@ modules_install-FreeBSD:
 
 modules_install: modules_install-Linux
 
-modules_uninstall-Linux:
+data_install-Linux:
+	@mkdir -p $(DESTDIR)//usr/src/zfs-2.2.4/6.1.60-mdl+
+	cp ../zfs.release ../zfs_config.h NONE $(DESTDIR)//usr/src/zfs-2.2.4/6.1.60-mdl+
+
+data_install-FreeBSD:
+	@
+
+data_install: data_install-Linux
+
+modules_uninstall-Linux: modules_uninstall-Linux-legacy
 	@# Uninstall the kernel modules
-	kmoddir=$(INSTALL_MOD_PATH)/lib/modules/6.1.51-mdl+; \
-	for objdir in $(ZFS_MODULES); do \
-		$(RM) -R $$kmoddir/$(INSTALL_MOD_DIR)/$$objdir; \
-	done
+	$(RM) $(addprefix $(KMODDIR)/$(INSTALL_MOD_DIR)/,zfs.ko spl.ko)
 
 modules_uninstall-FreeBSD:
 	@false
 
 modules_uninstall: modules_uninstall-Linux
 
+data_uninstall-Linux:
+	$(RM) $(addprefix $(DESTDIR)//usr/src/zfs-2.2.4/6.1.60-mdl+/,zfs.release zfs_config.h NONE)
+
+data_uninstall-FreeBSD:
+	@
+
+data_uninstall: data_uninstall-Linux
+
 cppcheck-Linux:
-	 -j16 --std=c99 --quiet --force --error-exitcode=2 \
+	@printf "skipping cppcheck because cppcheck is not installed\n" -j16 --std=c99 --quiet --force --error-exitcode=2 \
 		--inline-suppr \
 		--suppress=unmatchedSuppression \
 		--suppress=noValidConfiguration \
@@ -128,12 +147,13 @@ cppcheck-Linux:
 		--include=/scrap/linux-mdl-6.1/include/generated/autoconf.h \
 		--include=../zfs_config.h \
 		--config-exclude=/scrap/linux-mdl-6.1/include \
+		-i zstd/lib \
 		-I /scrap/linux-mdl-6.1/include \
 		-I ../include/os/linux/kernel \
 		-I ../include/os/linux/spl \
 		-I ../include/os/linux/zfs \
 		-I ../include \
-		avl icp lua nvpair spl unicode zcommon zfs zstd os/linux
+		avl icp lua nvpair unicode zcommon zfs zstd os/linux
 
 cppcheck-FreeBSD:
 	@true
@@ -141,9 +161,11 @@ cppcheck-FreeBSD:
 cppcheck: cppcheck-Linux
 
 distdir:
-	(cd . && find $(ZFS_MODULES) os -name '*.[chS]') | \
-	while read path; do \
-		mkdir -p $$distdir/$${path%/*}; \
-		cp ./$$path $$distdir/$$path; \
-	done; \
+	cd . && find . -name '*.[chS]' -exec sh -c 'for f; do mkdir -p $$distdir/$${f%/*}; cp ./$$f $$distdir/$$f; done' _ {} +
 	cp ./Makefile.bsd $$distdir/Makefile.bsd
+
+gen-zstd-symbols:
+	for obj in $(addprefix zstd/,$(ZSTD_UPSTREAM_OBJS)); do echo; echo "/* $${obj#zstd/}: */"; objdump -t $$obj | awk '$$2 == "g" && !/ zfs_/ {print "#define\t" $$6 " zfs_" $$6}' | sort; done >> zstd/include/zstd_compat_wrapper.h
+
+check-zstd-symbols:
+	objdump -t $(addprefix zstd/,$(ZSTD_UPSTREAM_OBJS)) | awk '/file format/ {print}  $$2 == "g" && (!/ zfs_/ && !/ __pfx_zfs_/) {++ret; print}  END {exit ret}'

@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -79,6 +79,9 @@ typedef struct abd {
 
 typedef int abd_iter_func_t(void *buf, size_t len, void *priv);
 typedef int abd_iter_func2_t(void *bufa, void *bufb, size_t len, void *priv);
+#if defined(__linux__) && defined(_KERNEL)
+typedef int abd_iter_page_func_t(struct page *, size_t, size_t, void *);
+#endif
 
 extern int zfs_abd_scatter_enabled;
 
@@ -86,10 +89,15 @@ extern int zfs_abd_scatter_enabled;
  * Allocations and deallocations
  */
 
+__attribute__((malloc))
 abd_t *abd_alloc(size_t, boolean_t);
+__attribute__((malloc))
 abd_t *abd_alloc_linear(size_t, boolean_t);
+__attribute__((malloc))
 abd_t *abd_alloc_gang(void);
+__attribute__((malloc))
 abd_t *abd_alloc_for_io(size_t, boolean_t);
+__attribute__((malloc))
 abd_t *abd_alloc_sametype(abd_t *, size_t);
 boolean_t abd_size_alloc_linear(size_t);
 void abd_gang_add(abd_t *, abd_t *, boolean_t);
@@ -120,6 +128,10 @@ void abd_release_ownership_of_buf(abd_t *);
 int abd_iterate_func(abd_t *, size_t, size_t, abd_iter_func_t *, void *);
 int abd_iterate_func2(abd_t *, abd_t *, size_t, size_t, size_t,
     abd_iter_func2_t *, void *);
+#if defined(__linux__) && defined(_KERNEL)
+int abd_iterate_page_func(abd_t *, size_t, size_t, abd_iter_page_func_t *,
+    void *);
+#endif
 void abd_copy_off(abd_t *, abd_t *, size_t, size_t, size_t);
 void abd_copy_from_buf_off(abd_t *, const void *, size_t, size_t);
 void abd_copy_to_buf_off(void *, abd_t *, size_t, size_t);
@@ -208,6 +220,8 @@ void abd_fini(void);
 
 /*
  * Linux ABD bio functions
+ * Note: these are only needed to support vdev_classic. See comment in
+ * vdev_disk.c.
  */
 #if defined(__linux__) && defined(_KERNEL)
 unsigned int abd_bio_map_off(struct bio *, abd_t *, unsigned int, size_t);

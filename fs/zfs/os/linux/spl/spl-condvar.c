@@ -20,7 +20,7 @@
  *  You should have received a copy of the GNU General Public License along
  *  with the SPL.  If not, see <http://www.gnu.org/licenses/>.
  *
- *  Solaris Porting Layer (SPL) Credential Implementation.
+ *  Solaris Porting Layer (SPL) Condition Variables Implementation.
  */
 
 #include <sys/condvar.h>
@@ -37,7 +37,7 @@
 #endif
 
 #define	MAX_HRTIMEOUT_SLACK_US	1000
-unsigned int spl_schedule_hrtimeout_slack_us = 0;
+static unsigned int spl_schedule_hrtimeout_slack_us = 0;
 
 static int
 param_set_hrtimeout_slack(const char *buf, zfs_kernel_param_t *kp)
