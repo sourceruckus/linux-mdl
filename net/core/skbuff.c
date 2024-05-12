@@ -3958,6 +3958,7 @@ static void skb_ts_finish(struct ts_config *conf, struct ts_state *state)
 unsigned int skb_find_text(struct sk_buff *skb, unsigned int from,
 			   unsigned int to, struct ts_config *config)
 {
+	unsigned int patlen = config->ops->get_pattern_len(config);
 	struct ts_state state;
 	unsigned int ret;
 
@@ -3969,7 +3970,7 @@ unsigned int skb_find_text(struct sk_buff *skb, unsigned int from,
 	skb_prepare_seq_read(skb, from, to, TS_SKB_CB(&state));
 
 	ret = textsearch_find(config, &state);
-	return (ret <= to - from ? ret : UINT_MAX);
+	return (ret + patlen <= to - from ? ret : UINT_MAX);
 }
 EXPORT_SYMBOL(skb_find_text);
 
@@ -4212,8 +4213,9 @@ struct sk_buff *skb_segment(struct sk_buff *head_skb,
 		/* GSO partial only requires that we trim off any excess that
 		 * doesn't fit into an MSS sized block, so take care of that
 		 * now.
+		 * Cap len to not accidentally hit GSO_BY_FRAGS.
 		 */
-		partial_segs = len / mss;
+		partial_segs = min(len, GSO_BY_FRAGS - 1U) / mss;
 		if (partial_segs > 1)
 			mss *= partial_segs;
 		else
@@ -4912,7 +4914,7 @@ static void __skb_complete_tx_timestamp(struct sk_buff *skb,
 	serr->ee.ee_info = tstype;
 	serr->opt_stats = opt_stats;
 	serr->header.h4.iif = skb->dev ? skb->dev->ifindex : 0;
-	if (sk->sk_tsflags & SOF_TIMESTAMPING_OPT_ID) {
+	if (READ_ONCE(sk->sk_tsflags) & SOF_TIMESTAMPING_OPT_ID) {
 		serr->ee.ee_data = skb_shinfo(skb)->tskey;
 		if (sk_is_tcp(sk))
 			serr->ee.ee_data -= atomic_read(&sk->sk_tskey);
@@ -4968,21 +4970,23 @@ void __skb_tstamp_tx(struct sk_buff *orig_skb,
 {
 	struct sk_buff *skb;
 	bool tsonly, opt_stats = false;
+	u32 tsflags;
 
 	if (!sk)
 		return;
 
-	if (!hwtstamps && !(sk->sk_tsflags & SOF_TIMESTAMPING_OPT_TX_SWHW) &&
+	tsflags = READ_ONCE(sk->sk_tsflags);
+	if (!hwtstamps && !(tsflags & SOF_TIMESTAMPING_OPT_TX_SWHW) &&
 	    skb_shinfo(orig_skb)->tx_flags & SKBTX_IN_PROGRESS)
 		return;
 
-	tsonly = sk->sk_tsflags & SOF_TIMESTAMPING_OPT_TSONLY;
+	tsonly = tsflags & SOF_TIMESTAMPING_OPT_TSONLY;
 	if (!skb_may_tx_timestamp(sk, tsonly))
 		return;
 
 	if (tsonly) {
 #ifdef CONFIG_INET
-		if ((sk->sk_tsflags & SOF_TIMESTAMPING_OPT_STATS) &&
+		if ((tsflags & SOF_TIMESTAMPING_OPT_STATS) &&
 		    sk_is_tcp(sk)) {
 			skb = tcp_get_timestamping_opt_stats(sk, orig_skb,
 							     ack_skb);
@@ -6495,6 +6499,14 @@ static struct skb_ext *skb_ext_maybe_cow(struct skb_ext *old,
 
 		for (i = 0; i < sp->len; i++)
 			xfrm_state_hold(sp->xvec[i]);
+	}
+#endif
+#ifdef CONFIG_MCTP_FLOWS
+	if (old_active & (1 << SKB_EXT_MCTP)) {
+		struct mctp_flow *flow = skb_ext_get_ptr(old, SKB_EXT_MCTP);
+
+		if (flow->key)
+			refcount_inc(&flow->key->refs);
 	}
 #endif
 	__skb_ext_put(old);
