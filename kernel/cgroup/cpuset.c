@@ -1304,13 +1304,23 @@ static int update_partition_exclusive(struct cpuset *cs, int new_prs)
  *
  * Changing load balance flag will automatically call
  * rebuild_sched_domains_locked().
+ * This function is for cgroup v2 only.
  */
 static void update_partition_sd_lb(struct cpuset *cs, int old_prs)
 {
 	int new_prs = cs->partition_root_state;
-	bool new_lb = (new_prs != PRS_ISOLATED);
 	bool rebuild_domains = (new_prs > 0) || (old_prs > 0);
+	bool new_lb;
 
+	/*
+	 * If cs is not a valid partition root, the load balance state
+	 * will follow its parent.
+	 */
+	if (new_prs > 0) {
+		new_lb = (new_prs != PRS_ISOLATED);
+	} else {
+		new_lb = is_sched_load_balance(parent_cs(cs));
+	}
 	if (new_lb != !!is_sched_load_balance(cs)) {
 		rebuild_domains = true;
 		if (new_lb)
@@ -1938,7 +1948,7 @@ static int update_cpumask(struct cpuset *cs, struct cpuset *trialcs,
 	}
 out_free:
 	free_cpumasks(NULL, &tmp);
-	return 0;
+	return retval;
 }
 
 /*

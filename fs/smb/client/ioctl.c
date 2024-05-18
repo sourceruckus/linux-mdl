@@ -117,6 +117,20 @@ out_drop_write:
 	return rc;
 }
 
+static long smb_mnt_get_tcon_info(struct cifs_tcon *tcon, void __user *arg)
+{
+	int rc = 0;
+	struct smb_mnt_tcon_info tcon_inf;
+
+	tcon_inf.tid = tcon->tid;
+	tcon_inf.session_id = tcon->ses->Suid;
+
+	if (copy_to_user(arg, &tcon_inf, sizeof(struct smb_mnt_tcon_info)))
+		rc = -EFAULT;
+
+	return rc;
+}
+
 static long smb_mnt_get_fsinfo(unsigned int xid, struct cifs_tcon *tcon,
 				void __user *arg)
 {
@@ -232,7 +246,9 @@ static int cifs_dump_full_key(struct cifs_tcon *tcon, struct smb3_full_key_debug
 		spin_lock(&cifs_tcp_ses_lock);
 		list_for_each_entry(server_it, &cifs_tcp_ses_list, tcp_ses_list) {
 			list_for_each_entry(ses_it, &server_it->smb_ses_list, smb_ses_list) {
-				if (ses_it->Suid == out.session_id) {
+				spin_lock(&ses_it->ses_lock);
+				if (ses_it->ses_status != SES_EXITING &&
+				    ses_it->Suid == out.session_id) {
 					ses = ses_it;
 					/*
 					 * since we are using the session outside the crit
@@ -240,9 +256,11 @@ static int cifs_dump_full_key(struct cifs_tcon *tcon, struct smb3_full_key_debug
 					 * so increment its refcount
 					 */
 					cifs_smb_ses_inc_refcount(ses);
+					spin_unlock(&ses_it->ses_lock);
 					found = true;
 					goto search_end;
 				}
+				spin_unlock(&ses_it->ses_lock);
 			}
 		}
 search_end:
@@ -413,6 +431,17 @@ long cifs_ioctl(struct file *filep, unsigned int command, unsigned long arg)
 				break;
 			tcon = tlink_tcon(pSMBFile->tlink);
 			rc = smb_mnt_get_fsinfo(xid, tcon, (void __user *)arg);
+			break;
+		case CIFS_IOC_GET_TCON_INFO:
+			cifs_sb = CIFS_SB(inode->i_sb);
+			tlink = cifs_sb_tlink(cifs_sb);
+			if (IS_ERR(tlink)) {
+				rc = PTR_ERR(tlink);
+				break;
+			}
+			tcon = tlink_tcon(tlink);
+			rc = smb_mnt_get_tcon_info(tcon, (void __user *)arg);
+			cifs_put_tlink(tlink);
 			break;
 		case CIFS_ENUMERATE_SNAPSHOTS:
 			if (pSMBFile == NULL)

@@ -1941,8 +1941,8 @@ static int smu_v13_0_6_get_current_pcie_link_speed(struct smu_context *smu)
 
 	/* TODO: confirm this on real target */
 	esm_ctrl = RREG32_PCIE(smnPCIE_ESM_CTRL);
-	if ((esm_ctrl >> 15) & 0x1FFFF)
-		return (((esm_ctrl >> 8) & 0x3F) + 128);
+	if ((esm_ctrl >> 15) & 0x1)
+		return (((esm_ctrl >> 8) & 0x7F) + 128);
 
 	speed_level = (RREG32_PCIE(smnPCIE_LC_SPEED_CNTL) &
 		PCIE_LC_SPEED_CNTL__LC_CURRENT_DATA_RATE_MASK)
@@ -1968,8 +1968,10 @@ static ssize_t smu_v13_0_6_get_gpu_metrics(struct smu_context *smu, void **table
 
 	metrics = kzalloc(sizeof(MetricsTable_t), GFP_KERNEL);
 	ret = smu_v13_0_6_get_metrics_table(smu, metrics, true);
-	if (ret)
+	if (ret) {
+		kfree(metrics);
 		return ret;
+	}
 
 	smu_cmn_init_soft_gpu_metrics(gpu_metrics, 1, 3);
 
