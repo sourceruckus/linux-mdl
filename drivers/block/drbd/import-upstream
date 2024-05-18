@@ -46,10 +46,10 @@ cp -v $DRBDDIR/drbd/drbd-headers/linux/*.h ../../../include/linux/
 cp -v $DRBDDIR/drbd/drbd-kernel-compat/drbd_wrappers.[ch] .
 cp -v $DRBDDIR/drbd/compat.h ../../../include/linux/drbd_compat.h
 mkdir handshake
-cp -v $DRBDDIR/drbd/drbd-kernel-compat/handshake/*.[ch] handshake/.
-cp -v $DRBDDIR/drbd/drbd-kernel-compat/handshake/Kbuild handshake/Makefile
-cp -vr $DRBDDIR/drbd/drbd-kernel-compat/net net
-cp -vr $DRBDDIR/drbd/drbd-kernel-compat/uapi uapi
+#cp -v $DRBDDIR/drbd/drbd-kernel-compat/handshake/*.[ch] handshake/.
+#cp -v $DRBDDIR/drbd/drbd-kernel-compat/handshake/Kbuild handshake/Makefile
+#cp -vr $DRBDDIR/drbd/drbd-kernel-compat/net net
+#cp -vr $DRBDDIR/drbd/drbd-kernel-compat/uapi uapi
 
 # Then, since we renamed compat.h->drbd_compat.h, we have to sed some changes
 # into a few files:

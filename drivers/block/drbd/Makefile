@@ -50,9 +50,10 @@ override EXTRA_CFLAGS += -I$(src)
 #endif
 #endif
 #
-# NOTE: We DO need this net/handshake compat code for 5.15.
+# NOTE: We DO need this net/handshake compat code for 5.15 and 6.1,
+#       but not 6.6
 #
-obj-$(CONFIG_TLS) += handshake/
+#obj-$(CONFIG_TLS) += handshake/
 
 
 #compat_objs += drbd-kernel-compat/drbd_wrappers.o
