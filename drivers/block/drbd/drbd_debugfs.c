@@ -529,8 +529,8 @@ static int resource_in_flight_summary_show(struct seq_file *m, void *pos)
 		name = rcu_dereference(transport->net_conf)->name;
 		seq_printf(m, "%s\t%s\t", name, transport->class->name);
 
-		if (transport->ops->stream_ok(transport, DATA_STREAM)) {
-			transport->ops->stats(transport, &transport_stats);
+		if (transport->class->ops.stream_ok(transport, DATA_STREAM)) {
+			transport->class->ops.stats(transport, &transport_stats);
 			seq_printf(m, "%u\t%u\n",
 				transport_stats.unread_received,
 				transport_stats.unacked_send);
@@ -865,7 +865,7 @@ static int connection_transport_show(struct seq_file *m, void *ignored)
 {
 	struct drbd_connection *connection = m->private;
 	struct drbd_transport *transport = &connection->transport;
-	struct drbd_transport_ops *tr_ops = transport->ops;
+	struct drbd_transport_ops *tr_ops = &transport->class->ops;
 	enum drbd_stream i;
 
 	seq_printf(m, "v: %u\n\n", 0);
@@ -908,6 +908,8 @@ static int connection_debug_show(struct seq_file *m, void *ignored)
 	pretty_print_bit(CONN_DRY_RUN);
 	pretty_print_bit(DISCONNECT_EXPECTED);
 	pretty_print_bit(BARRIER_ACK_PENDING);
+	pretty_print_bit(DATA_CORKED);
+	pretty_print_bit(CONTROL_CORKED);
 	pretty_print_bit(C_UNREGISTERED);
 	pretty_print_bit(RECONNECT);
 	pretty_print_bit(CONN_DISCARD_MY_DATA);
@@ -948,6 +950,9 @@ static int connection_debug_show(struct seq_file *m, void *ignored)
 			atomic_read(&connection->backing_ee_cnt),
 			atomic_read(&connection->active_ee_cnt));
 	seq_printf(m, "      agreed_pro_version: %d\n", connection->agreed_pro_version);
+	seq_printf(m, "            send control: %u bytes/pckt (%u bytes, %u pckts)\n",
+		   connection->ctl_bytes / (connection->ctl_packets ?: 1),
+		   connection->ctl_bytes, connection->ctl_packets);
 	return 0;
 }
 
@@ -1137,6 +1142,7 @@ static int device_oldest_requests_show(struct seq_file *m, void *ignored)
 static int device_openers_show(struct seq_file *m, void *ignored)
 {
 	struct drbd_device *device = m->private;
+	struct drbd_resource *resource = device->resource;
 	ktime_t now = ktime_get_real();
 	struct opener *tmp;
 
@@ -1145,6 +1151,16 @@ static int device_openers_show(struct seq_file *m, void *ignored)
 		seq_printf(m, "%s\t%d\t%lld\n", tmp->comm, tmp->pid,
 			ktime_to_ms(ktime_sub(now, tmp->opened)));
 	spin_unlock(&device->openers_lock);
+	if (mutex_trylock(&resource->open_release)) {
+		if (resource->auto_promoted_by.pid != 0
+		&&  device->minor == resource->auto_promoted_by.minor) {
+			seq_printf(m, "+%s\t%d\t%lld\n",
+				resource->auto_promoted_by.comm,
+				resource->auto_promoted_by.pid,
+				ktime_to_ms(ktime_sub(now, resource->auto_promoted_by.opened)));
+		}
+		mutex_unlock(&resource->open_release);
+	}
 
 	return 0;
 }
@@ -1247,6 +1263,28 @@ static int device_io_frozen_show(struct seq_file *m, void *ignored)
 	seq_printf(m, "may_inc_ap_bio(): %d\n", may_inc_ap_bio(device));
 	put_ldev(device);
 
+	return 0;
+}
+
+static int device_al_updates_show(struct seq_file *m, void *ignored)
+{
+	struct drbd_device *device = m->private;
+	bool al_updates, cfg_al_updates;
+
+	if (!get_ldev_if_state(device, D_FAILED))
+		return -ENODEV;
+
+	al_updates = !(device->ldev->md.flags & MDF_AL_DISABLED);
+	rcu_read_lock();
+	cfg_al_updates = rcu_dereference(device->ldev->disk_conf)->al_updates;
+	rcu_read_unlock();
+	put_ldev(device);
+
+	seq_printf(m, "%s\n",
+		    al_updates &&  cfg_al_updates ? "yes" :
+		   !al_updates &&  cfg_al_updates ? "no (optimized)" :
+		   !al_updates && !cfg_al_updates ? "no" :
+		   "?");
 	return 0;
 }
 
@@ -1376,6 +1414,7 @@ drbd_debugfs_device_attr(ed_gen_id)
 drbd_debugfs_device_attr(openers)
 drbd_debugfs_device_attr(md_io)
 drbd_debugfs_device_attr(interval_tree)
+drbd_debugfs_device_attr(al_updates)
 #ifdef CONFIG_DRBD_TIMING_STATS
 __drbd_debugfs_device_attr(req_timing, device_req_timing_write)
 #endif
@@ -1416,6 +1455,7 @@ void drbd_debugfs_device_add(struct drbd_device *device)
 	vol_dcf(openers);
 	vol_dcf(md_io);
 	vol_dcf(interval_tree);
+	vol_dcf(al_updates);
 #ifdef CONFIG_DRBD_TIMING_STATS
 	drbd_dcf(device->debugfs_vol, device, req_timing, 0600);
 #endif
@@ -1445,6 +1485,7 @@ void drbd_debugfs_device_cleanup(struct drbd_device *device)
 	drbd_debugfs_remove(&device->debugfs_vol_openers);
 	drbd_debugfs_remove(&device->debugfs_vol_md_io);
 	drbd_debugfs_remove(&device->debugfs_vol_interval_tree);
+	drbd_debugfs_remove(&device->debugfs_vol_al_updates);
 #ifdef CONFIG_DRBD_TIMING_STATS
 	drbd_debugfs_remove(&device->debugfs_vol_req_timing);
 #endif
@@ -1856,6 +1897,14 @@ static int drbd_compat_show(struct seq_file *m, void *ignored)
 	seq_puts(m, "kvfree_rcu_mightsleep__no_present\n");
 	seq_puts(m, "sk_use_task_frag__no_present\n");
 	seq_puts(m, "timer_shutdown__no_present\n");
+	seq_puts(m, "blkdev_get_by_path__no_has_holder_ops\n");
+	seq_puts(m, "block_device_operations_open__no_takes_gendisk\n");
+	seq_puts(m, "blkdev_put__no_has_holder\n");
+	seq_puts(m,
+		 "block_device_operations_release__no_takes_single_argument\n");
+	seq_puts(m, "blk_mode_t__no_present\n");
+	seq_puts(m, "genl_info_userhdr__no_present\n");
+	seq_puts(m, "tls_get_record_type__no_present__yes_present\n");
 	return 0;
 }
 

@@ -1,7 +1,27 @@
-obj-m += drbd.o drbd_transport_tcp.o
+obj-m += drbd.o drbd_transport_tcp.o drbd_transport_lb-tcp.o
 ifdef CONFIG_INFINIBAND
 obj-m += drbd_transport_rdma.o
 endif
+
+
+#clean-files := compat.h $(wildcard .config.$(KERNELVERSION).timestamp)
+
+
+# PRE_CFLAGS may contain (M)OFED header locations
+#LINUXINCLUDE := $(PRE_CFLAGS) -I$(src) -I$(src)/drbd-headers $(LINUXINCLUDE)
+
+
+# Files in the standard include directories take precendence over files
+# in the drbd-kernel-compat directory.
+#
+# Add -I$(src) to EXTRA_CFLAGS again: some (rhel5, maybe other) kbuild does not
+# yet use LINUXINCLUDE like we expect it to ;( fortunately it does not contain
+# in-tree drbd either yet, so precedence of include files is not important.
+#
+# override: we absolutely need this, even if EXTRA_CFLAGS originates from make
+# command line or environment
+#override EXTRA_CFLAGS += -I$(src) -I$(src)/drbd-kernel-compat
+override EXTRA_CFLAGS += -I$(src)
 
 
 #ifneq ($(shell grep -e '\<nsecs_to_jiffies\>' \
@@ -11,6 +31,28 @@ endif
 #
 # NOTE: 5.4 - 5.10 look good, haven't double-checked since then
 #
+
+
+#ifndef CONFIG_LRU_CACHE
+#compat_objs += drbd-kernel-compat/lru_cache.o
+#endif
+#
+# NOTE: we just make sure LRU_CACHE is enabled in .config
+#
+
+
+#ifeq ($(shell test $(VERSION) -ge 4; echo $$?),0)
+#ifeq ($(shell test $(VERSION) -gt 4 || test $(PATCHLEVEL) -ge 17; echo $$?),0)
+#ifndef CONFIG_NET_HANDSHAKE
+#obj-$(CONFIG_TLS) += drbd-kernel-compat/handshake/
+#$(obj)/drbd-kernel-compat/handshake: $(obj)/compat.h $(src)/.compat_patches_applied
+#endif
+#endif
+#endif
+#
+# NOTE: We DO need this net/handshake compat code for 5.15.
+#
+obj-$(CONFIG_TLS) += handshake/
 
 
 #compat_objs += drbd-kernel-compat/drbd_wrappers.o
@@ -44,14 +86,6 @@ endif
 #endif
 
 
-#
-# NOTE: We yanked lru_cache.o out of here to use the mainline version.
-#       I'm not 100% sure that's the right thing to do, so if things
-#       go south, revisit that.
-#
-#       Looks like that was the right call, as now even the
-#       out-of-tree build system uses the in-tree lru_cache.
-#
 drbd-$(CONFIG_DEBUG_FS) += drbd_debugfs.o
 drbd-y += drbd_buildtag.o drbd_bitmap.o drbd_proc.o
 drbd-y += drbd_sender.o drbd_receiver.o drbd_req.o drbd_actlog.o

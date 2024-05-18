@@ -116,7 +116,7 @@ bm_print_lock_info(struct drbd_device *device, unsigned int bitmap_index, enum b
 	};
 
 	struct drbd_bitmap *b = device->bitmap;
-	if (!drbd_ratelimit())
+	if (!drbd_device_ratelimit(device, GENERIC))
 		return;
 	drbd_err(device, "FIXME %s[%d] op %s, bitmap locked for '%s' by %s[%d]\n",
 		 current->comm, task_pid_nr(current),
@@ -139,7 +139,7 @@ bm_print_lock_info(struct drbd_device *device, unsigned int bitmap_index, enum b
  */
 static void
 _drbd_bm_lock(struct drbd_device *device, struct drbd_peer_device *peer_device,
-	      char *why, enum bm_flag flags)
+	      const char *why, enum bm_flag flags)
 {
 	struct drbd_bitmap *b = device->bitmap;
 	int trylock_failed;
@@ -173,7 +173,7 @@ _drbd_bm_lock(struct drbd_device *device, struct drbd_peer_device *peer_device,
 	b->bm_locked_peer = peer_device;
 }
 
-void drbd_bm_lock(struct drbd_device *device, char *why, enum bm_flag flags)
+void drbd_bm_lock(struct drbd_device *device, const char *why, enum bm_flag flags)
 {
 	_drbd_bm_lock(device, NULL, why, flags);
 }
@@ -404,6 +404,7 @@ struct drbd_bitmap *drbd_bm_alloc(void)
 		return NULL;
 
 	spin_lock_init(&b->bm_lock);
+	spin_lock_init(&b->bm_all_slots_lock);
 	mutex_init(&b->bm_change);
 	init_waitqueue_head(&b->bm_io_wait);
 
@@ -1096,7 +1097,7 @@ static void drbd_bm_endio(struct bio *bio)
 		bm_set_page_io_err(b->bm_pages[idx]);
 		/* Not identical to on disk version of it.
 		 * Is BM_PAGE_IO_ERROR enough? */
-		if (drbd_ratelimit())
+		if (drbd_device_ratelimit(device, BACKEND))
 			drbd_err(device, "IO ERROR %d on bitmap page idx %u\n",
 				 status, idx);
 	} else {
@@ -1157,7 +1158,7 @@ static void bm_page_io_async(struct drbd_bm_aio_ctx *ctx, int page_nr) __must_ho
 		else
 			len = PAGE_SIZE;
 	} else {
-		if (drbd_ratelimit()) {
+		if (drbd_device_ratelimit(device, METADATA)) {
 			drbd_err(device, "Invalid offset during on-disk bitmap access: "
 				 "page idx %u, sector %llu\n", page_nr, (unsigned long long) on_disk_sector);
 		}
@@ -1635,7 +1636,8 @@ void drbd_bm_copy_slot(struct drbd_device *device, unsigned int from_index, unsi
 	u32 data_word, *addr;
 
 	words32_total = bitmap->bm_words * sizeof(unsigned long) / sizeof(u32);
-	spin_lock_irq(&bitmap->bm_lock);
+	spin_lock_irq(&bitmap->bm_all_slots_lock);
+	spin_lock(&bitmap->bm_lock);
 
 	bitmap->bm_set[to_index] = 0;
 	current_page_nr = 0;
@@ -1648,10 +1650,12 @@ void drbd_bm_copy_slot(struct drbd_device *device, unsigned int from_index, unsi
 
 		if (current_page_nr != from_page_nr) {
 			bm_unmap(bitmap, addr);
-			spin_unlock_irq(&bitmap->bm_lock);
+			spin_unlock(&bitmap->bm_lock);
+			spin_unlock_irq(&bitmap->bm_all_slots_lock);
 			if (need_resched())
 				cond_resched();
-			spin_lock_irq(&bitmap->bm_lock);
+			spin_lock_irq(&bitmap->bm_all_slots_lock);
+			spin_lock(&bitmap->bm_lock);
 			current_page_nr = from_page_nr;
 			addr = bm_map(bitmap, current_page_nr);
 		}
@@ -1670,5 +1674,6 @@ void drbd_bm_copy_slot(struct drbd_device *device, unsigned int from_index, unsi
 	}
 	bm_unmap(bitmap, addr);
 
-	spin_unlock_irq(&bitmap->bm_lock);
+	spin_unlock(&bitmap->bm_lock);
+	spin_unlock_irq(&bitmap->bm_all_slots_lock);
 }

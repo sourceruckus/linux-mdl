@@ -320,7 +320,7 @@ void drbd_req_destroy(struct kref *kref)
 			if (get_ldev_if_state(device, D_DETACHING)) {
 				was_last_ref = drbd_al_complete_io(device, &req->i);
 				put_ldev(device);
-			} else if (drbd_ratelimit()) {
+			} else if (drbd_device_ratelimit(device, BACKEND)) {
 				drbd_warn(device, "Should have called drbd_al_complete_io(, %llu, %u), "
 					  "but my Disk seems to have failed :(\n",
 					  (unsigned long long) req->i.sector, req->i.size);
@@ -768,22 +768,17 @@ static void advance_conn_req_next(struct drbd_connection *connection, struct drb
  * must be called. If the caching pointer currently points to this request,
  * this will advance it to the next request fulfilling the condition.
  *
- * set_cache_ptr_if_null() may be called concurrently with itself and with
- * advance_cache_ptr().
+ * set_cache_ptr_if_null() may be called concurrently with advance_cache_ptr().
  */
-static void set_cache_ptr_if_null(struct drbd_request **cache_ptr, struct drbd_request *req)
+static void set_cache_ptr_if_null(struct drbd_connection *connection,
+		struct drbd_request **cache_ptr, struct drbd_request *req)
 {
-	struct drbd_request *prev_req, *old_req = NULL;
-
-	rcu_read_lock();
-	prev_req = cmpxchg(cache_ptr, old_req, req);
-	while (prev_req != old_req) {
-		if (prev_req && req->dagtag_sector > prev_req->dagtag_sector)
-			break;
-		old_req = prev_req;
-		prev_req = cmpxchg(cache_ptr, old_req, req);
+	spin_lock(&connection->advance_cache_ptr_lock); /* local IRQ already disabled */
+	if (*cache_ptr == NULL) {
+		smp_wmb(); /* make list_add_tail_rcu(req, transfer_log) visible before cache_ptr */
+		WRITE_ONCE(*cache_ptr, req);
 	}
-	rcu_read_unlock();
+	spin_unlock(&connection->advance_cache_ptr_lock);
 }
 
 /* See set_cache_ptr_if_null(). */
@@ -820,7 +815,7 @@ static void advance_cache_ptr(struct drbd_connection *connection,
 		}
 	}
 
-	cmpxchg(cache_ptr, old_req, found_req);
+	WRITE_ONCE(*cache_ptr, found_req);
 	rcu_read_unlock();
 
 	spin_unlock(&connection->advance_cache_ptr_lock);
@@ -900,7 +895,7 @@ static void mod_rq_state(struct drbd_request *req, struct bio_and_error *m,
 	}
 
 	if (!(old_net & RQ_NET_QUEUED) && (set & RQ_NET_QUEUED)) {
-		set_cache_ptr_if_null(&connection->req_not_net_done, req);
+		set_cache_ptr_if_null(connection, &connection->req_not_net_done, req);
 		atomic_inc(&req->completion_ref);
 		/* This completion ref is necessary to avoid premature completion
 		   in case a WRITE_ACKED_BY_PEER comes in before the sender can do
@@ -915,7 +910,7 @@ static void mod_rq_state(struct drbd_request *req, struct bio_and_error *m,
 		if (!(old_net & RQ_NET_DONE))
 			atomic_add(req_payload_sectors(req), &peer_device->connection->ap_in_flight);
 		if (req->net_rq_state[idx] & RQ_NET_PENDING)
-			set_cache_ptr_if_null(&connection->req_ack_pending, req);
+			set_cache_ptr_if_null(connection, &connection->req_ack_pending, req);
 	}
 
 	if (!(old_local & RQ_COMPLETION_SUSP) && (set_local & RQ_COMPLETION_SUSP))
@@ -1002,7 +997,7 @@ static void mod_rq_state(struct drbd_request *req, struct bio_and_error *m,
 
 static void drbd_report_io_error(struct drbd_device *device, struct drbd_request *req)
 {
-	if (!drbd_ratelimit())
+	if (!drbd_device_ratelimit(device, BACKEND))
 		return;
 
 	drbd_warn(device, "local %s IO error sector %llu+%u on %pg\n",
@@ -1390,9 +1385,7 @@ static bool drbd_may_do_local_read(struct drbd_device *device, sector_t sector, 
 		++n_checked;
 	}
 	if (n_checked == 0) {
-		if (drbd_ratelimit()) {
-			drbd_err(device, "No valid bitmap slots found to check!\n");
-		}
+		drbd_err_ratelimit(device, "No valid bitmap slots found to check!\n");
 		return false;
 	}
 	return true;
@@ -1796,13 +1789,8 @@ drbd_request_prepare(struct drbd_device *device, struct bio *bio,
 	/* allocate outside of all locks; */
 	req = drbd_req_new(device, bio);
 	if (!req) {
-		dec_ap_bio(device, rw);
-		/* only pass the error to the upper layers.
-		 * if user cannot handle io errors, that's not our business. */
 		drbd_err(device, "could not kmalloc() req\n");
-		bio->bi_status = BLK_STS_RESOURCE;
-		bio_endio(bio);
-		return ERR_PTR(-ENOMEM);
+		goto no_mem;
 	}
 
 	/* Update disk stats */
@@ -1810,6 +1798,11 @@ drbd_request_prepare(struct drbd_device *device, struct bio *bio,
 
 	if (get_ldev(device)) {
 		req->private_bio = bio_alloc_clone(device->ldev->backing_bdev, bio, GFP_NOIO, &drbd_io_bio_set);
+		if (!req->private_bio) {
+			drbd_err(device, "could not bio_alloc_clone() req->private_bio\n");
+			kfree(req);
+			goto no_mem;
+		}
 		req->private_bio->bi_private = req;
 		req->private_bio->bi_end_io = drbd_request_endio;
 	}
@@ -1845,6 +1838,15 @@ drbd_request_prepare(struct drbd_device *device, struct bio *bio,
 	ktime_aggregate_delta(device, req->start_kt, before_queue_kt);
 	drbd_queue_write(device, req);
 	return NULL;
+
+ no_mem:
+	dec_ap_bio(device, rw);
+	/* only pass the error to the upper layers.
+	 * if user cannot handle io errors, that's not our business.
+	 */
+	bio->bi_status = BLK_STS_RESOURCE;
+	bio_endio(bio);
+	return ERR_PTR(-ENOMEM);
 }
 
 /* Require at least one path to current data.
@@ -2060,11 +2062,13 @@ static void drbd_send_and_submit(struct drbd_request *req)
 		spin_unlock(&device->pending_completion_lock);
 		if (no_remote) {
 nodata:
-			if (drbd_ratelimit())
-				drbd_err(req->device, "IO ERROR: neither local nor remote data, sector %llu+%u\n",
-					 (unsigned long long)req->i.sector, req->i.size >> 9);
+			drbd_err_ratelimit(req->device,
+				"IO ERROR: neither local nor remote data, sector %llu+%u\n",
+				 (unsigned long long)req->i.sector, req->i.size >> 9);
 			/* A write may have been queued for send_oos, however.
-			 * So we can not simply free it, we must go through drbd_req_put_completion_ref() */
+			 * So we can not simply free it, we must go through
+			 * drbd_req_put_completion_ref()
+			 */
 		}
 	}
 
@@ -2512,17 +2516,49 @@ void do_submit(struct work_struct *ws)
 	}
 }
 
-static bool drbd_fail_request_early(struct drbd_device *device, struct bio *bio)
+static bool drbd_reject_write_early(struct drbd_device *device, struct bio *bio)
 {
 	struct drbd_resource *resource = device->resource;
 
 	/* If you "mount -o ro", then later "mount -o remount,rw", you can end
 	 * up with a DRBD "Secondary" receiving WRITE requests from the VFS.
 	 * We cannot have that. */
-	if (resource->role[NOW] != R_PRIMARY && bio_data_dir(bio) == WRITE) {
-		if (drbd_ratelimit())
-		       drbd_err(device, "Rejected WRITE request, not in Primary role.\n");
+
+	if (bio_data_dir(bio) == READ)
+		return false;
+
+	if (resource->role[NOW] != R_PRIMARY) {
+		/* You can fsync() on an O_RDONLY fd. Only be noisy
+		 * if there is data.  Ratelimit on per device "unspec"
+		 * ratelimit state before kmalloc / adding the specific
+		 * openers hint.
+		 */
+		if (bio_has_data(bio) && drbd_device_ratelimit(device, GENERIC)) {
+			char *buf = kmalloc(128, __GFP_NORETRY);
+
+			if (buf)
+				youngest_and_oldest_opener_to_str(device, buf, 128);
+			drbd_err(device,
+				"Rejected WRITE request, not in Primary role.%s\n", buf ?: "");
+			kfree(buf);
+		}
 		return true;
+	} else if (device->open_cnt == 0) {
+		drbd_err_ratelimit(device, "WRITE request, but open_cnt == 0!\n");
+	} else if (!device->writable && bio_has_data(bio)) {
+		/*
+		 * If the resource was (temporarily, auto) promoted,
+		 * a remount,rw may have succeeded without marking the device
+		 * open_cnt as "writable".  Once we let writes through, we need
+		 * _all_ openers to release(), before we attempt to auto-demote
+		 * again, so we mark it writable here.  Grab the open_release
+		 * mutex to protect against races with new openers.
+		 */
+		mutex_lock(&resource->open_release);
+		drbd_info(device, "open_cnt:%d, implicitly promoted to writable\n",
+			device->open_cnt);
+		device->writable = true;
+		mutex_unlock(&resource->open_release);
 	}
 	return false;
 }
@@ -2568,7 +2604,7 @@ void drbd_submit_bio(struct bio *bio)
 #endif
 	unsigned long start_jif;
 
-	if (drbd_fail_request_early(device, bio)) {
+	if (drbd_reject_write_early(device, bio)) {
 		bio->bi_status = BLK_STS_IOERR;
 		bio_endio(bio);
 		return;
@@ -2835,7 +2871,7 @@ void request_timer_fn(struct timer_list *t)
 			continue;
 		begin_state_change(resource, &irq_flags, CS_VERBOSE | CS_HARD);
 		__change_cstate(connection, C_TIMEOUT);
-		end_state_change(resource, &irq_flags);
+		end_state_change(resource, &irq_flags, "timeout");
 		kref_put(&connection->kref, drbd_destroy_connection);
 	}
 
@@ -2865,12 +2901,12 @@ void drbd_handle_io_error_(struct drbd_device *device,
 	switch (ep) {
 	case EP_PASS_ON: /* FIXME would this be better named "Ignore"? */
 		if (df == DRBD_READ_ERROR ||  df == DRBD_WRITE_ERROR) {
-			if (drbd_ratelimit())
+			if (drbd_device_ratelimit(device, BACKEND))
 				drbd_err(device, "Local IO failed in %s.\n", where);
 			if (device->disk_state[NOW] > D_INCONSISTENT) {
 				begin_state_change_locked(device->resource, CS_HARD);
 				__change_disk_state(device, D_INCONSISTENT);
-				end_state_change_locked(device->resource);
+				end_state_change_locked(device->resource, "local-io-error");
 			}
 			break;
 		}
@@ -2887,7 +2923,7 @@ void drbd_handle_io_error_(struct drbd_device *device,
 		if (device->disk_state[NOW] > D_FAILED) {
 			begin_state_change_locked(device->resource, CS_HARD);
 			__change_disk_state(device, D_FAILED);
-			end_state_change_locked(device->resource);
+			end_state_change_locked(device->resource, "local-io-error");
 			drbd_err(device,
 				"Local IO failed in %s. Detaching...\n", where);
 		}

@@ -47,6 +47,7 @@ struct kref_debug_class kref_class_resource = {
 		[7] = "drbd_adm_dump_devices()",
 		[8] = "free",
 		[9] = "drbd_adm_dump_peer_devices()",
+		[10] = "drbd_adm_dump_paths()",
 	}
 };
 
@@ -70,6 +71,7 @@ struct kref_debug_class kref_class_connection = {
 		[14] = "w_update_peers",
 		[15] = "for_each_peer_device_ref()",
 		[16] = "queue_twopc",
+		[17] = "path",
 	}
 };
 

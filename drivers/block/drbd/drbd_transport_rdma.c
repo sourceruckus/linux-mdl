@@ -26,6 +26,7 @@
 #include <rdma/ib_verbs.h>
 #include <rdma/rdma_cm.h>
 #include <rdma/ib_cm.h>
+#include <linux/interrupt.h>
 #include <linux/drbd_genl_api.h>
 #include "drbd_protocol.h"
 #include "drbd_transport.h"
@@ -192,7 +193,7 @@ struct dtr_flow {
 	atomic_t rx_descs_posted;
 	int rx_descs_max;  /* derived from net_conf->rcvbuf_size. Do not change after alloc. */
 
-	int rx_descs_allocated;  // keep in stream??
+	atomic_t rx_descs_allocated;
 	int rx_descs_want_posted;
 	atomic_t rx_descs_known_to_peer;
 };
@@ -219,10 +220,11 @@ struct dtr_path {
 
 	struct dtr_cm *cm; /* RCU'd and kref in cm */
 
-	struct dtr_transport *rdma_transport;
 	struct dtr_flow flow[2];
 	int nr;
 	spinlock_t send_flow_control_lock;
+	struct tasklet_struct flow_control_tasklet;
+	struct work_struct refill_rx_descs_work;
 };
 
 struct dtr_stream {
@@ -271,6 +273,7 @@ struct dtr_transport {
 
 	atomic_t cm_count;
 	wait_queue_head_t cm_count_wait;
+	struct tasklet_struct control_tasklet;
 };
 
 struct dtr_cm {
@@ -294,6 +297,7 @@ struct dtr_cm {
 	struct work_struct disconnect_work;
 
 	struct list_head error_rx_descs;
+	spinlock_t error_rx_descs_lock;
 	struct work_struct end_rx_work;
 	struct work_struct end_tx_work;
 
@@ -312,7 +316,7 @@ static void dtr_free(struct drbd_transport *transport, enum drbd_tr_free_op);
 static int dtr_connect(struct drbd_transport *transport);
 static int dtr_recv(struct drbd_transport *transport, enum drbd_stream stream, void **buf, size_t size, int flags);
 static void dtr_stats(struct drbd_transport *transport, struct drbd_transport_stats *stats);
-static void dtr_net_conf_change(struct drbd_transport *transport, struct net_conf *new_net_conf);
+static int dtr_net_conf_change(struct drbd_transport *transport, struct net_conf *new_net_conf);
 static void dtr_set_rcvtimeo(struct drbd_transport *transport, enum drbd_stream stream, long timeout);
 static long dtr_get_rcvtimeo(struct drbd_transport *transport, enum drbd_stream stream);
 static int dtr_send_page(struct drbd_transport *transport, enum drbd_stream stream, struct page *page,
@@ -322,8 +326,8 @@ static int dtr_recv_pages(struct drbd_transport *transport, struct drbd_page_cha
 static bool dtr_stream_ok(struct drbd_transport *transport, enum drbd_stream stream);
 static bool dtr_hint(struct drbd_transport *transport, enum drbd_stream stream, enum drbd_tr_hints hint);
 static void dtr_debugfs_show(struct drbd_transport *, struct seq_file *m);
-static int dtr_add_path(struct drbd_transport *, struct drbd_path *path);
-static int dtr_remove_path(struct drbd_transport *, struct drbd_path *path);
+static int dtr_add_path(struct drbd_path *path);
+static int dtr_remove_path(struct drbd_path *path);
 
 static int dtr_create_cm_id(struct dtr_cm *cm_context, struct net *net);
 static bool dtr_path_ok(struct dtr_path *path);
@@ -360,33 +364,40 @@ static void dtr_tx_timeout_fn(struct timer_list *t);
 static void dtr_control_timer_fn(struct timer_list *t);
 static void dtr_tx_timeout_work_fn(struct work_struct *work);
 static void dtr_cma_connect_work_fn(struct work_struct *work);
+static struct dtr_rx_desc *dtr_next_rx_desc(struct dtr_stream *rdma_stream);
+static void dtr_control_tasklet_fn(struct tasklet_struct *t);
+static int dtr_init_listener(struct drbd_transport *transport, const struct sockaddr *addr,
+			     struct net *net, struct drbd_listener *drbd_listener);
+static void dtr_destroy_listener(struct drbd_listener *generic_listener);
+
 
 static struct drbd_transport_class rdma_transport_class = {
 	.name = "rdma",
 	.instance_size = sizeof(struct dtr_transport),
 	.path_instance_size = sizeof(struct dtr_path),
 	.listener_instance_size = sizeof(struct dtr_listener),
+	.ops = (struct drbd_transport_ops) {
+		.init = dtr_init,
+		.free = dtr_free,
+		.init_listener = dtr_init_listener,
+		.release_listener = dtr_destroy_listener,
+		.connect = dtr_connect,
+		.recv = dtr_recv,
+		.stats = dtr_stats,
+		.net_conf_change = dtr_net_conf_change,
+		.set_rcvtimeo = dtr_set_rcvtimeo,
+		.get_rcvtimeo = dtr_get_rcvtimeo,
+		.send_page = dtr_send_page,
+		.send_zc_bio = dtr_send_zc_bio,
+		.recv_pages = dtr_recv_pages,
+		.stream_ok = dtr_stream_ok,
+		.hint = dtr_hint,
+		.debugfs_show = dtr_debugfs_show,
+		.add_path = dtr_add_path,
+		.remove_path = dtr_remove_path,
+	},
 	.module = THIS_MODULE,
-	.init = dtr_init,
 	.list = LIST_HEAD_INIT(rdma_transport_class.list),
-};
-
-static struct drbd_transport_ops dtr_ops = {
-	.free = dtr_free,
-	.connect = dtr_connect,
-	.recv = dtr_recv,
-	.stats = dtr_stats,
-	.net_conf_change = dtr_net_conf_change,
-	.set_rcvtimeo = dtr_set_rcvtimeo,
-	.get_rcvtimeo = dtr_get_rcvtimeo,
-	.send_page = dtr_send_page,
-	.send_zc_bio = dtr_send_zc_bio,
-	.recv_pages = dtr_recv_pages,
-	.stream_ok = dtr_stream_ok,
-	.hint = dtr_hint,
-	.debugfs_show = dtr_debugfs_show,
-	.add_path = dtr_add_path,
-	.remove_path = dtr_remove_path,
 };
 
 static struct rdma_conn_param dtr_conn_param = {
@@ -489,7 +500,6 @@ static int dtr_init(struct drbd_transport *transport)
 		container_of(transport, struct dtr_transport, transport);
 	int i;
 
-	transport->ops = &dtr_ops;
 	transport->class = &rdma_transport_class;
 
 	rdma_transport->rx_allocation_size = allocation_size;
@@ -504,6 +514,8 @@ static int dtr_init(struct drbd_transport *transport)
 
 	atomic_set(&rdma_transport->cm_count, 0);
 	init_waitqueue_head(&rdma_transport->cm_count_wait);
+
+	tasklet_setup(&rdma_transport->control_tasklet, dtr_control_tasklet_fn);
 
 	return 0;
 }
@@ -701,7 +713,7 @@ static int dtr_recv_pages(struct drbd_transport *transport, struct drbd_page_cha
 		set_page_chain_offset(page, 0);
 		set_page_chain_size(page, rx_desc->size);
 
-		rx_desc->cm->path->flow[DATA_STREAM].rx_descs_allocated--;
+		atomic_dec(&rx_desc->cm->path->flow[DATA_STREAM].rx_descs_allocated);
 		dtr_free_rx_desc(rx_desc);
 
 		i++;
@@ -894,7 +906,9 @@ static void dtr_path_established_work_fn(struct work_struct *work)
 {
 	struct dtr_cm *cm = container_of(work, struct dtr_cm, establish_work);
 	struct dtr_path *path = cm->path;
-	struct drbd_transport *transport = &path->rdma_transport->transport;
+	struct drbd_transport *transport = path->path.transport;
+	struct dtr_transport *rdma_transport =
+		container_of(transport, struct dtr_transport, transport);
 	struct dtr_connect_state *cs = &path->cs;
 	int i, p, err;
 
@@ -930,13 +944,13 @@ static void dtr_path_established_work_fn(struct work_struct *work)
 		return;
 	}
 
-	p = atomic_cmpxchg(&path->rdma_transport->first_path_connect_err, 1, err);
+	p = atomic_cmpxchg(&rdma_transport->first_path_connect_err, 1, err);
 	if (p == 1) {
 		if (cs->active)
 			set_bit(RESOLVE_CONFLICTS, &transport->flags);
 		else
 			clear_bit(RESOLVE_CONFLICTS, &transport->flags);
-		complete(&path->rdma_transport->connected);
+		complete(&rdma_transport->connected);
 	}
 
 	path->path.established = true;
@@ -983,11 +997,12 @@ static struct dtr_cm *dtr_alloc_cm(struct dtr_path *path)
 	INIT_WORK(&cm->end_tx_work, dtr_end_tx_work_fn);
 	INIT_WORK(&cm->tx_timeout_work, dtr_tx_timeout_work_fn);
 	INIT_LIST_HEAD(&cm->error_rx_descs);
+	spin_lock_init(&cm->error_rx_descs_lock);
 	timer_setup(&cm->tx_timeout, dtr_tx_timeout_fn, 0);
 
 	kref_get(&path->path.kref);
 	cm->path = path;
-	cm->rdma_transport = path->rdma_transport;
+	cm->rdma_transport = container_of(path->path.transport, struct dtr_transport, transport);
 	atomic_inc(&cm->rdma_transport->cm_count);
 
 	return cm;
@@ -1079,7 +1094,7 @@ static int dtr_cma_accept(struct dtr_listener *listener, struct rdma_cm_id *new_
 static int dtr_start_try_connect(struct dtr_connect_state *cs)
 {
 	struct dtr_path *path = container_of(cs, struct dtr_path, cs);
-	struct drbd_transport *transport = &path->rdma_transport->transport;
+	struct drbd_transport *transport = path->path.transport;
 	struct dtr_cm *cm;
 	int err = -ENOMEM;
 
@@ -1098,7 +1113,6 @@ static int dtr_start_try_connect(struct dtr_connect_state *cs)
 				(struct sockaddr *)&path->path.peer_addr,
 				2000);
 	if (err) {
-		kref_put(&cm->kref, dtr_destroy_cm);
 		tr_err(transport, "rdma_resolve_addr error %d\n", err);
 		goto out;
 	}
@@ -1125,7 +1139,7 @@ static void dtr_cma_retry_connect_work_fn(struct work_struct *work)
 	err = dtr_start_try_connect(cs);
 	if (err) {
 		struct dtr_path *path = container_of(cs, struct dtr_path, cs);
-		struct drbd_transport *transport = &path->rdma_transport->transport;
+		struct drbd_transport *transport = path->path.transport;
 
 		tr_err(transport, "dtr_start_try_connect failed  %d\n", err);
 		schedule_delayed_work(&cs->retry_connect_work, HZ);
@@ -1137,8 +1151,8 @@ static void dtr_remove_cm_from_path(struct dtr_path *path, struct dtr_cm *failed
 	struct dtr_cm *cm;
 
 	cm = cmpxchg(&path->cm, failed_cm, NULL); // RCU &path->cm
-	if (cm == failed_cm) {
-		struct drbd_transport *transport = &path->rdma_transport->transport;
+	if (cm == failed_cm && cm->id && cm->id->qp) {
+		struct drbd_transport *transport = path->path.transport;
 		struct ib_qp_attr attr = { .qp_state = IB_QPS_ERR };
 		int err;
 
@@ -1152,7 +1166,7 @@ static void dtr_remove_cm_from_path(struct dtr_path *path, struct dtr_cm *failed
 
 static void dtr_cma_retry_connect(struct dtr_path *path, struct dtr_cm *failed_cm)
 {
-	struct drbd_transport *transport = &path->rdma_transport->transport;
+	struct drbd_transport *transport = path->path.transport;
 	struct dtr_connect_state *cs = &path->cs;
 	long connect_int = 10 * HZ;
 	struct net_conf *nc;
@@ -1172,7 +1186,7 @@ static void dtr_cma_connect_work_fn(struct work_struct *work)
 {
 	struct dtr_cm *cm = container_of(work, struct dtr_cm, connect_work);
 	struct dtr_path *path = cm->path;
-	struct drbd_transport *transport = &path->rdma_transport->transport;
+	struct drbd_transport *transport = path->path.transport;
 	enum connect_state_enum p;
 	int err;
 
@@ -1183,7 +1197,7 @@ static void dtr_cma_connect_work_fn(struct work_struct *work)
 		return;
 	}
 
-	/* kref_put()/kref_get(&cm->kref) Recycling reference for work for path->cm */
+	kref_get(&cm->kref); /* for the path->cm pointer */
 	err = dtr_path_prepare(path, cm, true);
 	if (err) {
 		tr_err(transport, "dtr_path_prepare() = %d\n", err);
@@ -1193,13 +1207,15 @@ static void dtr_cma_connect_work_fn(struct work_struct *work)
 	kref_get(&cm->kref); /* Expecting RDMA_CM_EVENT_ESTABLISHED */
 	err = rdma_connect(cm->id, &dtr_conn_param);
 	if (err) {
+		kref_put(&cm->kref, dtr_destroy_cm); /* no RDMA_CM_EVENT_ESTABLISHED */
 		tr_err(transport, "rdma_connect error %d\n", err);
 		goto out;
 	}
 
+	kref_put(&cm->kref, dtr_destroy_cm); /* for work */
 	return;
 out:
-	kref_put(&cm->kref, dtr_destroy_cm);
+	kref_put(&cm->kref, dtr_destroy_cm); /* for work */
 	dtr_cma_retry_connect(path, cm);
 }
 
@@ -1207,7 +1223,9 @@ static void dtr_cma_disconnect_work_fn(struct work_struct *work)
 {
 	struct dtr_cm *cm = container_of(work, struct dtr_cm, disconnect_work);
 	struct dtr_path *path = cm->path;
-	struct drbd_transport *transport = &path->rdma_transport->transport;
+	struct drbd_transport *transport = path->path.transport;
+	struct dtr_transport *rdma_transport =
+		container_of(transport, struct dtr_transport, transport);
 	struct drbd_path *drbd_path = &path->path;
 	bool destroyed;
 	int err;
@@ -1217,7 +1235,7 @@ static void dtr_cma_disconnect_work_fn(struct work_struct *work)
 	if (err)
 		return;
 
-	destroyed = path->nr == -1 || path->rdma_transport->active == false;
+	destroyed = path->nr == -1 || rdma_transport->active == false;
 	if (drbd_path->established || destroyed) {
 		drbd_path->established = false;
 		drbd_path_event(transport, drbd_path, destroyed);
@@ -1241,13 +1259,13 @@ static void dtr_cma_disconnect_work_fn(struct work_struct *work)
 	dtr_disconnect_path(path);
 
 	/* dtr_disconnect_path() may take time, recheck here... */
-	if (path->nr == -1 || path->rdma_transport->active == false)
+	if (path->nr == -1 || rdma_transport->active == false)
 		goto abort;
 
 	if (!dtr_transport_ok(transport)) {
 		/* If there is no other connected path mark the connection as
 		   no longer active. Do not try to re-establish this path!! */
-		path->rdma_transport->active = false;
+		rdma_transport->active = false;
 		goto abort;
 	}
 
@@ -1435,7 +1453,8 @@ static bool dtr_receive_rx_desc(struct dtr_transport *rdma_transport,
 
 	if (rx_desc) {
 		struct dtr_cm *cm = rx_desc->cm;
-		struct dtr_transport *rdma_transport = cm->path->rdma_transport;
+		struct dtr_transport *rdma_transport =
+			container_of(cm->path->path.transport, struct dtr_transport, transport);
 
 		INIT_LIST_HEAD(&rx_desc->list);
 		ib_dma_sync_single_for_cpu(cm->id->device, rx_desc->sge.addr,
@@ -1453,7 +1472,7 @@ static bool dtr_receive_rx_desc(struct dtr_transport *rdma_transport,
 
 			if (atomic_read(&flow->rx_descs_known_to_peer) <
 			    atomic_read(&flow->rx_descs_posted) / 8)
-				dtr_send_flow_control_msg(path, GFP_NOIO);
+				dtr_send_flow_control_msg(path, GFP_ATOMIC);
 		}
 		rcu_read_unlock();
 	}
@@ -1489,7 +1508,7 @@ static int dtr_send_flow_control_msg(struct dtr_path *path, gfp_t gfp_mask)
 	spin_unlock_bh(&path->send_flow_control_lock);
 
 	if (rx_desc_stolen_from == -1) {
-		tr_err(&path->rdma_transport->transport,
+		tr_err(path->path.transport,
 		       "Not sending flow_control mgs, no receive window!\n");
 		err = -ENOBUFS;
 		goto out_undo;
@@ -1526,7 +1545,8 @@ static void dtr_flow_control(struct dtr_flow *flow, gfp_t gfp_mask)
 static int dtr_got_flow_control_msg(struct dtr_path *path,
 				     struct dtr_flow_control *msg)
 {
-	struct dtr_transport *rdma_transport = path->rdma_transport;
+	struct dtr_transport *rdma_transport =
+		container_of(path->path.transport, struct dtr_transport, transport);
 	struct dtr_flow *flow;
 	int i, n;
 
@@ -1548,6 +1568,13 @@ static int dtr_got_flow_control_msg(struct dtr_path *path,
 	return be32_to_cpu(msg->rx_desc_stolen_from_stream);
 }
 
+static void dtr_flow_control_tasklet_fn(struct tasklet_struct *t)
+{
+	struct dtr_path *path = from_tasklet(path, t, flow_control_tasklet);
+
+	dtr_send_flow_control_msg(path, GFP_ATOMIC);
+}
+
 static void dtr_maybe_trigger_flow_control_msg(struct dtr_path *path, int rx_desc_stolen_from)
 {
 	struct dtr_flow *flow;
@@ -1556,11 +1583,10 @@ static void dtr_maybe_trigger_flow_control_msg(struct dtr_path *path, int rx_des
 	flow = &path->flow[rx_desc_stolen_from];
 	n = atomic_dec_return(&flow->rx_descs_known_to_peer);
 	/* If we get a lot of flow control messages in, but no data on this
-	   path, we need to tell the peer that we recycled all these buffers */
-	if (n < atomic_read(&flow->rx_descs_posted) / 8) {
-		struct dtr_stream *rdma_stream = &path->rdma_transport->stream[rx_desc_stolen_from];
-		wake_up_interruptible(&rdma_stream->recv_wq); /* No packet, send flow_control! */
-	}
+	 * path, we need to tell the peer that we recycled all these buffers
+	 */
+	if (n < atomic_read(&flow->rx_descs_posted) / 8)
+		tasklet_schedule(&path->flow_control_tasklet);
 }
 
 static void dtr_tx_timeout_work_fn(struct work_struct *work)
@@ -1572,7 +1598,7 @@ static void dtr_tx_timeout_work_fn(struct work_struct *work)
 	if (!test_and_clear_bit(DSB_CONNECTED, &cm->state) || !path)
 		goto out;
 
-	transport = &path->rdma_transport->transport;
+	transport = path->path.transport;
 	tr_warn(transport, "%pI4 - %pI4: tx timeout\n",
 		&((struct sockaddr_in *)&path->path.my_addr)->sin_addr,
 		&((struct sockaddr_in *)&path->path.peer_addr)->sin_addr);
@@ -1589,21 +1615,24 @@ static void dtr_tx_timeout_work_fn(struct work_struct *work)
 	drbd_path_event(transport, &path->path, false);
 
 	if (!dtr_transport_ok(transport)) {
+		struct dtr_transport *rdma_transport =
+			container_of(transport, struct dtr_transport, transport);
+
 		drbd_control_event(transport, CLOSED_BY_PEER);
-		path->rdma_transport->active = false;
+		rdma_transport->active = false;
 	} else {
 		dtr_activate_path(path);
 	}
 
 out:
-	kref_put(&cm->kref, dtr_destroy_cm); /* for work */
+	kref_put(&cm->kref, dtr_destroy_cm); /* for work (armed timer) */
 }
 
 static void dtr_tx_timeout_fn(struct timer_list *t)
 {
 	struct dtr_cm *cm = from_timer(cm, t, tx_timeout);
 
-	kref_get(&cm->kref);
+	/* cm->kref for armed timer becomes a ref for the work */
 	schedule_work(&cm->tx_timeout_work);
 }
 
@@ -1649,9 +1678,22 @@ static void dtr_order_rx_descs(struct dtr_stream *rdma_stream,
 static void dtr_dec_rx_descs(struct dtr_cm *cm)
 {
 	struct dtr_flow *flow = cm->path->flow;
+	struct dtr_transport *rdma_transport = cm->rdma_transport;
 
-	if (atomic_dec_if_positive(&flow[DATA_STREAM].rx_descs_posted) < 0)
-		atomic_dec(&flow[CONTROL_STREAM].rx_descs_posted);
+	/* When we get the posted rx_descs back, we do not know if they
+	 * where accoutend for the data stream or the control stream...
+	 */
+	if (atomic_dec_if_positive(&flow[DATA_STREAM].rx_descs_posted) >= 0)
+		return;
+
+	if (atomic_dec_if_positive(&flow[CONTROL_STREAM].rx_descs_posted) >= 0)
+		return;
+
+	if (__ratelimit(&rdma_transport->rate_limit)) {
+		struct drbd_transport *transport = &rdma_transport->transport;
+
+		tr_warn(transport, "rx_descs_posted underflow avoided\n");
+	}
 }
 
 static void dtr_control_data_ready(struct dtr_stream *rdma_stream, struct dtr_rx_desc *rx_desc)
@@ -1660,6 +1702,11 @@ static void dtr_control_data_ready(struct dtr_stream *rdma_stream, struct dtr_rx
 	struct drbd_transport *transport = &rdma_transport->transport;
 	struct drbd_const_buffer buffer;
 	struct dtr_cm *cm = rx_desc->cm;
+	struct dtr_path *path = cm->path;
+	struct dtr_flow *flow = &path->flow[CONTROL_STREAM];
+
+	if (atomic_read(&flow->rx_descs_known_to_peer) < atomic_read(&flow->rx_descs_posted) / 8)
+		dtr_send_flow_control_msg(path, GFP_ATOMIC);
 
 	ib_dma_sync_single_for_cpu(cm->id->device, rx_desc->sge.addr,
 				   rdma_transport->rx_allocation_size, DMA_FROM_DEVICE);
@@ -1667,16 +1714,64 @@ static void dtr_control_data_ready(struct dtr_stream *rdma_stream, struct dtr_rx
 	buffer.buffer = page_address(rx_desc->page);
 	buffer.avail = rx_desc->size;
 	drbd_control_data_ready(transport, &buffer);
-	rdma_stream->rx_sequence =
-		(rdma_stream->rx_sequence + 1) & ((1UL << SEQUENCE_BITS) - 1);
 
 	dtr_recycle_rx_desc(transport, CONTROL_STREAM, &rx_desc, GFP_ATOMIC);
+}
+
+static void __dtr_order_rx_descs_front(struct dtr_stream *rdma_stream,
+				       struct dtr_rx_desc *rx_desc)
+{
+	struct dtr_rx_desc *pos;
+	unsigned int seq = rx_desc->sequence;
+
+	list_for_each_entry(pos, &rdma_stream->rx_descs, list) {
+		if (higher_in_sequence(seq, pos->sequence)) { /* think: seq > pos->sequence */
+			list_add(&rx_desc->list, &pos->list);
+			return;
+		}
+	}
+	list_add(&rx_desc->list, &rdma_stream->rx_descs);
+}
+
+static void dtr_control_tasklet_fn(struct tasklet_struct *t)
+{
+	struct dtr_transport *rdma_transport =
+		from_tasklet(rdma_transport, t, control_tasklet);
+	struct dtr_stream *rdma_stream = &rdma_transport->stream[CONTROL_STREAM];
+	struct dtr_rx_desc *rx_desc, *tmp;
+	LIST_HEAD(rx_descs);
+
+	spin_lock_irq(&rdma_stream->rx_descs_lock);
+	list_splice_init(&rdma_stream->rx_descs, &rx_descs);
+	spin_unlock_irq(&rdma_stream->rx_descs_lock);
+
+	list_for_each_entry_safe(rx_desc, tmp, &rx_descs, list) {
+		if (rx_desc->sequence != rdma_stream->rx_sequence)
+			goto abort;
+		list_del(&rx_desc->list);
+		rdma_stream->rx_sequence =
+			(rdma_stream->rx_sequence + 1) & ((1UL << SEQUENCE_BITS) - 1);
+		rdma_stream->unread -= rx_desc->size;
+		dtr_control_data_ready(rdma_stream, rx_desc);
+	}
+	return;
+
+abort:
+	spin_lock_irq(&rdma_stream->rx_descs_lock);
+	list_for_each_entry_safe(rx_desc, tmp, &rx_descs, list) {
+		list_del(&rx_desc->list);
+		__dtr_order_rx_descs_front(rdma_stream, rx_desc);
+	}
+	spin_unlock_irq(&rdma_stream->rx_descs_lock);
+
+	tasklet_schedule(&rdma_transport->control_tasklet);
 }
 
 static int dtr_handle_rx_cq_event(struct ib_cq *cq, struct dtr_cm *cm)
 {
 	struct dtr_path *path = cm->path;
-	struct dtr_transport *rdma_transport = path->rdma_transport;
+	struct dtr_transport *rdma_transport =
+		container_of(path->path.transport, struct dtr_transport, transport);
 	struct dtr_rx_desc *rx_desc;
 	union dtr_immediate immediate;
 	struct ib_wc wc;
@@ -1690,6 +1785,7 @@ static int dtr_handle_rx_cq_event(struct ib_cq *cq, struct dtr_cm *cm)
 
 	if (wc.status != IB_WC_SUCCESS || wc.opcode != IB_WC_RECV) {
 		struct drbd_transport *transport = &rdma_transport->transport;
+		unsigned long irq_flags;
 
 		switch (wc.status) {
 		case IB_WC_WR_FLUSH_ERR:
@@ -1719,7 +1815,9 @@ static int dtr_handle_rx_cq_event(struct ib_cq *cq, struct dtr_cm *cm)
 		   should not be called from IRQ context. This callback executes
 		   in the context of the timer interrupt.
 		 */
+		spin_lock_irqsave(&cm->error_rx_descs_lock, irq_flags);
 		list_add_tail(&rx_desc->list, &cm->error_rx_descs);
+		spin_unlock_irqrestore(&cm->error_rx_descs_lock, irq_flags);
 		dtr_dec_rx_descs(cm);
 		set_bit(DSB_ERROR, &cm->state);
 
@@ -1749,16 +1847,14 @@ static int dtr_handle_rx_cq_event(struct ib_cq *cq, struct dtr_cm *cm)
 		if (immediate.stream == ST_CONTROL)
 			mod_timer(&rdma_transport->control_timer, jiffies + rdma_stream->recv_timeout);
 
-		if (immediate.stream == ST_CONTROL &&
-		    rdma_stream->rx_sequence == immediate.sequence) {
-			dtr_control_data_ready(rdma_stream, rx_desc);
-			while ((rx_desc = dtr_next_rx_desc(rdma_stream)))
-				dtr_control_data_ready(rdma_stream, rx_desc);
-		} else {
-			rx_desc->sequence = immediate.sequence;
-			dtr_order_rx_descs(rdma_stream, rx_desc);
+		rx_desc->sequence = immediate.sequence;
+		dtr_order_rx_descs(rdma_stream, rx_desc);
+
+		if (immediate.stream == ST_CONTROL)
+			tasklet_schedule(&rdma_transport->control_tasklet);
+		else
 			wake_up_interruptible(&rdma_stream->recv_wq);
-		}
+
 	}
 
 	return 0;
@@ -1767,25 +1863,37 @@ static int dtr_handle_rx_cq_event(struct ib_cq *cq, struct dtr_cm *cm)
 static void dtr_rx_cq_event_handler(struct ib_cq *cq, void *ctx)
 {
 	struct dtr_cm *cm = ctx;
+	struct dtr_path *path = cm->path;
 	int err, rc;
 
 	do {
+		unsigned long irq_flags;
 		do {
 			err = dtr_handle_rx_cq_event(cq, cm);
 		} while (!err);
 
+		spin_lock_irqsave(&cm->error_rx_descs_lock, irq_flags);
 		if (!list_empty(&cm->error_rx_descs)) {
-			schedule_work(&cm->end_rx_work);
-			break;
+			kref_get(&cm->kref);
+			if (!schedule_work(&cm->end_rx_work))
+				kref_put(&cm->kref, dtr_destroy_cm);
 		}
+		spin_unlock_irqrestore(&cm->error_rx_descs_lock, irq_flags);
 
 		rc = ib_req_notify_cq(cq, IB_CQ_NEXT_COMP | IB_CQ_REPORT_MISSED_EVENTS);
 		if (unlikely(rc < 0)) {
-			struct drbd_transport *transport = &cm->path->rdma_transport->transport;
+			struct drbd_transport *transport = path->path.transport;
 			tr_err(transport, "ib_req_notify_cq failed %d\n", rc);
 			break;
 		}
 	} while (rc);
+
+	if (dtr_path_ok(path)) {
+		struct dtr_flow *flow = &path->flow[DATA_STREAM];
+
+		if (atomic_read(&flow->rx_descs_posted) < flow->rx_descs_want_posted / 2)
+			schedule_work(&path->refill_rx_descs_work);
+	}
 }
 
 static void dtr_free_tx_desc(struct dtr_cm *cm, struct dtr_tx_desc *tx_desc)
@@ -1820,7 +1928,8 @@ static void dtr_free_tx_desc(struct dtr_cm *cm, struct dtr_tx_desc *tx_desc)
 static int dtr_handle_tx_cq_event(struct ib_cq *cq, struct dtr_cm *cm)
 {
 	struct dtr_path *path = cm->path;
-	struct dtr_transport *rdma_transport = path->rdma_transport;
+	struct dtr_transport *rdma_transport =
+		container_of(path->path.transport, struct dtr_transport, transport);
 	struct dtr_tx_desc *tx_desc;
 	struct ib_wc wc;
 	enum dtr_stream_nr stream_nr;
@@ -1868,7 +1977,11 @@ static int dtr_handle_tx_cq_event(struct ib_cq *cq, struct dtr_cm *cm)
 	if (tx_desc)
 		dtr_free_tx_desc(cm, tx_desc);
 	if (atomic_dec_and_test(&cm->tx_descs_posted)) {
-		del_timer(&cm->tx_timeout);
+		bool was_active = del_timer(&cm->tx_timeout);
+
+		if (was_active)
+			kref_put(&cm->kref, dtr_destroy_cm);
+
 		if (cm->state == DSM_CONNECTED)
 			kref_put(&cm->kref, dtr_destroy_cm); /* this is _not_ the last ref */
 		else
@@ -1893,7 +2006,7 @@ static void dtr_tx_cq_event_handler(struct ib_cq *cq, void *ctx)
 
 		rc = ib_req_notify_cq(cq, IB_CQ_NEXT_COMP | IB_CQ_REPORT_MISSED_EVENTS);
 		if (unlikely(rc < 0)) {
-			struct drbd_transport *transport = &cm->path->rdma_transport->transport;
+			struct drbd_transport *transport = cm->path->path.transport;
 			tr_err(transport, "ib_req_notify_cq failed %d\n", rc);
 			break;
 		}
@@ -1902,12 +2015,15 @@ static void dtr_tx_cq_event_handler(struct ib_cq *cq, void *ctx)
 
 static int dtr_create_qp(struct dtr_cm *cm, int rx_descs_max, int tx_descs_max)
 {
+	struct dtr_transport *rdma_transport =
+		container_of(cm->path->path.transport, struct dtr_transport, transport);
 	int err;
+
 	struct ib_qp_init_attr init_attr = {
 		.cap.max_send_wr = tx_descs_max,
 		.cap.max_recv_wr = rx_descs_max,
 		.cap.max_recv_sge = 1, /* We only receive into single pages */
-		.cap.max_send_sge = cm->path->rdma_transport->sges_max,
+		.cap.max_send_sge = rdma_transport->sges_max,
 		.qp_type = IB_QPT_RC,
 		.send_cq = cm->send_cq,
 		.recv_cq = cm->recv_cq,
@@ -1921,7 +2037,8 @@ static int dtr_create_qp(struct dtr_cm *cm, int rx_descs_max, int tx_descs_max)
 
 static int dtr_post_rx_desc(struct dtr_cm *cm, struct dtr_rx_desc *rx_desc)
 {
-	struct dtr_transport *rdma_transport = cm->path->rdma_transport;
+	struct dtr_transport *rdma_transport =
+		container_of(cm->path->path.transport, struct dtr_transport, transport);
 	struct ib_recv_wr recv_wr;
 	const struct ib_recv_wr *recv_wr_failed;
 	int err = -EIO;
@@ -1943,6 +2060,7 @@ static int dtr_post_rx_desc(struct dtr_cm *cm, struct dtr_rx_desc *rx_desc)
 
 static void dtr_free_rx_desc(struct dtr_rx_desc *rx_desc)
 {
+	struct dtr_transport *rdma_transport;
 	struct dtr_path *path;
 	struct ib_device *device;
 	struct dtr_cm *cm;
@@ -1954,12 +2072,13 @@ static void dtr_free_rx_desc(struct dtr_rx_desc *rx_desc)
 	cm = rx_desc->cm;
 	device = cm->id->device;
 	path = cm->path;
-	alloc_size = path->rdma_transport->rx_allocation_size;
+	rdma_transport = container_of(path->path.transport, struct dtr_transport, transport);
+	alloc_size = rdma_transport->rx_allocation_size;
 	ib_dma_unmap_single(device, rx_desc->sge.addr, alloc_size, DMA_FROM_DEVICE);
 	kref_put(&cm->kref, dtr_destroy_cm);
 
 	if (rx_desc->page) {
-		struct drbd_transport *transport = &path->rdma_transport->transport;
+		struct drbd_transport *transport = &rdma_transport->transport;
 
 		/* put_page(), if we had more than one rx_desc per page,
 		 * but see comments in dtr_create_rx_desc */
@@ -1968,17 +2087,19 @@ static void dtr_free_rx_desc(struct dtr_rx_desc *rx_desc)
 	kfree(rx_desc);
 }
 
-static int dtr_create_rx_desc(struct dtr_flow *flow)
+static int dtr_create_rx_desc(struct dtr_flow *flow, gfp_t gfp_mask)
 {
 	struct dtr_path *path = flow->path;
-	struct drbd_transport *transport = &path->rdma_transport->transport;
+	struct drbd_transport *transport = path->path.transport;
+	struct dtr_transport *rdma_transport =
+		container_of(transport, struct dtr_transport, transport);
 	struct dtr_rx_desc *rx_desc;
 	struct page *page;
-	int err, alloc_size = path->rdma_transport->rx_allocation_size;
+	int err, alloc_size = rdma_transport->rx_allocation_size;
 	int nr_pages = alloc_size / PAGE_SIZE;
 	struct dtr_cm *cm;
 
-	rx_desc = kzalloc(sizeof(*rx_desc), GFP_NOIO);
+	rx_desc = kzalloc(sizeof(*rx_desc), gfp_mask);
 	if (!rx_desc)
 		return -ENOMEM;
 
@@ -1986,7 +2107,7 @@ static int dtr_create_rx_desc(struct dtr_flow *flow)
 	 * Which means no other user may ever have requested and then given
 	 * back a highmem page!
 	 */
-	page = drbd_alloc_pages(transport, nr_pages, GFP_NOIO);
+	page = drbd_alloc_pages(transport, nr_pages, gfp_mask);
 	if (!page) {
 		kfree(rx_desc);
 		return -ENOMEM;
@@ -2009,20 +2130,28 @@ static int dtr_create_rx_desc(struct dtr_flow *flow)
 		goto out;
 	rx_desc->sge.length = alloc_size;
 
+	atomic_inc(&flow->rx_descs_allocated);
+	atomic_inc(&flow->rx_descs_posted);
 	err = dtr_post_rx_desc(cm, rx_desc);
 	if (err) {
 		tr_err(transport, "dtr_post_rx_desc() returned %d\n", err);
+		atomic_dec(&flow->rx_descs_posted);
+		atomic_dec(&flow->rx_descs_allocated);
 		dtr_free_rx_desc(rx_desc);
-	} else {
-		flow->rx_descs_allocated++;
-		atomic_inc(&flow->rx_descs_posted);
 	}
-
 	return err;
 out:
 	kfree(rx_desc);
 	drbd_free_pages(transport, page, 0);
 	return err;
+}
+
+static void dtr_refill_rx_descs_work_fn(struct work_struct *work)
+{
+	struct dtr_path *path = container_of(work, struct dtr_path, refill_rx_descs_work);
+
+	if (dtr_path_ok(path))
+		__dtr_refill_rx_desc(path, DATA_STREAM);
 }
 
 static void __dtr_refill_rx_desc(struct dtr_path *path, enum drbd_stream stream)
@@ -2034,10 +2163,18 @@ static void __dtr_refill_rx_desc(struct dtr_path *path, enum drbd_stream stream)
 	descs_want_posted = flow->rx_descs_want_posted;
 
 	while (atomic_read(&flow->rx_descs_posted) < descs_want_posted &&
-	       flow->rx_descs_allocated < descs_max) {
-		int err = dtr_create_rx_desc(flow);
-		if (err) {
-			struct drbd_transport *transport = &path->rdma_transport->transport;
+	       atomic_read(&flow->rx_descs_allocated) < descs_max) {
+		int err = dtr_create_rx_desc(flow, (GFP_NOIO & ~__GFP_RECLAIM) | __GFP_NOWARN);
+		/*
+		 * drbd_alloc_pages() goes over the configured max_buffers, but throttles the
+		 * caller with sleeping 100ms for each of those excess pages.  By calling
+		 * without __GFP_RECLAIM we request to get a -ENOMEM instead of sleeping.
+		 * We simply stop refilling then.
+		 */
+		if (err == -ENOMEM) {
+			break;
+		} else if (err > 0) {
+			struct drbd_transport *transport = path->path.transport;
 			tr_err(transport, "dtr_create_rx_desc() = %d\n", err);
 			break;
 		}
@@ -2105,11 +2242,16 @@ static void dtr_recycle_rx_desc(struct drbd_transport *transport,
 
 static int __dtr_post_tx_desc(struct dtr_cm *cm, struct dtr_tx_desc *tx_desc)
 {
-	struct dtr_transport *rdma_transport = cm->path->rdma_transport;
+	struct dtr_transport *rdma_transport =
+		container_of(cm->path->path.transport, struct dtr_transport, transport);
+	struct drbd_transport *transport = &rdma_transport->transport;
 	struct ib_send_wr send_wr;
 	const struct ib_send_wr *send_wr_failed;
 	struct ib_device *device = cm->id->device;
+	unsigned long timeout;
+	struct net_conf *nc;
 	int i, err = -EIO;
+	bool was_active;
 
 	send_wr.next = NULL;
 	send_wr.wr_id = (unsigned long)tx_desc;
@@ -2119,25 +2261,33 @@ static int __dtr_post_tx_desc(struct dtr_cm *cm, struct dtr_tx_desc *tx_desc)
 	send_wr.opcode = IB_WR_SEND_WITH_IMM;
 	send_wr.send_flags = IB_SEND_SIGNALED;
 
+	rcu_read_lock();
+	nc = rcu_dereference(transport->net_conf);
+	timeout = nc->ping_timeo;
+	rcu_read_unlock();
+
 	for (i = 0; i < tx_desc->nr_sges; i++)
 		ib_dma_sync_single_for_device(device, tx_desc->sge[i].addr,
 					      tx_desc->sge[i].length, DMA_TO_DEVICE);
+
+	if (atomic_inc_return(&cm->tx_descs_posted) == 1)
+		kref_get(&cm->kref); /* keep one extra ref as long as one tx is posted */
+
+	kref_get(&cm->kref);
+	was_active = mod_timer(&cm->tx_timeout, jiffies + timeout * HZ / 20);
+	if (was_active)
+		kref_put(&cm->kref, dtr_destroy_cm);
+
 	err = ib_post_send(cm->id->qp, &send_wr, &send_wr_failed);
-	if (!err) {
-		struct drbd_transport *transport = &rdma_transport->transport;
-		unsigned long timeout;
-		struct net_conf *nc;
-
-		if (atomic_inc_return(&cm->tx_descs_posted) == 1)
-			kref_get(&cm->kref); /* keep one extra ref as long as one tx is posted */
-
-		rcu_read_lock();
-		nc = rcu_dereference(transport->net_conf);
-		timeout = nc->ping_timeo;
-		rcu_read_unlock();
-		mod_timer(&cm->tx_timeout, jiffies + timeout * HZ / 20);
-	} else {
+	if (err) {
 		tr_err(&rdma_transport->transport, "ib_post_send() failed %d\n", err);
+		was_active = del_timer(&cm->tx_timeout);
+		if (!was_active)
+			was_active = cancel_work_sync(&cm->tx_timeout_work);
+		if (was_active)
+			kref_put(&cm->kref, dtr_destroy_cm);
+		if (atomic_dec_and_test(&cm->tx_descs_posted))
+			kref_put(&cm->kref, dtr_destroy_cm);
 	}
 
 	return err;
@@ -2239,7 +2389,8 @@ static int dtr_remap_tx_desc(struct dtr_cm *old_cm, struct dtr_cm *cm,
 
 static int dtr_repost_tx_desc(struct dtr_cm *old_cm, struct dtr_tx_desc *tx_desc)
 {
-	struct dtr_transport *rdma_transport = old_cm->path->rdma_transport;
+	struct dtr_transport *rdma_transport =
+		container_of(old_cm->path->path.transport, struct dtr_transport, transport);
 	enum drbd_stream stream = tx_desc->imm.stream;
 	struct dtr_cm *cm;
 	int err;
@@ -2325,8 +2476,10 @@ out:
 
 static int dtr_init_flow(struct dtr_path *path, enum drbd_stream stream)
 {
-	struct drbd_transport *transport = &path->rdma_transport->transport;
-	unsigned int alloc_size = path->rdma_transport->rx_allocation_size;
+	struct drbd_transport *transport = path->path.transport;
+	struct dtr_transport *rdma_transport =
+		container_of(transport, struct dtr_transport, transport);
+	unsigned int alloc_size = rdma_transport->rx_allocation_size;
 	unsigned int rcvbuf_size = RDMA_DEF_BUFFER_SIZE;
 	unsigned int sndbuf_size = RDMA_DEF_BUFFER_SIZE;
 	struct dtr_flow *flow = &path->flow[stream];
@@ -2348,8 +2501,8 @@ static int dtr_init_flow(struct dtr_path *path, enum drbd_stream stream)
 		sndbuf_size = nc->sndbuf_size;
 
 	if (stream == CONTROL_STREAM) {
-		rcvbuf_size = max(rcvbuf_size / 64, alloc_size * 8);
-		sndbuf_size = max(sndbuf_size / 64, alloc_size * 8);
+		rcvbuf_size = nc->rdma_ctrl_rcvbuf_size ?: max(rcvbuf_size / 64, alloc_size * 8);
+		sndbuf_size = nc->rdma_ctrl_sndbuf_size ?: max(sndbuf_size / 64, alloc_size * 8);
 	}
 
 	if (rcvbuf_size / DRBD_SOCKET_BUFFER_SIZE > nc->max_buffers) {
@@ -2372,7 +2525,7 @@ static int dtr_init_flow(struct dtr_path *path, enum drbd_stream stream)
 	atomic_set(&flow->rx_descs_known_to_peer, stream == CONTROL_STREAM ? 1 : 0);
 
 	atomic_set(&flow->rx_descs_posted, 0);
-	flow->rx_descs_allocated = 0;
+	atomic_set(&flow->rx_descs_allocated, 0);
 
 	flow->rx_descs_want_posted = flow->rx_descs_max / 2;
 
@@ -2448,7 +2601,7 @@ static int _dtr_cm_alloc_rdma_res(struct dtr_cm *cm,
 	}
 
 	for (i = DATA_STREAM; i <= CONTROL_STREAM ; i++)
-		dtr_create_rx_desc(&path->flow[i]);
+		dtr_create_rx_desc(&path->flow[i], GFP_NOIO);
 
 	return 0;
 
@@ -2470,7 +2623,9 @@ pd_failed:
 static int dtr_cm_alloc_rdma_res(struct dtr_cm *cm)
 {
 	struct dtr_path *path = cm->path;
-	struct drbd_transport *transport = &path->rdma_transport->transport;
+	struct drbd_transport *transport = path->path.transport;
+	struct dtr_transport *rdma_transport =
+		container_of(transport, struct dtr_transport, transport);
 	enum dtr_alloc_rdma_res_causes cause;
 	struct ib_device_attr dev_attr;
 	struct ib_udata uhw = {.outlen = 0, .inlen = 0};
@@ -2491,14 +2646,13 @@ static int dtr_cm_alloc_rdma_res(struct dtr_cm *cm)
 
 	err = device->ops.query_device(device, &dev_attr, &uhw);
 	if (err) {
-		tr_err(&path->rdma_transport->transport,
-				"ib_query_device: %d\n", err);
+		tr_err(transport, "ib_query_device: %d\n", err);
 		return err;
 	}
 
 	dev_sge = min(dev_attr.max_send_sge, dev_attr.max_recv_sge);
-	if (path->rdma_transport->sges_max > dev_sge)
-		path->rdma_transport->sges_max = dev_sge;
+	if (rdma_transport->sges_max > dev_sge)
+		rdma_transport->sges_max = dev_sge;
 
 	hca_max = min(dev_attr.max_qp_wr, dev_attr.max_cqe);
 
@@ -2565,9 +2719,15 @@ static void dtr_end_rx_work_fn(struct work_struct *work)
 {
 	struct dtr_cm *cm = container_of(work, struct dtr_cm, end_rx_work);
 	struct dtr_rx_desc *rx_desc, *tmp;
+	unsigned long irq_flags;
+	LIST_HEAD(rx_descs);
 
-	list_for_each_entry_safe(rx_desc, tmp, &cm->error_rx_descs, list)
+	spin_lock_irqsave(&cm->error_rx_descs_lock, irq_flags);
+	list_splice_init(&cm->error_rx_descs, &rx_descs);
+	spin_unlock_irqrestore(&cm->error_rx_descs_lock, irq_flags);
+	list_for_each_entry_safe(rx_desc, tmp, &rx_descs, list)
 		dtr_free_rx_desc(rx_desc);
+	kref_put(&cm->kref, dtr_destroy_cm);
 }
 
 static void dtr_end_tx_work_fn(struct work_struct *work)
@@ -2590,7 +2750,7 @@ static void __dtr_disconnect_path(struct dtr_path *path)
 	if (!path)
 		return;
 
-	transport = &path->rdma_transport->transport;
+	transport = path->path.transport;
 
 	a = atomic_cmpxchg(&path->cs.active_state, PCS_CONNECTING, PCS_REQUEST_ABORT);
 	p = atomic_cmpxchg(&path->cs.passive_state, PCS_CONNECTING, PCS_INACTIVE);
@@ -2745,8 +2905,8 @@ static void dtr_destroy_listener(struct drbd_listener *generic_listener)
 	struct dtr_listener *listener =
 		container_of(generic_listener, struct dtr_listener, listener);
 
-	rdma_destroy_id(listener->cm.id);
-	kfree(listener);
+	if (listener->cm.id)
+		rdma_destroy_id(listener->cm.id);
 }
 
 static int dtr_init_listener(struct drbd_transport *transport, const struct sockaddr *addr, struct net *net, struct drbd_listener *drbd_listener)
@@ -2777,19 +2937,20 @@ static int dtr_init_listener(struct drbd_transport *transport, const struct sock
 	}
 
 	listener->listener.listen_addr = *(struct sockaddr_storage *)addr;
-	listener->listener.destroy = dtr_destroy_listener;
 
 	return 0;
 out:
-	if (listener->cm.id)
+	if (listener->cm.id) {
 		rdma_destroy_id(listener->cm.id);
+		listener->cm.id = NULL;
+	}
 
 	return err;
 }
 
 static int dtr_activate_path(struct dtr_path *path)
 {
-	struct drbd_transport *transport = &path->rdma_transport->transport;
+	struct drbd_transport *transport = path->path.transport;
 	struct dtr_connect_state *cs;
 	int err = -ENOMEM;
 
@@ -2804,7 +2965,7 @@ static int dtr_activate_path(struct dtr_path *path)
 		tr_warn(transport, "ASSERTION FAILED: in dtr_activate_path() found listener, dropping it\n");
 		drbd_put_listener(&path->path);
 	}
-	err = drbd_get_listener(transport, &path->path, dtr_init_listener);
+	err = drbd_get_listener(&path->path);
 	if (err)
 		goto out_no_put;
 
@@ -2898,9 +3059,28 @@ abort:
 	return err;
 }
 
-static void dtr_net_conf_change(struct drbd_transport *transport, struct net_conf *new_net_conf)
+static int dtr_net_conf_change(struct drbd_transport *transport, struct net_conf *new_net_conf)
 {
-	tr_warn(transport, "online change of sndbuf_size of recvbuf_size not supported\n");
+	struct net_conf *old_net_conf;
+	struct dtr_transport *dtr_transport = container_of(transport,
+		struct dtr_transport, transport);
+	int ret = 0;
+
+	rcu_read_lock();
+	old_net_conf = rcu_dereference(transport->net_conf);
+	if (old_net_conf && dtr_transport->active) {
+		if (old_net_conf->sndbuf_size != new_net_conf->sndbuf_size) {
+			tr_warn(transport, "online change of sndbuf_size not supported\n");
+			ret = -EINVAL;
+		}
+		if (old_net_conf->rcvbuf_size != new_net_conf->rcvbuf_size) {
+			tr_warn(transport, "online change of rcvbuf_size not supported\n");
+			ret = -EINVAL;
+		}
+	}
+	rcu_read_unlock();
+
+	return ret;
 }
 
 static void dtr_set_rcvtimeo(struct drbd_transport *transport, enum drbd_stream stream, long timeout)
@@ -3183,7 +3363,8 @@ static void dtr_debugfs_show_flow(struct dtr_flow *flow, const char *name, struc
 	seq_printf(m, "      tx_descs: %5d\t\t\t%5d\n", atomic_read(&flow->tx_descs_posted), flow->tx_descs_max);
 	seq_printf(m, " peer_rx_descs: %5d (receive window at peer)\n", atomic_read(&flow->peer_rx_descs));
 	seq_printf(m, "      rx_descs: %5d\t%5d\t%5d\t%5d\n", atomic_read(&flow->rx_descs_posted),
-		   flow->rx_descs_allocated, flow->rx_descs_want_posted, flow->rx_descs_max);
+		   atomic_read(&flow->rx_descs_allocated),
+		   flow->rx_descs_want_posted, flow->rx_descs_max);
 	seq_printf(m, " rx_peer_knows: %5d (what the peer knows about my receive window)\n\n",
 		   atomic_read(&flow->rx_descs_known_to_peer));
 }
@@ -3239,8 +3420,9 @@ static void dtr_debugfs_show(struct drbd_transport *transport, struct seq_file *
 	rcu_read_unlock();
 }
 
-static int dtr_add_path(struct drbd_transport *transport, struct drbd_path *add_path)
+static int dtr_add_path(struct drbd_path *add_path)
 {
+	struct drbd_transport *transport = add_path->transport;
 	struct dtr_transport *rdma_transport =
 		container_of(transport, struct dtr_transport, transport);
 	struct dtr_path *path;
@@ -3261,10 +3443,11 @@ static int dtr_add_path(struct drbd_transport *transport, struct drbd_path *add_
 	path->nr = ffz(em);
 
 	/* initialize private parts of path */
-	path->rdma_transport = rdma_transport;
 	atomic_set(&path->cs.passive_state, PCS_INACTIVE);
 	atomic_set(&path->cs.active_state, PCS_INACTIVE);
 	spin_lock_init(&path->send_flow_control_lock);
+	tasklet_setup(&path->flow_control_tasklet, dtr_flow_control_tasklet_fn);
+	INIT_WORK(&path->refill_rx_descs_work, dtr_refill_rx_descs_work_fn);
 	INIT_DELAYED_WORK(&path->cs.retry_connect_work, dtr_cma_retry_connect_work_fn);
 
 	if (rdma_transport->active) {
@@ -3279,8 +3462,9 @@ abort:
 	return err;
 }
 
-static int dtr_remove_path(struct drbd_transport *transport, struct drbd_path *del_path)
+static int dtr_remove_path(struct drbd_path *del_path)
 {
+	struct drbd_transport *transport = del_path->transport;
 	struct dtr_transport *rdma_transport =
 		container_of(transport, struct dtr_transport, transport);
 	struct drbd_path *drbd_path, *connected_path = NULL;

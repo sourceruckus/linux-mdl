@@ -37,13 +37,13 @@
 #include <linux/notifier.h>
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
-#define __KERNEL_SYSCALLS__
 #include <linux/unistd.h>
 #include <linux/vmalloc.h>
 #include <linux/device.h>
 #include <linux/dynamic_debug.h>
 #include <linux/libnvdimm.h>
 #include <linux/swab.h>
+#include <linux/overflow.h>
 
 #include <linux/drbd_limits.h>
 #include "drbd_int.h"
@@ -72,6 +72,7 @@ MODULE_LICENSE("GPL");
 MODULE_PARM_DESC(minor_count, "Approximate number of drbd devices ("
 		 __stringify(DRBD_MINOR_COUNT_MIN) "-" __stringify(DRBD_MINOR_COUNT_MAX) ")");
 MODULE_ALIAS_BLOCKDEV_MAJOR(DRBD_MAJOR);
+MODULE_SOFTDEP("post: handshake");
 
 #include <linux/moduleparam.h>
 
@@ -338,27 +339,31 @@ static void dump_epoch(struct drbd_resource *resource, int node_id, int epoch)
  * epoch of not yet barrier-acked requests, this function will cause a
  * termination of the connection.
  */
-void tl_release(struct drbd_connection *connection,
+int tl_release(struct drbd_connection *connection,
 		uint64_t o_block_id,
 		uint64_t y_block_id,
 		unsigned int barrier_nr,
 		unsigned int set_size)
 {
 	struct drbd_resource *resource = connection->resource;
+	const int idx = connection->peer_node_id;
 	struct drbd_request *r;
 	struct drbd_request *req = NULL;
 	struct drbd_request *req_y = NULL;
 	int expect_epoch = 0;
 	int expect_size = 0;
-	bool found_epoch = false;
 
 	rcu_read_lock();
 	/* find oldest not yet barrier-acked write request,
 	 * count writes in its epoch. */
-	list_for_each_entry_rcu(r, &resource->transfer_log, tl_requests) {
-		struct drbd_peer_device *peer_device =
-			conn_peer_device(connection, r->device->vnr);
-		const int idx = peer_device->node_id;
+	r = READ_ONCE(connection->req_not_net_done);
+	if (r == NULL) {
+		drbd_err(connection, "BarrierAck #%u received, but req_not_net_done = NULL\n",
+			 barrier_nr);
+		goto bail;
+	}
+	smp_rmb(); /* paired with smp_wmb() in set_cache_ptr_if_null() */
+	list_for_each_entry_from_rcu(r, &resource->transfer_log, tl_requests) {
 		unsigned int local_rq_state, net_rq_state;
 
 		spin_lock_irq(&r->rq_lock);
@@ -375,7 +380,7 @@ void tl_release(struct drbd_connection *connection,
 				continue;
 			req = r;
 			expect_epoch = req->epoch;
-			expect_size ++;
+			expect_size++;
 		} else {
 			const u16 s = r->net_rq_state[idx];
 			if (r->epoch != expect_epoch)
@@ -452,22 +457,15 @@ void tl_release(struct drbd_connection *connection,
 	}
 
 	/* Clean up list of requests processed during current epoch. */
-	/* Walking the list from the start is paranoia,
-	 * to catch requests being barrier-acked "unexpectedly".
-	 * It usually should find the same req again, or some READ preceding it. */
-	list_for_each_entry_rcu(req, &resource->transfer_log, tl_requests) {
-		if (!found_epoch && req->epoch == expect_epoch)
-			found_epoch = true;
+	list_for_each_entry_from_rcu(req, &resource->transfer_log, tl_requests) {
+		struct drbd_peer_device *peer_device;
 
-		if (found_epoch) {
-			struct drbd_peer_device *peer_device;
-			if (req->epoch != expect_epoch)
-				break;
-			peer_device = conn_peer_device(connection, req->device->vnr);
-			req_mod(req, BARRIER_ACKED, peer_device);
-			if (req == req_y)
-				break;
-		}
+		if (req->epoch != expect_epoch)
+			break;
+		peer_device = conn_peer_device(connection, req->device->vnr);
+		req_mod(req, BARRIER_ACKED, peer_device);
+		if (req == req_y)
+			break;
 	}
 	rcu_read_unlock();
 
@@ -479,11 +477,11 @@ void tl_release(struct drbd_connection *connection,
 		wake_up(&resource->barrier_wait);
 	}
 
-	return;
+	return 0;
 
 bail:
 	rcu_read_unlock();
-	change_cstate(connection, C_PROTOCOL_ERROR, CS_HARD);
+	return -EPROTO;
 }
 
 
@@ -509,6 +507,7 @@ void __tl_walk(struct drbd_resource *const resource,
 		req = READ_ONCE(*from_req);
 	if (!req)
 		req = list_entry_rcu(resource->transfer_log.next, struct drbd_request, tl_requests);
+	smp_rmb(); /* paired with smp_wmb() in set_cache_ptr_if_null() */
 	list_for_each_entry_from_rcu(req, &resource->transfer_log, tl_requests) {
 		/* Skip if the request has already been destroyed. */
 		if (!kref_get_unless_zero(&req->kref))
@@ -661,9 +660,9 @@ int drbd_thread_start(struct drbd_thread *thi)
 
 		if (IS_ERR(nt)) {
 			if (connection)
-				drbd_err(connection, "Couldn't start thread\n");
+				drbd_err(connection, "Couldn't start thread: %ld\n", PTR_ERR(nt));
 			else
-				drbd_err(resource, "Couldn't start thread\n");
+				drbd_err(resource, "Couldn't start thread: %ld\n", PTR_ERR(nt));
 
 			return false;
 		}
@@ -953,7 +952,7 @@ void *__conn_prepare_command(struct drbd_connection *connection, int size,
 	if (connection->cstate[NOW] < C_CONNECTING)
 		return NULL;
 
-	if (!transport->ops->stream_ok(transport, drbd_stream))
+	if (!transport->class->ops.stream_ok(transport, drbd_stream))
 		return NULL;
 
 	header_size = drbd_header_size(connection);
@@ -1004,12 +1003,21 @@ static int flush_send_buffer(struct drbd_connection *connection, enum drbd_strea
 {
 	struct drbd_send_buffer *sbuf = &connection->send_buffer[drbd_stream];
 	struct drbd_transport *transport = &connection->transport;
-	struct drbd_transport_ops *tr_ops = transport->ops;
-	int flags, err, offset, size;
+	struct drbd_transport_ops *tr_ops = &transport->class->ops;
+	unsigned int flags, offset, size;
+	int err;
 
 	size = sbuf->pos - sbuf->unsent + sbuf->allocated_size;
 	if (size == 0)
 		return 0;
+
+	if (drbd_stream == CONTROL_STREAM) {
+		connection->ctl_packets++;
+		if (check_add_overflow(connection->ctl_bytes, size, &connection->ctl_bytes)) {
+			connection->ctl_bytes = size;
+			connection->ctl_packets = 1;
+		}
+	}
 
 	if (drbd_stream == DATA_STREAM) {
 		rcu_read_lock();
@@ -1058,7 +1066,8 @@ int __send_command(struct drbd_connection *connection, int vnr,
 	enum drbd_stream drbd_stream = extract_stream(stream_and_flags);
 	struct drbd_send_buffer *sbuf = &connection->send_buffer[drbd_stream];
 	struct drbd_transport *transport = &connection->transport;
-	struct drbd_transport_ops *tr_ops = transport->ops;
+	struct drbd_transport_ops *tr_ops = &transport->class->ops;
+	/* CORKED + drbd_stream is either DATA_CORKED or CONTROL_CORKED */
 	bool corked = test_bit(CORKED + drbd_stream, &connection->flags);
 	bool flush = stream_and_flags & SFLAG_FLUSH;
 	int err;
@@ -1088,7 +1097,7 @@ int __send_command(struct drbd_connection *connection, int vnr,
 void drbd_cork(struct drbd_connection *connection, enum drbd_stream stream)
 {
 	struct drbd_transport *transport = &connection->transport;
-	struct drbd_transport_ops *tr_ops = transport->ops;
+	struct drbd_transport_ops *tr_ops = &transport->class->ops;
 
 	mutex_lock(&connection->mutex[stream]);
 	set_bit(CORKED + stream, &connection->flags);
@@ -1101,8 +1110,7 @@ void drbd_cork(struct drbd_connection *connection, enum drbd_stream stream)
 void drbd_uncork(struct drbd_connection *connection, enum drbd_stream stream)
 {
 	struct drbd_transport *transport = &connection->transport;
-	struct drbd_transport_ops *tr_ops = transport->ops;
-
+	struct drbd_transport_ops *tr_ops = &transport->class->ops;
 
 	mutex_lock(&connection->mutex[stream]);
 	flush_send_buffer(connection, stream);
@@ -1552,6 +1560,7 @@ void drbd_gen_and_send_sync_uuid(struct drbd_peer_device *peer_device)
 int drbd_send_sizes(struct drbd_peer_device *peer_device,
 		    uint64_t u_size_diskless, enum dds_flags flags)
 {
+	struct drbd_connection *connection = peer_device->connection;
 	struct drbd_device *device = peer_device->device;
 	struct p_sizes *p;
 	sector_t d_size, u_size;
@@ -1560,7 +1569,7 @@ int drbd_send_sizes(struct drbd_peer_device *peer_device,
 	unsigned int packet_size;
 
 	packet_size = sizeof(*p);
-	if (peer_device->connection->agreed_features & DRBD_FF_WSAME)
+	if (connection->agreed_features & DRBD_FF_WSAME)
 		packet_size += sizeof(p->qlim[0]);
 
 	p = drbd_prepare_command(peer_device, packet_size, DATA_STREAM);
@@ -1614,10 +1623,14 @@ int drbd_send_sizes(struct drbd_peer_device *peer_device,
 		max_bio_size = DRBD_MAX_BIO_SIZE; /* ... multiple BIOs per peer_request */
 	}
 
-	if (peer_device->connection->agreed_pro_version <= 94)
+	if (connection->agreed_pro_version <= 94)
 		max_bio_size = min(max_bio_size, DRBD_MAX_SIZE_H80_PACKET);
-	else if (peer_device->connection->agreed_pro_version < 100)
+	else if (connection->agreed_pro_version < 100)
 		max_bio_size = min(max_bio_size, DRBD_MAX_BIO_SIZE_P95);
+
+	/* 9.0.4 bumped pro_version to 112 and introduced 2PC resizes */
+	if (connection->agreed_pro_version >= 112)
+		d_size = drbd_partition_data_capacity(device);
 
 	p->d_size = cpu_to_be64(d_size);
 	p->u_size = cpu_to_be64(u_size);
@@ -2048,7 +2061,7 @@ int drbd_send_bitmap(struct drbd_device *device, struct drbd_peer_device *peer_d
 	}
 
 	mutex_lock(&peer_device->connection->mutex[DATA_STREAM]);
-	if (peer_transport->ops->stream_ok(peer_transport, DATA_STREAM))
+	if (peer_transport->class->ops.stream_ok(peer_transport, DATA_STREAM))
 		err = !_drbd_send_bitmap(device, peer_device);
 	mutex_unlock(&peer_device->connection->mutex[DATA_STREAM]);
 
@@ -2181,7 +2194,7 @@ static int _drbd_send_page(struct drbd_peer_device *peer_device, struct page *pa
 {
 	struct drbd_connection *connection = peer_device->connection;
 	struct drbd_transport *transport = &connection->transport;
-	struct drbd_transport_ops *tr_ops = transport->ops;
+	struct drbd_transport_ops *tr_ops = &transport->class->ops;
 	int err;
 
 	err = tr_ops->send_page(transport, DATA_STREAM, page, offset, size, msg_flags);
@@ -2268,7 +2281,7 @@ static int _drbd_send_zc_bio(struct drbd_peer_device *peer_device, struct bio *b
 	} else {
 		struct drbd_connection *connection = peer_device->connection;
 		struct drbd_transport *transport = &connection->transport;
-		struct drbd_transport_ops *tr_ops = transport->ops;
+		struct drbd_transport_ops *tr_ops = &transport->class->ops;
 		int err;
 
 		flush_send_buffer(connection, DATA_STREAM);
@@ -2555,16 +2568,36 @@ static bool connection_state_may_improve_soon(struct drbd_resource *resource)
 	return ret;
 }
 
+/* TASK_COMM_LEN reserves one '\0', sizeof("") both include '\0',
+ * that's room enough for ':' and ' ' separators and the EOS.
+ */
+union comm_pid_tag_buf {
+	char comm[TASK_COMM_LEN];
+	char buf[TASK_COMM_LEN + sizeof("2147483647") + sizeof("auto-promote")];
+};
+
+static void snprintf_current_comm_pid_tag(union comm_pid_tag_buf *s, const char *tag)
+{
+	int len;
+
+	/* older kernel do not have __get_task_comm() yet */
+	get_task_comm(s->comm, current);
+	len = strlen(s->buf);
+	snprintf(s->buf + len, sizeof(s->buf)-len, ":%d %s", task_pid_nr(current), tag);
+}
+
 static int try_to_promote(struct drbd_device *device, long timeout, bool ndelay)
 {
 	struct drbd_resource *resource = device->resource;
 	int rv;
 
 	do {
+		union comm_pid_tag_buf tag;
 		unsigned long start = jiffies;
 		long t;
 
-		rv = drbd_set_role(resource, R_PRIMARY, false, NULL);
+		snprintf_current_comm_pid_tag(&tag, "auto-promote");
+		rv = drbd_set_role(resource, R_PRIMARY, false, tag.buf, NULL);
 		timeout -= jiffies - start;
 
 		if (ndelay || rv >= SS_SUCCESS || timeout <= 0) {
@@ -2575,7 +2608,7 @@ static int try_to_promote(struct drbd_device *device, long timeout, bool ndelay)
 			   retry only if the timeout permits */
 			if (jiffies - start < HZ / 10) {
 				t = schedule_timeout_interruptible(HZ / 10);
-				if (t < 0)
+				if (t)
 					break;
 				timeout -= HZ / 10;
 			}
@@ -2638,10 +2671,9 @@ static enum ioc_rv inc_open_count(struct drbd_device *device, fmode_t mode)
 		r = IOC_ABORT;
 	else if (!resource->remote_state_change) {
 		r = IOC_OK;
+		device->open_cnt++;
 		if (mode & FMODE_WRITE)
-			device->open_rw_cnt++;
-		else
-			device->open_ro_cnt++;
+			device->writable = true;
 	}
 	read_unlock_irq(&resource->state_rwlock);
 
@@ -2680,17 +2712,26 @@ static void prune_or_free_openers(struct drbd_device *device, pid_t pid)
 	spin_unlock(&device->openers_lock);
 }
 
-static void add_opener(struct drbd_device *device)
+static void add_opener(struct drbd_device *device, bool did_auto_promote)
 {
 	struct opener *opener, *tmp;
+	ktime_t now = ktime_get_real();
 	int len = 0;
 
+	if (did_auto_promote) {
+		struct drbd_resource *resource = device->resource;
+
+		resource->auto_promoted_by.minor = device->minor;
+		resource->auto_promoted_by.pid = task_pid_nr(current);
+		resource->auto_promoted_by.opened = now;
+		get_task_comm(resource->auto_promoted_by.comm, current);
+	}
 	opener = kmalloc(sizeof(*opener), GFP_NOIO);
 	if (!opener)
 		return;
 	get_task_comm(opener->comm, current);
 	opener->pid = task_pid_nr(current);
-	opener->opened = ktime_get_real();
+	opener->opened = now;
 
 	spin_lock(&device->openers_lock);
 	list_for_each_entry(tmp, &device->openers, list)
@@ -2711,6 +2752,8 @@ static int drbd_open(struct block_device *bdev, fmode_t mode)
 	struct drbd_device *device = bdev->bd_disk->private_data;
 	struct drbd_resource *resource = device->resource;
 	long timeout = resource->res_opts.auto_promote_timeout * HZ / 10;
+	bool was_writable;
+	bool did_auto_promote = false;
 	enum ioc_rv r;
 	int err = 0;
 
@@ -2734,6 +2777,7 @@ static int drbd_open(struct block_device *bdev, fmode_t mode)
 	kref_debug_get(&device->kref_debug, 3);
 
 	mutex_lock(&resource->open_release);
+	was_writable = device->writable;
 
 	timeout = wait_event_interruptible_timeout(resource->twopc_wait,
 						   (r = inc_open_count(device, mode)),
@@ -2755,10 +2799,13 @@ static int drbd_open(struct block_device *bdev, fmode_t mode)
 
 		if (mode & FMODE_WRITE) {
 			if (resource->role[NOW] == R_SECONDARY) {
-				rv = try_to_promote(device, timeout, (mode & FMODE_NDELAY));
+				rv = try_to_promote(device, timeout,
+						    (mode & FMODE_NDELAY));
 				if (rv < SS_SUCCESS)
-					drbd_info(resource, "Auto-promote failed: %s\n",
-						  drbd_set_st_err_str(rv));
+					drbd_info(resource, "Auto-promote failed: %s (%d)\n",
+						  drbd_set_st_err_str(rv), rv);
+				else
+					did_auto_promote = true;
 			}
 		} else if ((mode & FMODE_NDELAY) == 0) {
 			/* Double check peers
@@ -2796,11 +2843,13 @@ static int drbd_open(struct block_device *bdev, fmode_t mode)
 out:
 	/* still keep mutex, but release ASAP */
 	if (!err)
-		add_opener(device);
+		add_opener(device, did_auto_promote);
+	else
+		device->writable = was_writable;
 
 	mutex_unlock(&resource->open_release);
 	if (err) {
-		drbd_release(bdev->bd_disk, mode);
+		drbd_release(bdev->bd_disk, 0);
 		if (err == -EAGAIN && !(mode & FMODE_NDELAY))
 			err = -EMEDIUMTYPE;
 	}
@@ -2815,8 +2864,10 @@ void drbd_open_counts(struct drbd_resource *resource, int *rw_count_ptr, int *ro
 
 	rcu_read_lock();
 	idr_for_each_entry(&resource->devices, device, vnr) {
-		rw_count += device->open_rw_cnt;
-		ro_count += device->open_ro_cnt;
+		if (device->writable)
+			rw_count += device->open_cnt;
+		else
+			ro_count += device->open_cnt;
 	}
 	rcu_read_unlock();
 	*rw_count_ptr = rw_count;
@@ -2884,40 +2935,60 @@ static void drbd_release(struct gendisk *gd, fmode_t mode)
 {
 	struct drbd_device *device = gd->private_data;
 	struct drbd_resource *resource = device->resource;
+	bool was_writable;
 	int open_rw_cnt, open_ro_cnt;
 
 	mutex_lock(&resource->open_release);
-	if (mode & FMODE_WRITE)
-		device->open_rw_cnt--;
-	else
-		device->open_ro_cnt--;
-
+	was_writable = device->writable;
+	device->open_cnt--;
 	drbd_open_counts(resource, &open_rw_cnt, &open_ro_cnt);
 
-	/* last one to close will be responsible for write-out of all dirty pages */
-	if (mode & FMODE_WRITE && device->open_rw_cnt == 0)
+	/* Last one to close will be responsible for write-out of all dirty pages.
+	 * We also reset the writable flag for this device here:  later code may
+	 * check if the device is still opened for writes to determine things
+	 * like auto-demote.
+	 * Don't do the "fsync_device" if it was not marked writeable before,
+	 * or we risk a deadlock in drbd_reject_write_early().
+	 */
+	if (was_writable && device->open_cnt == 0) {
 		drbd_fsync_device(device);
+		device->writable = false;
+	}
 
 	if (open_ro_cnt == 0)
 		wake_up_all(&resource->state_wait);
 
-	if (test_bit(UNREGISTERED, &device->flags) &&
-	    device->open_rw_cnt == 0 && device->open_ro_cnt == 0 &&
+	if (test_bit(UNREGISTERED, &device->flags) && device->open_cnt == 0 &&
 	    !test_and_set_bit(DESTROYING_DEV, &device->flags))
 		call_rcu(&device->rcu, drbd_reclaim_device);
 
-	if (resource->res_opts.auto_promote) {
-		enum drbd_state_rv rv;
+	if (resource->res_opts.auto_promote &&
+			open_rw_cnt == 0 &&
+			resource->role[NOW] == R_PRIMARY &&
+			!test_bit(EXPLICIT_PRIMARY, &resource->flags)) {
+		union comm_pid_tag_buf tag;
+		sigset_t mask, oldmask;
+		int rv;
 
-		if (mode & FMODE_WRITE &&
-		    open_rw_cnt == 0 &&
-		    resource->role[NOW] == R_PRIMARY &&
-		    !test_bit(EXPLICIT_PRIMARY, &resource->flags)) {
-			rv = drbd_set_role(resource, R_SECONDARY, false, NULL);
-			if (rv < SS_SUCCESS)
-				drbd_warn(resource, "Auto-demote failed: %s\n",
-					  drbd_set_st_err_str(rv));
-		}
+		snprintf_current_comm_pid_tag(&tag, "auto-demote");
+
+		/*
+		 * Auto-demote is triggered by the last opener releasing the
+		 * DRBD device. However, it is an implicit action, so it should
+		 * not be affected by the state of the process. In particular,
+		 * it should ignore any pending signals. It may be the case
+		 * that the process is releasing DRBD because it is being
+		 * terminated using a signal.
+		 */
+		sigfillset(&mask);
+		sigprocmask(SIG_BLOCK, &mask, &oldmask);
+
+		rv = drbd_set_role(resource, R_SECONDARY, false, tag.buf, NULL);
+		if (rv < SS_SUCCESS)
+			drbd_warn(resource, "Auto-demote failed: %s (%d)\n",
+					drbd_set_st_err_str(rv), rv);
+
+		sigprocmask(SIG_SETMASK, &oldmask, NULL);
 	}
 
 	if (open_ro_cnt == 0 && open_rw_cnt == 0 && resource->fail_io[NOW]) {
@@ -2925,13 +2996,13 @@ static void drbd_release(struct gendisk *gd, fmode_t mode)
 
 		begin_state_change(resource, &irq_flags, CS_VERBOSE);
 		resource->fail_io[NEW] = false;
-		end_state_change(resource, &irq_flags);
+		end_state_change(resource, &irq_flags, "release");
 	}
 
-	/* if the open counts are 0, we free the whole list, otherwise we remove the specific pid */
-	prune_or_free_openers(device,
-			(open_ro_cnt == 0 && open_rw_cnt == 0) ? 0 : task_pid_nr(current));
-
+	/* if the open count is 0, we free the whole list, otherwise we remove the specific pid */
+	prune_or_free_openers(device, (device->open_cnt == 0) ? 0 : task_pid_nr(current));
+	if (open_rw_cnt == 0 && open_ro_cnt == 0 && resource->auto_promoted_by.pid != 0)
+		memset(&resource->auto_promoted_by, 0, sizeof(resource->auto_promoted_by));
 	mutex_unlock(&resource->open_release);
 
 	kref_debug_put(&device->kref_debug, 3);
@@ -3000,7 +3071,9 @@ static void __net_exit __drbd_net_exit(struct net *net)
 
 		mutex_lock(&connection->resource->adm_mutex);
 		list_for_each_entry_safe(path, tmp, &connection->transport.paths, list) {
-			int err = connection->transport.ops->remove_path(&connection->transport, path);
+			struct drbd_transport *transport = &connection->transport;
+
+			int err = transport->class->ops.remove_path(path);
 			if (err)
 				drbd_err(connection, "Failed to remove path after disconnect: %d\n", err);
 
@@ -3479,7 +3552,7 @@ static void wake_all_device_misc(struct drbd_resource *resource)
 	rcu_read_unlock();
 }
 
-int set_resource_options(struct drbd_resource *resource, struct res_opts *res_opts)
+int set_resource_options(struct drbd_resource *resource, struct res_opts *res_opts, const char *tag)
 {
 	struct drbd_connection *connection;
 	cpumask_var_t new_cpu_mask;
@@ -3543,7 +3616,7 @@ int set_resource_options(struct drbd_resource *resource, struct res_opts *res_op
 
 	if (force_state_recalc) {
 		begin_state_change(resource, &irq_flags, CS_VERBOSE | CS_FORCE_RECALC);
-		end_state_change(resource, &irq_flags);
+		end_state_change(resource, &irq_flags, tag);
 	}
 
 	if (wake_device_misc)
@@ -3605,6 +3678,9 @@ struct drbd_resource *drbd_create_resource(const char *name,
 	spin_lock_init(&resource->current_tle_lock);
 	drbd_debugfs_resource_add(resource);
 	resource->cached_min_aggreed_protocol_version = drbd_protocol_version_min;
+	resource->members = NODE_MASK(res_opts->node_id);
+
+	ratelimit_state_init(&resource->ratelimit[D_RL_R_GENERIC], 5*HZ, 10);
 
 	/* drbd's page pool */
 	init_waitqueue_head(&resource->pp_wait);
@@ -3620,7 +3696,7 @@ struct drbd_resource *drbd_create_resource(const char *name,
 	}
 	resource->pp_vacant = page_pool_count;
 
-	if (set_resource_options(resource, res_opts))
+	if (set_resource_options(resource, res_opts, "create-resource"))
 		goto fail_free_pages;
 
 	list_add_tail_rcu(&resource->resources, &drbd_resources);
@@ -3648,6 +3724,8 @@ struct drbd_connection *drbd_create_connection(struct drbd_resource *resource,
 	connection = kzalloc(size, GFP_KERNEL);
 	if (!connection)
 		return NULL;
+
+	ratelimit_state_init(&connection->ratelimit[D_RL_C_GENERIC], 5*HZ, /* no burst */ 1);
 
 	if (drbd_alloc_send_buffers(connection))
 		goto fail;
@@ -3719,7 +3797,7 @@ struct drbd_connection *drbd_create_connection(struct drbd_resource *resource,
 
 	INIT_LIST_HEAD(&connection->transport.paths);
 	connection->transport.log_prefix = resource->name;
-	if (tc->init(&connection->transport))
+	if (tc->ops.init(&connection->transport))
 		goto fail;
 
 	return connection;
@@ -3741,7 +3819,7 @@ void drbd_transport_shutdown(struct drbd_connection *connection, enum drbd_tr_fr
 	flush_send_buffer(connection, DATA_STREAM);
 	flush_send_buffer(connection, CONTROL_STREAM);
 
-	connection->transport.ops->free(&connection->transport, op);
+	connection->transport.class->ops.free(&connection->transport, op);
 	if (op == DESTROY_TRANSPORT)
 		drbd_put_transport_class(connection->transport.class);
 
@@ -3752,7 +3830,11 @@ void drbd_transport_shutdown(struct drbd_connection *connection, enum drbd_tr_fr
 void drbd_destroy_path(struct kref *kref)
 {
 	struct drbd_path *path = container_of(kref, struct drbd_path, kref);
+	struct drbd_connection *connection =
+		container_of(path->transport, struct drbd_connection, transport);
 
+	kref_debug_put(&connection->kref_debug, 17);
+	kref_put(&connection->kref, drbd_destroy_connection);
 	kfree(path);
 }
 
@@ -3796,6 +3878,8 @@ struct drbd_peer_device *create_peer_device(struct drbd_device *device, struct d
 	peer_device->disk_state[NOW] = D_UNKNOWN;
 	peer_device->repl_state[NOW] = L_OFF;
 	spin_lock_init(&peer_device->peer_seq_lock);
+
+	ratelimit_state_init(&peer_device->ratelimit[D_RL_PD_GENERIC], 5*HZ, /* no burst */ 1);
 
 	err = drbd_create_peer_device_default_config(peer_device);
 	if (err) {
@@ -3907,6 +3991,10 @@ enum drbd_ret_code drbd_create_device(struct drbd_config_context *adm_ctx, unsig
 		return ERR_NOMEM;
 	kref_init(&device->kref);
 	kref_debug_init(&device->kref_debug, &device->kref, &kref_class_device);
+
+	ratelimit_state_init(&device->ratelimit[D_RL_D_GENERIC], 5*HZ, /* no burst */ 1);
+	ratelimit_state_init(&device->ratelimit[D_RL_D_METADATA], 5*HZ, 10);
+	ratelimit_state_init(&device->ratelimit[D_RL_D_BACKEND], 5*HZ, 10);
 
 	kref_get(&resource->kref);
 	kref_debug_get(&resource->kref_debug, 4);
@@ -4348,6 +4436,7 @@ void drbd_md_encode(struct drbd_device *device, struct meta_data_on_disk_9 *buff
 
 	buffer->effective_size = cpu_to_be64(device->ldev->md.effective_size);
 	buffer->current_uuid = cpu_to_be64(device->ldev->md.current_uuid);
+	buffer->members = cpu_to_be64(device->ldev->md.members);
 	buffer->flags = cpu_to_be32(device->ldev->md.flags);
 	buffer->magic = cpu_to_be32(DRBD_MD_MAGIC_09);
 
@@ -4786,6 +4875,9 @@ static bool diskfull_peers_need_new_cur_uuid(struct drbd_device *device)
 
 	rcu_read_lock();
 	for_each_peer_device_rcu(peer_device, device) {
+		if (peer_device->connection->agreed_pro_version < 110)
+			continue;
+
 		/* Only an up-to-date peer persists a new current uuid! */
 		if (peer_device->disk_state[NOW] < D_UP_TO_DATE)
 			continue;
@@ -5697,15 +5789,17 @@ static sector_t bm_sect_to_max_capacity(unsigned int bm_max_peers, sector_t bm_s
 	return BM_BIT_TO_SECT(bm_bits_per_peer);
 }
 
+
 /**
- * drbd_get_max_capacity() - Returns the capacity we announce to out peer
+ * drbd_get_max_capacity() - Returns the capacity for user-data on the local backing device
  * @device: The DRBD device.
  * @bdev: Meta data block device.
  * @warn: Whether to warn when size is clipped.
  *
- * returns the capacity we announce to out peer.  we clip ourselves at the
- * various MAX_SECTORS, because if we don't, current implementation will
- * oops sooner or later
+ * This function returns the capacity for user-data on the local backing
+ * device. In the case of internal meta-data, this is the backing disk size
+ * reduced by the meta-data size. In the case of external meta-data, this is
+ * the size of the backing disk.
  */
 sector_t drbd_get_max_capacity(
 		struct drbd_device *device, struct drbd_backing_dev *bdev, bool warn)
@@ -5761,6 +5855,37 @@ sector_t drbd_get_max_capacity(
 		max_capacity = metadata_limit;
 	}
 	return max_capacity;
+}
+
+/* this is about cluster partitions, not block device partitions */
+sector_t drbd_partition_data_capacity(struct drbd_device *device)
+{
+	struct drbd_peer_device *peer_device;
+	sector_t capacity = (sector_t)(-1);
+
+	rcu_read_lock();
+	for_each_peer_device_rcu(peer_device, device) {
+		if (test_bit(HAVE_SIZES, &peer_device->flags)) {
+			dynamic_drbd_dbg(peer_device, "d_size: %llus\n",
+					(unsigned long long)peer_device->d_size);
+			capacity = min_not_zero(capacity, peer_device->d_size);
+		}
+	}
+	rcu_read_unlock();
+
+	if (get_ldev_if_state(device, D_ATTACHING)) {
+		/* In case we somehow end up here while attaching, but before
+		 * we even assigned the ldev, pretend to still be diskless.
+		 */
+		if (device->ldev != NULL) {
+			sector_t local_capacity = drbd_local_max_size(device);
+
+			capacity = min_not_zero(capacity, local_capacity);
+		}
+		put_ldev(device);
+	}
+
+	return capacity != (sector_t)(-1) ? capacity : 0;
 }
 
 #ifdef CONFIG_DRBD_FAULT_INJECTION
@@ -5824,8 +5949,7 @@ _drbd_insert_fault(struct drbd_device *device, unsigned int type)
 	if (ret) {
 		drbd_fault_count++;
 
-		if (drbd_ratelimit())
-			drbd_warn(device, "***Simulating %s failure\n",
+		drbd_warn_ratelimit(device, "***Simulating %s failure\n",
 				_drbd_fault_str(type));
 	}
 

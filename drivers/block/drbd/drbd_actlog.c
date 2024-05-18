@@ -130,8 +130,7 @@ int drbd_md_sync_page_io(struct drbd_device *device, struct drbd_backing_dev *bd
 	D_ASSERT(device, atomic_read(&device->md_io.in_use) == 1);
 
 	if (!bdev->md_bdev) {
-		if (drbd_ratelimit())
-			drbd_err(device, "bdev->md_bdev==NULL\n");
+		drbd_err_ratelimit(device, "bdev->md_bdev==NULL\n");
 		return -EIO;
 	}
 
@@ -368,10 +367,7 @@ static int __al_write_transaction(struct drbd_device *device, struct al_transact
 	if (drbd_bm_write_hinted(device))
 		err = -EIO;
 	else {
-		bool write_al_updates;
-		rcu_read_lock();
-		write_al_updates = rcu_dereference(device->ldev->disk_conf)->al_updates;
-		rcu_read_unlock();
+		bool write_al_updates = !(device->ldev->md.flags & MDF_AL_DISABLED);
 		if (write_al_updates) {
 			ktime_aggregate_delta(device, start_kt, al_mid_kt);
 			if (drbd_md_sync_page_io(device, device->ldev, sector, REQ_OP_WRITE)) {
@@ -467,11 +463,7 @@ void drbd_al_begin_io_commit(struct drbd_device *device)
 		/* Double check: it may have been committed by someone else
 		 * while we were waiting for the lock. */
 		if (device->act_log->pending_changes) {
-			bool write_al_updates;
-
-			rcu_read_lock();
-			write_al_updates = rcu_dereference(device->ldev->disk_conf)->al_updates;
-			rcu_read_unlock();
+			bool write_al_updates = !(device->ldev->md.flags & MDF_AL_DISABLED);
 
 			if (write_al_updates)
 				al_write_transaction(device);
@@ -870,9 +862,10 @@ int drbd_set_sync(struct drbd_device *device, sector_t sector, int size,
 		   unsigned long bits, unsigned long mask)
 {
 	long set_start, set_end, clear_start, clear_end;
-	sector_t esector, nr_sectors;
-	int count = 0;
 	struct drbd_peer_device *peer_device;
+	sector_t esector, nr_sectors;
+	unsigned long irq_flags;
+	int count = 0;
 
 	mask &= (1 << device->bitmap->bm_max_peers) - 1;
 
@@ -907,6 +900,7 @@ int drbd_set_sync(struct drbd_device *device, sector_t sector, int size,
 	else
 		clear_end = BM_SECT_TO_BIT(esector + 1) - 1;
 
+	spin_lock_irqsave(&device->bitmap->bm_all_slots_lock, irq_flags);
 	rcu_read_lock();
 	for_each_peer_device_rcu(peer_device, device) {
 		int bitmap_index = peer_device->bitmap_index;
@@ -936,7 +930,7 @@ int drbd_set_sync(struct drbd_device *device, sector_t sector, int size,
 						   clear_start, clear_end);
 		}
 	}
-
+	spin_unlock_irqrestore(&device->bitmap->bm_all_slots_lock, irq_flags);
 out:
 	put_ldev(device);
 

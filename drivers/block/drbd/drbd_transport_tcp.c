@@ -15,11 +15,15 @@
 #include <linux/pkt_sched.h>
 #include <linux/sched/signal.h>
 #include <linux/net.h>
+#include <linux/file.h>
 #include <linux/tcp.h>
 #include <linux/highmem.h>
 #include <linux/drbd_genl_api.h>
 #include <linux/drbd_config.h>
+#include <linux/tls.h>
 #include <net/tcp.h>
+#include <net/handshake.h>
+#include <net/tls.h>
 #include "drbd_protocol.h"
 #include "drbd_transport.h"
 
@@ -38,21 +42,27 @@ module_param_named(keepidle, drbd_keepidle, uint, 0664);
 static unsigned int drbd_keepintvl;
 module_param_named(keepintvl, drbd_keepintvl, uint, 0664);
 
+static struct workqueue_struct *dtt_csocket_recv;
+
 struct buffer {
 	void *base;
 	void *pos;
 };
 
 #define DTT_CONNECTING 1
+#define DTT_DATA_READY_ARMED 2
 
 struct drbd_tcp_transport {
 	struct drbd_transport transport; /* Must be first! */
 	spinlock_t paths_lock;
+	spinlock_t control_recv_lock;
 	unsigned long flags;
 	struct socket *stream[2];
 	struct buffer rbuf[2];
 	struct timer_list control_timer;
+	struct work_struct control_data_ready_work;
 	void (*original_control_sk_state_change)(struct sock *sk);
+	void (*original_control_sk_data_ready)(struct sock *sk);
 };
 
 struct dtt_listener {
@@ -80,11 +90,15 @@ struct dtt_path {
 
 static int dtt_init(struct drbd_transport *transport);
 static void dtt_free(struct drbd_transport *transport, enum drbd_tr_free_op free_op);
+static void dtt_socket_free(struct socket **sock);
+static int dtt_init_listener(struct drbd_transport *transport, const struct sockaddr *addr,
+			     struct net *net, struct drbd_listener *drbd_listener);
+static void dtt_destroy_listener(struct drbd_listener *generic_listener);
 static int dtt_connect(struct drbd_transport *transport);
 static int dtt_recv(struct drbd_transport *transport, enum drbd_stream stream, void **buf, size_t size, int flags);
 static int dtt_recv_pages(struct drbd_transport *transport, struct drbd_page_chain_head *chain, size_t size);
 static void dtt_stats(struct drbd_transport *transport, struct drbd_transport_stats *stats);
-static void dtt_net_conf_change(struct drbd_transport *transport, struct net_conf *new_net_conf);
+static int dtt_net_conf_change(struct drbd_transport *transport, struct net_conf *new_net_conf);
 static void dtt_set_rcvtimeo(struct drbd_transport *transport, enum drbd_stream stream, long timeout);
 static long dtt_get_rcvtimeo(struct drbd_transport *transport, enum drbd_stream stream);
 static int dtt_send_page(struct drbd_transport *transport, enum drbd_stream, struct page *page,
@@ -94,8 +108,8 @@ static bool dtt_stream_ok(struct drbd_transport *transport, enum drbd_stream str
 static bool dtt_hint(struct drbd_transport *transport, enum drbd_stream stream, enum drbd_tr_hints hint);
 static void dtt_debugfs_show(struct drbd_transport *transport, struct seq_file *m);
 static void dtt_update_congested(struct drbd_tcp_transport *tcp_transport);
-static int dtt_add_path(struct drbd_transport *, struct drbd_path *path);
-static int dtt_remove_path(struct drbd_transport *, struct drbd_path *);
+static int dtt_add_path(struct drbd_path *path);
+static int dtt_remove_path(struct drbd_path *);
 static void dtt_control_timer_fn(struct timer_list *t);
 
 static struct drbd_transport_class tcp_transport_class = {
@@ -103,27 +117,28 @@ static struct drbd_transport_class tcp_transport_class = {
 	.instance_size = sizeof(struct drbd_tcp_transport),
 	.path_instance_size = sizeof(struct dtt_path),
 	.listener_instance_size = sizeof(struct dtt_listener),
+	.ops = (struct drbd_transport_ops) {
+		.init = dtt_init,
+		.free = dtt_free,
+		.init_listener = dtt_init_listener,
+		.release_listener = dtt_destroy_listener,
+		.connect = dtt_connect,
+		.recv = dtt_recv,
+		.recv_pages = dtt_recv_pages,
+		.stats = dtt_stats,
+		.net_conf_change = dtt_net_conf_change,
+		.set_rcvtimeo = dtt_set_rcvtimeo,
+		.get_rcvtimeo = dtt_get_rcvtimeo,
+		.send_page = dtt_send_page,
+		.send_zc_bio = dtt_send_zc_bio,
+		.stream_ok = dtt_stream_ok,
+		.hint = dtt_hint,
+		.debugfs_show = dtt_debugfs_show,
+		.add_path = dtt_add_path,
+		.remove_path = dtt_remove_path,
+	},
 	.module = THIS_MODULE,
-	.init = dtt_init,
 	.list = LIST_HEAD_INIT(tcp_transport_class.list),
-};
-
-static struct drbd_transport_ops dtt_ops = {
-	.free = dtt_free,
-	.connect = dtt_connect,
-	.recv = dtt_recv,
-	.recv_pages = dtt_recv_pages,
-	.stats = dtt_stats,
-	.net_conf_change = dtt_net_conf_change,
-	.set_rcvtimeo = dtt_set_rcvtimeo,
-	.get_rcvtimeo = dtt_get_rcvtimeo,
-	.send_page = dtt_send_page,
-	.send_zc_bio = dtt_send_zc_bio,
-	.stream_ok = dtt_stream_ok,
-	.hint = dtt_hint,
-	.debugfs_show = dtt_debugfs_show,
-	.add_path = dtt_add_path,
-	.remove_path = dtt_remove_path,
 };
 
 /* Might restart iteration, if current element is removed from list!! */
@@ -171,7 +186,7 @@ static int dtt_init(struct drbd_transport *transport)
 	enum drbd_stream i;
 
 	spin_lock_init(&tcp_transport->paths_lock);
-	tcp_transport->transport.ops = &dtt_ops;
+	spin_lock_init(&tcp_transport->control_recv_lock);
 	tcp_transport->transport.class = &tcp_transport_class;
 	for (i = DATA_STREAM; i <= CONTROL_STREAM ; i++) {
 		void *buffer = (void *)__get_free_page(GFP_KERNEL);
@@ -188,15 +203,6 @@ fail:
 	return -ENOMEM;
 }
 
-static void dtt_free_one_sock(struct socket *socket)
-{
-	if (socket) {
-		synchronize_rcu();
-		kernel_sock_shutdown(socket, SHUT_RDWR);
-		sock_release(socket);
-	}
-}
-
 static void dtt_free(struct drbd_transport *transport, enum drbd_tr_free_op free_op)
 {
 	struct drbd_tcp_transport *tcp_transport =
@@ -206,11 +212,24 @@ static void dtt_free(struct drbd_transport *transport, enum drbd_tr_free_op free
 	/* free the socket specific stuff,
 	 * mutexes are handled by caller */
 
+	clear_bit(DTT_DATA_READY_ARMED, &tcp_transport->flags);
+
+	if (tcp_transport->control_data_ready_work.func) {
+		cancel_work_sync(&tcp_transport->control_data_ready_work);
+		tcp_transport->control_data_ready_work.func = NULL;
+	}
+
+	if (tcp_transport->stream[CONTROL_STREAM] &&
+	    tcp_transport->original_control_sk_state_change) {
+		write_lock_bh(&tcp_transport->stream[CONTROL_STREAM]->sk->sk_callback_lock);
+		tcp_transport->stream[CONTROL_STREAM]->sk->sk_state_change =
+			tcp_transport->original_control_sk_state_change;
+		write_unlock_bh(&tcp_transport->stream[CONTROL_STREAM]->sk->sk_callback_lock);
+	}
+
+	synchronize_rcu();
 	for (i = DATA_STREAM; i <= CONTROL_STREAM; i++) {
-		if (tcp_transport->stream[i]) {
-			dtt_free_one_sock(tcp_transport->stream[i]);
-			tcp_transport->stream[i] = NULL;
-		}
+		dtt_socket_free(&tcp_transport->stream[i]);
 	}
 
 	for_each_path_ref(drbd_path, transport) {
@@ -288,17 +307,86 @@ static int _dtt_send(struct drbd_tcp_transport *tcp_transport, struct socket *so
 	return sent;
 }
 
+#define TLS_RECORD_TYPE_ALERT 0x15
+#define TLS_RECORD_TYPE_DATA 0x17
+#define TLS_ALERT_LEVEL_FATAL 2
+#define TLS_GET_RECORD_TYPE 2
+
+/**
+  * tls_get_record_type - Look for TLS RECORD_TYPE information
+  * @sk: socket (for IP address information)
+  * @cmsg: incoming message to be parsed
+  *
+  * Returns zero or a TLS_RECORD_TYPE value.
+  */
+static u8 tls_get_record_type(const struct sock *sk, const struct cmsghdr *cmsg){
+	if (cmsg->cmsg_level != SOL_TLS)
+		return 0;
+	if (cmsg->cmsg_type != TLS_GET_RECORD_TYPE)
+		return 0;
+
+
+	return *((u8 *)CMSG_DATA(cmsg));
+}
+
+/**
+  * tls_alert_recv - Parse TLS Alert messages
+  * @sk: socket (for IP address information)
+  * @msg: incoming message to be parsed
+  * @level: OUT - TLS AlertLevel value
+  * @description: OUT - TLS AlertDescription value
+  *
+  */
+static void tls_alert_recv(const struct sock *sk, const struct msghdr *msg,
+			   u8 *level, u8 *description)
+{
+	const struct kvec *iov = msg->msg_iter.kvec;
+	u8 *data = iov->iov_base;
+
+	*level = data[0];
+	*description = data[1];
+}
+
 static int dtt_recv_short(struct socket *socket, void *buf, size_t size, int flags)
 {
 	struct kvec iov = {
 		.iov_base = buf,
 		.iov_len = size,
 	};
+	union {
+		struct cmsghdr cmsg;
+		u8 buf[CMSG_SPACE(sizeof(u8))];
+	} u;
 	struct msghdr msg = {
-		.msg_flags = (flags ? flags : MSG_WAITALL | MSG_NOSIGNAL)
+		.msg_control = &u,
+		.msg_controllen = sizeof(u),
 	};
+	int ret;
 
-	return kernel_recvmsg(socket, &msg, &iov, 1, size, msg.msg_flags);
+	flags = flags ? flags : MSG_WAITALL | MSG_NOSIGNAL;
+
+	ret = kernel_recvmsg(socket, &msg, &iov, 1, size, flags);
+
+	if (msg.msg_controllen != sizeof(u)) {
+		u8 level, description;
+
+		switch (tls_get_record_type(socket->sk, &u.cmsg)) {
+		case 0:
+			fallthrough;
+		case TLS_RECORD_TYPE_DATA:
+			break;
+		case TLS_RECORD_TYPE_ALERT:
+			tls_alert_recv(socket->sk, &msg, &level, &description);
+			ret = (level == TLS_ALERT_LEVEL_FATAL) ? -EACCES : -EAGAIN;
+			break;
+		default:
+			/* discard this record type */
+			ret = -EAGAIN;
+			break;
+		}
+	}
+
+	return ret;
 }
 
 static int dtt_recv(struct drbd_transport *transport, enum drbd_stream stream, void **buf, size_t size, int flags)
@@ -423,8 +511,9 @@ static bool dtt_path_cmp_addr(struct dtt_path *path)
 	return memcmp(&drbd_path->my_addr, &drbd_path->peer_addr, addr_size) > 0;
 }
 
-static int dtt_try_connect(struct drbd_transport *transport, struct dtt_path *path, struct socket **ret_socket)
+static int dtt_try_connect(struct dtt_path *path, struct socket **ret_socket)
 {
+	struct drbd_transport *transport = path->path.transport;
 	const char *what;
 	struct socket *socket;
 	struct sockaddr_storage my_addr, peer_addr;
@@ -513,23 +602,82 @@ out:
 	return err;
 }
 
+typedef int (*tls_hello_func)(const struct tls_handshake_args *, gfp_t);
+
+struct tls_handshake_wait {
+	struct completion done;
+	int status;
+};
+
+static void tls_handshake_done(void *data, int status, key_serial_t peerid)
+{
+	struct tls_handshake_wait *wait = data;
+
+	// Normalize the error to be negative: while the error _should_ be negative
+	// it is not guaranteed: the netlink interface allows any u32 value, which is
+	// then negated and cast to int, so who knows what will be returned.
+	if (status > 0)
+		status = -status;
+
+	wait->status = status;
+	complete(&wait->done);
+}
+
+static int tls_init_hello(struct socket *sock, const char *peername,
+			  key_serial_t keyring, key_serial_t privkey,
+			  key_serial_t certificate, tls_hello_func hello,
+			  struct tls_handshake_wait *tls_wait)
+{
+	int err;
+	struct tls_handshake_args tls_args = {
+			.ta_sock = sock,
+			.ta_done = tls_handshake_done,
+			.ta_data = tls_wait,
+			.ta_peername = peername,
+			.ta_keyring = keyring,
+			.ta_my_privkey = privkey,
+			.ta_my_cert = certificate,
+	};
+
+	if (IS_ERR(sock_alloc_file(sock, O_NONBLOCK, NULL)))
+		return -EIO;
+
+	do {
+		err = hello(&tls_args, GFP_KERNEL);
+	} while (err == -EAGAIN);
+
+	return err;
+}
+
+static int tls_wait_hello(struct tls_handshake_wait *csocket_tls_wait,
+			  struct tls_handshake_wait *dsocket_tls_wait,
+			  unsigned long timeout)
+{
+	unsigned long remaining = wait_for_completion_timeout(
+		&csocket_tls_wait->done, timeout);
+	if (!remaining)
+		return -ETIMEDOUT;
+
+	if (!wait_for_completion_timeout(&dsocket_tls_wait->done, remaining))
+		return -ETIMEDOUT;
+
+	if (csocket_tls_wait->status)
+		return csocket_tls_wait->status;
+
+	return dsocket_tls_wait->status;
+}
+
+
 static int dtt_send_first_packet(struct drbd_tcp_transport *tcp_transport, struct socket *socket,
-			     enum drbd_packet cmd, enum drbd_stream stream)
+				 enum drbd_packet cmd)
 {
 	struct p_header80 h;
-	int msg_flags = 0;
-	int err;
-
-	if (!socket)
-		return -EIO;
 
 	h.magic = cpu_to_be32(DRBD_MAGIC);
 	h.command = cpu_to_be16(cmd);
 	h.length = 0;
 
-	err = _dtt_send(tcp_transport, socket, &h, sizeof(h), msg_flags);
-
-	return err;
+	return _dtt_send(tcp_transport, socket, &h, sizeof(h), 0);
 }
 
 /**
@@ -541,8 +689,14 @@ static void dtt_socket_free(struct socket **socket)
 	if (!*socket)
 		return;
 
+	tls_handshake_cancel((*socket)->sk);
 	kernel_sock_shutdown(*socket, SHUT_RDWR);
-	sock_release(*socket);
+
+	if ((*socket)->file)
+		sockfd_put((*socket));
+	else
+		sock_release(*socket);
+
 	*socket = NULL;
 }
 
@@ -724,11 +878,7 @@ retry:
 
 retry_locked:
 	spin_unlock_bh(&listener->listener.waiters_lock);
-	if (s_estab) {
-		kernel_sock_shutdown(s_estab, SHUT_RDWR);
-		sock_release(s_estab);
-		s_estab = NULL;
-	}
+	dtt_socket_free(&s_estab);
 	goto retry;
 }
 
@@ -771,17 +921,43 @@ static int dtt_control_tcp_input(read_descriptor_t *rd_desc, struct sk_buff *skb
 	struct skb_seq_state seq;
 	unsigned int consumed = 0;
 
-	skb_prepare_seq_read(skb, offset, skb->len, &seq);
+	skb_prepare_seq_read(skb, offset, offset + len, &seq);
 	while (true) {
 		struct drbd_const_buffer buffer;
 
+		/*
+		 * skb_seq_read() returns the length of the block assigned to buffer. This might
+		 * be more than is actually ready, so we ensure we only mark as available what
+		 * is ready.
+		 */
 		buffer.avail = skb_seq_read(consumed, &buffer.buffer, &seq);
+		buffer.avail = min_t(unsigned int, buffer.avail, len - consumed);
 		if (buffer.avail == 0)
 			break;
 		consumed += buffer.avail;
 		drbd_control_data_ready(transport, &buffer);
 	}
 	return consumed;
+}
+
+static void dtt_control_data_ready_work(struct work_struct *item)
+{
+	struct drbd_tcp_transport *tcp_transport =
+		container_of(item, struct drbd_tcp_transport, control_data_ready_work);
+	struct socket *csocket = tcp_transport->stream[CONTROL_STREAM];
+	struct drbd_const_buffer drbd_buffer;
+	int n;
+
+	while (true) {
+		n = dtt_recv_short(csocket, tcp_transport->rbuf[CONTROL_STREAM].base, PAGE_SIZE,
+				   MSG_DONTWAIT | MSG_NOSIGNAL);
+		if (n <= 0)
+			break;
+
+		drbd_buffer.buffer = tcp_transport->rbuf[CONTROL_STREAM].base;
+		drbd_buffer.avail = n;
+		drbd_control_data_ready(&tcp_transport->transport, &drbd_buffer);
+	}
 }
 
 static void dtt_control_data_ready(struct sock *sock)
@@ -795,8 +971,27 @@ static void dtt_control_data_ready(struct sock *sock)
 		.arg = { .data = transport },
 	};
 
+	if (!test_bit(DTT_DATA_READY_ARMED, &tcp_transport->flags)
+	    && tcp_transport->original_control_sk_data_ready)
+		return tcp_transport->original_control_sk_data_ready(sock);
+
+	/* We have two different paths depending on if TLS is enabled or not.
+	 * If TLS is enabled, we can't use read_sock, firstly because it's not implemented for the
+	 * TLS protocol on most kernels, secondly the implementation that does exist is not safe
+	 * to call from SOFTIRQ context. Instead, we schedule a work and increment the counter of
+	 * "pending" ready events.
+	 *
+	 * In normal TCP mode, we can simply use tcp_read_sock, as that is safe to call from SOFTIRQ
+	 * contexts.
+	 */
 	mod_timer(&tcp_transport->control_timer, jiffies + sock->sk_rcvtimeo);
-	tcp_read_sock(sock, &rd_desc, dtt_control_tcp_input);
+	if (tcp_transport->control_data_ready_work.func) {
+		queue_work(dtt_csocket_recv, &tcp_transport->control_data_ready_work);
+	} else {
+		spin_lock_bh(&tcp_transport->control_recv_lock);
+		tcp_read_sock(sock, &rd_desc, dtt_control_tcp_input);
+		spin_unlock_bh(&tcp_transport->control_recv_lock);
+	}
 }
 
 static void dtt_control_state_change(struct sock *sock)
@@ -847,9 +1042,10 @@ static void dtt_destroy_listener(struct drbd_listener *generic_listener)
 	struct dtt_listener *listener =
 		container_of(generic_listener, struct dtt_listener, listener);
 
+	if (!listener->s_listen)
+		return;
 	unregister_state_change(listener->s_listen->sk, listener);
 	sock_release(listener->s_listen);
-	kfree(listener);
 }
 
 static int dtt_init_listener(struct drbd_transport *transport,
@@ -909,7 +1105,6 @@ static int dtt_init_listener(struct drbd_transport *transport,
 	}
 
 	listener->listener.listen_addr = my_addr;
-	listener->listener.destroy = dtt_destroy_listener;
 	init_waitqueue_head(&listener->wait);
 
 	return 0;
@@ -932,8 +1127,7 @@ static void dtt_cleanup_accepted_sockets(struct dtt_path *path)
 			list_first_entry(&path->sockets, struct dtt_socket_container, list);
 
 		list_del(&socket_c->list);
-		kernel_sock_shutdown(socket_c->socket, SHUT_RDWR);
-		sock_release(socket_c->socket);
+		dtt_socket_free(&socket_c->socket);
 		kfree(socket_c);
 	}
 }
@@ -956,9 +1150,11 @@ static void dtt_put_listeners(struct drbd_transport *transport)
 	}
 }
 
-static struct dtt_path *dtt_next_path(struct drbd_tcp_transport *tcp_transport, struct dtt_path *path)
+static struct dtt_path *dtt_next_path(struct dtt_path *path)
 {
-	struct drbd_transport *transport = &tcp_transport->transport;
+	struct drbd_transport *transport = path->path.transport;
+	struct drbd_tcp_transport *tcp_transport =
+		container_of(transport, struct drbd_tcp_transport, transport);
 	struct drbd_path *drbd_path;
 
 	spin_lock(&tcp_transport->paths_lock);
@@ -979,12 +1175,14 @@ static int dtt_connect(struct drbd_transport *transport)
 	struct dtt_path *connect_to_path, *first_path = NULL;
 	struct socket *dsocket, *csocket;
 	struct net_conf *nc;
+	bool tls, dsocket_is_server = false, csocket_is_server = false;
+	char peername[64];
+	key_serial_t tls_keyring, tls_privkey, tls_certificate;
 	int timeout, err;
 	bool ok;
 
 	dsocket = NULL;
 	csocket = NULL;
-
 
 	for_each_path_ref(drbd_path, transport) {
 		struct dtt_path *path = container_of(drbd_path, struct dtt_path, path);
@@ -1005,7 +1203,7 @@ static int dtt_connect(struct drbd_transport *transport)
 		if (!drbd_path->listener) {
 			kref_get(&drbd_path->kref);
 			spin_unlock(&tcp_transport->paths_lock);
-			err = drbd_get_listener(transport, drbd_path, dtt_init_listener);
+			err = drbd_get_listener(drbd_path);
 			kref_put(&drbd_path->kref, drbd_destroy_path);
 			if (err)
 				goto out;
@@ -1025,7 +1223,7 @@ static int dtt_connect(struct drbd_transport *transport)
 	do {
 		struct socket *s = NULL;
 
-		err = dtt_try_connect(transport, connect_to_path, &s);
+		err = dtt_try_connect(connect_to_path, &s);
 		if (err < 0 && err != -EAGAIN)
 			goto out;
 
@@ -1052,16 +1250,25 @@ static int dtt_connect(struct drbd_transport *transport)
 				use_for_data = false;
 			}
 
-			if (use_for_data) {
-				dsocket = s;
-				dtt_send_first_packet(tcp_transport, dsocket, P_INITIAL_DATA, DATA_STREAM);
-			} else {
+			if (!use_for_data)
 				clear_bit(RESOLVE_CONFLICTS, &transport->flags);
+
+			err = dtt_send_first_packet(tcp_transport,
+						    s,
+						    use_for_data ? P_INITIAL_DATA : P_INITIAL_META);
+
+			if (err < 0) {
+				tr_warn(transport, "Error sending initial packet: %d\n", err);
+				dtt_socket_free(&s);
+			} else if (use_for_data) {
+				dsocket = s;
+				dsocket_is_server = false;
+			} else {
 				csocket = s;
-				dtt_send_first_packet(tcp_transport, csocket, P_INITIAL_META, CONTROL_STREAM);
+				csocket_is_server = false;
 			}
 		} else if (!first_path)
-			connect_to_path = dtt_next_path(tcp_transport, connect_to_path);
+			connect_to_path = dtt_next_path(connect_to_path);
 
 		if (dtt_connection_established(transport, &dsocket, &csocket, &first_path))
 			break;
@@ -1089,28 +1296,29 @@ retry:
 			case P_INITIAL_DATA:
 				if (dsocket) {
 					tr_warn(transport, "initial packet S crossed\n");
-					kernel_sock_shutdown(dsocket, SHUT_RDWR);
-					sock_release(dsocket);
+					dtt_socket_free(&dsocket);
 					dsocket = s;
+					dsocket_is_server = true;
 					goto randomize;
 				}
 				dsocket = s;
+				dsocket_is_server = true;
 				break;
 			case P_INITIAL_META:
 				set_bit(RESOLVE_CONFLICTS, &transport->flags);
 				if (csocket) {
 					tr_warn(transport, "initial packet M crossed\n");
-					kernel_sock_shutdown(csocket, SHUT_RDWR);
-					sock_release(csocket);
+					dtt_socket_free(&csocket);
 					csocket = s;
+					csocket_is_server = true;
 					goto randomize;
 				}
 				csocket = s;
+				csocket_is_server = true;
 				break;
 			default:
-				tr_warn(transport, "Error receiving initial packet\n");
-				kernel_sock_shutdown(s, SHUT_RDWR);
-				sock_release(s);
+				tr_warn(transport, "Error receiving initial packet: %d\n", fp);
+				dtt_socket_free(&s);
 randomize:
 				if (get_random_u32_below(2))
 					goto retry;
@@ -1122,6 +1330,52 @@ randomize:
 
 		ok = dtt_connection_established(transport, &dsocket, &csocket, &first_path);
 	} while (!ok);
+
+	rcu_read_lock();
+	nc = rcu_dereference(transport->net_conf);
+	timeout = nc->timeout * HZ / 10;
+	tls = nc->tls;
+	memcpy(peername, nc->name, 64);
+	tls_keyring = nc->tls_keyring;
+	tls_privkey = nc->tls_privkey;
+	tls_certificate = nc->tls_certificate;
+	rcu_read_unlock();
+
+	write_lock_bh(&csocket->sk->sk_callback_lock);
+	clear_bit(DTT_DATA_READY_ARMED, &tcp_transport->flags);
+	tcp_transport->original_control_sk_data_ready = csocket->sk->sk_data_ready;
+	csocket->sk->sk_user_data = transport;
+	csocket->sk->sk_data_ready = dtt_control_data_ready;
+	write_unlock_bh(&csocket->sk->sk_callback_lock);
+
+	if (tls) {
+		struct tls_handshake_wait csocket_tls_wait = {
+			.done = COMPLETION_INITIALIZER_ONSTACK(csocket_tls_wait.done),
+		};
+		struct tls_handshake_wait dsocket_tls_wait = {
+			.done = COMPLETION_INITIALIZER_ONSTACK(dsocket_tls_wait.done),
+		};
+
+		err = tls_init_hello(
+			csocket, peername, tls_keyring, tls_privkey, tls_certificate,
+			csocket_is_server ? tls_server_hello_x509 : tls_client_hello_x509,
+			&csocket_tls_wait);
+		if (err < 0)
+			goto out;
+
+		err = tls_init_hello(
+			dsocket, peername, tls_keyring, tls_privkey, tls_certificate,
+			dsocket_is_server ? tls_server_hello_x509 : tls_client_hello_x509,
+			&dsocket_tls_wait);
+		if (err < 0)
+			goto out;
+
+		err = tls_wait_hello(&csocket_tls_wait, &dsocket_tls_wait, timeout);
+		if (err < 0)
+			goto out;
+
+		INIT_WORK(&tcp_transport->control_data_ready_work, dtt_control_data_ready_work);
+	}
 
 	TR_ASSERT(transport, first_path == connect_to_path);
 	connect_to_path->path.established = true;
@@ -1151,12 +1405,6 @@ randomize:
 	tcp_transport->stream[DATA_STREAM] = dsocket;
 	tcp_transport->stream[CONTROL_STREAM] = csocket;
 
-	rcu_read_lock();
-	nc = rcu_dereference(transport->net_conf);
-
-	timeout = nc->timeout * HZ / 10;
-	rcu_read_unlock();
-
 	dsocket->sk->sk_sndtimeo = timeout;
 	csocket->sk->sk_sndtimeo = timeout;
 
@@ -1171,9 +1419,8 @@ randomize:
 
 	write_lock_bh(&csocket->sk->sk_callback_lock);
 	tcp_transport->original_control_sk_state_change = csocket->sk->sk_state_change;
-	csocket->sk->sk_user_data = transport;
-	csocket->sk->sk_data_ready = dtt_control_data_ready;
 	csocket->sk->sk_state_change = dtt_control_state_change;
+	set_bit(DTT_DATA_READY_ARMED, &tcp_transport->flags);
 	write_unlock_bh(&csocket->sk->sk_callback_lock);
 
 	return 0;
@@ -1184,24 +1431,30 @@ out_eagain:
 out:
 	dtt_put_listeners(transport);
 
-	if (dsocket) {
-		kernel_sock_shutdown(dsocket, SHUT_RDWR);
-		sock_release(dsocket);
-	}
-	if (csocket) {
-		kernel_sock_shutdown(csocket, SHUT_RDWR);
-		sock_release(csocket);
-	}
+	dtt_socket_free(&dsocket);
+	dtt_socket_free(&csocket);
 
 	return err;
 }
 
-static void dtt_net_conf_change(struct drbd_transport *transport, struct net_conf *new_net_conf)
+static int dtt_net_conf_change(struct drbd_transport *transport, struct net_conf *new_net_conf)
 {
 	struct drbd_tcp_transport *tcp_transport =
 		container_of(transport, struct drbd_tcp_transport, transport);
+	struct net_conf *old_net_conf;
 	struct socket *data_socket = tcp_transport->stream[DATA_STREAM];
 	struct socket *control_socket = tcp_transport->stream[CONTROL_STREAM];
+
+	rcu_read_lock();
+	old_net_conf = rcu_dereference(transport->net_conf);
+	rcu_read_unlock();
+
+	if (old_net_conf && old_net_conf->tls != new_net_conf->tls &&
+	    (data_socket || control_socket)) {
+		tr_warn(transport, "cannot switch tls (%s -> %s) while connected\n",
+			old_net_conf->tls ? "yes" : "no", new_net_conf->tls ? "yes" : "no");
+		return -EINVAL;
+	}
 
 	if (data_socket) {
 		dtt_setbufsize(data_socket, new_net_conf->sndbuf_size, new_net_conf->rcvbuf_size);
@@ -1210,6 +1463,8 @@ static void dtt_net_conf_change(struct drbd_transport *transport, struct net_con
 	if (control_socket) {
 		dtt_setbufsize(control_socket, new_net_conf->sndbuf_size, new_net_conf->rcvbuf_size);
 	}
+
+	return 0;
 }
 
 static void dtt_set_rcvtimeo(struct drbd_transport *transport, enum drbd_stream stream, long timeout)
@@ -1268,18 +1523,22 @@ static int dtt_send_page(struct drbd_transport *transport, enum drbd_stream stre
 	struct drbd_tcp_transport *tcp_transport =
 		container_of(transport, struct drbd_tcp_transport, transport);
 	struct socket *socket = tcp_transport->stream[stream];
+	struct msghdr msg = { .msg_flags = msg_flags | MSG_NOSIGNAL | MSG_SPLICE_PAGES };
+	struct bio_vec bvec;
 	int len = size;
 	int err = -EIO;
 
 	if (!socket)
 		return -ENOTCONN;
 
-	msg_flags |= MSG_NOSIGNAL;
 	dtt_update_congested(tcp_transport);
 	do {
 		int sent;
 
-		sent = socket->ops->sendpage(socket, page, offset, len, msg_flags);
+		bvec_set_page(&bvec, page, len, offset);
+		iov_iter_bvec(&msg.msg_iter, ITER_SOURCE, &bvec, 1, len);
+
+		sent = sock_sendmsg(socket, &msg);
 		if (sent <= 0) {
 			if (sent == -EAGAIN) {
 				if (drbd_stream_send_timed_out(transport, stream))
@@ -1394,8 +1653,9 @@ static void dtt_debugfs_show(struct drbd_transport *transport, struct seq_file *
 
 }
 
-static int dtt_add_path(struct drbd_transport *transport, struct drbd_path *drbd_path)
+static int dtt_add_path(struct drbd_path *drbd_path)
 {
+	struct drbd_transport *transport = drbd_path->transport;
 	struct drbd_tcp_transport *tcp_transport =
 		container_of(transport, struct drbd_tcp_transport, transport);
 	struct dtt_path *path = container_of(drbd_path, struct dtt_path, path);
@@ -1409,7 +1669,7 @@ retry:
 		drbd_put_listener(drbd_path);
 
 	if (active && !drbd_path->listener) {
-		int err = drbd_get_listener(transport, drbd_path, dtt_init_listener);
+		int err = drbd_get_listener(drbd_path);
 		if (err)
 			return err;
 	}
@@ -1425,8 +1685,9 @@ retry:
 	return 0;
 }
 
-static int dtt_remove_path(struct drbd_transport *transport, struct drbd_path *drbd_path)
+static int dtt_remove_path(struct drbd_path *drbd_path)
 {
+	struct drbd_transport *transport = drbd_path->transport;
 	struct drbd_tcp_transport *tcp_transport =
 		container_of(transport, struct drbd_tcp_transport, transport);
 	struct dtt_path *path = container_of(drbd_path, struct dtt_path, path);
@@ -1444,6 +1705,10 @@ static int dtt_remove_path(struct drbd_transport *transport, struct drbd_path *d
 
 static int __init dtt_initialize(void)
 {
+	dtt_csocket_recv = alloc_workqueue("dtt_csocket_recv",
+					   WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
+	if (!dtt_csocket_recv)
+		return -ENOMEM;
 	return drbd_register_transport_class(&tcp_transport_class,
 					     DRBD_TRANSPORT_API_VERSION,
 					     sizeof(struct drbd_transport));
@@ -1451,6 +1716,7 @@ static int __init dtt_initialize(void)
 
 static void __exit dtt_cleanup(void)
 {
+	destroy_workqueue(dtt_csocket_recv);
 	drbd_unregister_transport_class(&tcp_transport_class);
 }
 

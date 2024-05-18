@@ -454,7 +454,6 @@ struct drbd_peer_request {
 			u64 block_id;
 			struct digest_info *digest;
 			u64 dagtag_sector;
-
 		};
 		struct { /* reused object to queue send OOS to other nodes */
 			u64 sent_oos_nodes; /* Used to notify L_SYNC_TARGETs about new out_of_sync bits */
@@ -577,6 +576,8 @@ enum device_flag {
 	DESTROYING_DEV,
 	TRY_TO_GET_RESYNC,
 	OUTDATE_ON_2PC_COMMIT,
+	RESTORE_QUORUM,		/* Restore quorum when we have the same members as before */
+	RESTORING_QUORUM,	/* sanitize_state() -> finish_state_change() */
 };
 
 /* flag bits per peer device */
@@ -659,7 +660,8 @@ struct drbd_bitmap {
 		struct page **bm_pages;
 		void *bm_on_pmem;
 	};
-	spinlock_t bm_lock;
+	spinlock_t bm_lock;		/* fine-grain lock (TODO: per slot) */
+	spinlock_t bm_all_slots_lock;	/* all bitmap slots lock */
 
 	unsigned long bm_set[DRBD_PEERS_MAX]; /* number of bits set */
 	unsigned long bm_bits;  /* bits per peer */
@@ -685,7 +687,7 @@ struct drbd_bitmap {
 	unsigned int al_bitmap_hints[2*AL_UPDATES_PER_TRANSACTION];
 
 	/* debugging aid, in case we are still racy somewhere */
-	char          *bm_why;
+	const char    *bm_why;
 	char          bm_task_comm[TASK_COMM_LEN];
 	pid_t         bm_task_pid;
 	struct drbd_peer_device *bm_locked_peer;
@@ -708,6 +710,8 @@ struct drbd_md {
 	u64 md_offset;		/* sector offset to 'super' block */
 
 	u64 effective_size;	/* last agreed size (sectors) */
+	u64 prev_members;	/* read from the meta-data */
+	u64 members;		/* current member mask for writing meta-data */
 	spinlock_t uuid_lock;
 	u64 current_uuid;
 	u64 device_uuid;
@@ -786,6 +790,8 @@ enum connection_flag {
 	DISCONNECT_EXPECTED,
 	BARRIER_ACK_PENDING,
 	CORKED,
+	DATA_CORKED = CORKED,	/* used as computed value CORKED + DATA_STREAM */
+	CONTROL_CORKED,		/* used as computed value CORKED + CONTROL_STREAM */
 	C_UNREGISTERED,
 	RECONNECT,
 	CONN_DISCARD_MY_DATA,
@@ -822,6 +828,7 @@ enum resource_flag {
 	DOWN_IN_PROGRESS,
 	CHECKING_PEERS,
 	WRONG_MDF_EXISTS,	/* Warned about MDF_EXISTS flag on all peer slots */
+	TWOPC_RECV_SIZES_ERR,	/* Error processing sizes packet during 2PC connect */
 };
 
 enum which_state { NOW, OLD = NOW, NEW };
@@ -890,6 +897,11 @@ struct drbd_mutable_buffer {
 	unsigned int avail;
 };
 
+enum drbd_per_resource_ratelimit {
+	D_RL_R_NOLIMIT = -1,
+	D_RL_R_GENERIC,
+};
+
 struct drbd_resource {
 	char *name;
 #ifdef CONFIG_DEBUG_FS
@@ -907,6 +919,8 @@ struct drbd_resource {
 	/* Volume number to device mapping. Updates protected by conf_update. */
 	struct idr devices;
 
+	struct ratelimit_state ratelimit[1];
+
 	/* RCU list. Updates protected by adm_mutex, conf_update and state_rwlock. */
 	struct list_head connections;
 
@@ -917,6 +931,13 @@ struct drbd_resource {
 					   and devices, connection and peer_devices lists */
 	struct mutex adm_mutex;		/* mutex to serialize administrative requests */
 	struct mutex open_release;	/* serialize open/release */
+	struct {
+		char comm[TASK_COMM_LEN];
+		unsigned int minor;
+		pid_t pid;
+		ktime_t opened;
+	} auto_promoted_by;
+
 	rwlock_t state_rwlock;          /* serialize state changes */
 	u64 dagtag_sector;		/* Protected by tl_update_lock.
 					 * See also dagtag_sector in
@@ -1022,6 +1043,11 @@ struct drbd_resource {
 	wait_queue_head_t pp_wait;
 };
 
+enum drbd_per_connection_ratelimit {
+	D_RL_C_NOLIMIT = -1,
+	D_RL_C_GENERIC,
+};
+
 struct drbd_connection {
 	struct list_head connections;
 	struct drbd_resource *resource;
@@ -1040,6 +1066,8 @@ struct drbd_connection {
 	enum drbd_conn_state cstate[2];
 	enum drbd_role peer_role[2];
 	bool susp_fen[2];		/* IO suspended because fence peer handler runs */
+
+	struct ratelimit_state ratelimit[1];
 
 	unsigned long flags;
 	enum drbd_fencing_policy fencing_policy;
@@ -1222,6 +1250,9 @@ struct drbd_connection {
 
 	struct rcu_head rcu;
 
+	unsigned int ctl_packets;
+	unsigned int ctl_bytes;
+
 	struct drbd_transport transport; /* The transport needs to be the last member. The acutal
 					    implementation might have more members than the
 					    abstract one. */
@@ -1231,6 +1262,11 @@ struct drbd_connection {
 enum drbd_neighbor {
 	NEXT_LOWER,
 	NEXT_HIGHER
+};
+
+enum drbd_per_peer_device_ratelimit {
+	D_RL_PD_NOLIMIT = -1,
+	D_RL_PD_GENERIC,
 };
 
 struct drbd_peer_device {
@@ -1257,6 +1293,8 @@ struct drbd_peer_device {
 	uint64_t max_size;
 	int bitmap_index;
 	int node_id;
+
+	struct ratelimit_state ratelimit[1];
 
 	unsigned long flags;
 
@@ -1402,6 +1440,14 @@ struct opener {
 	ktime_t opened;
 };
 
+enum drbd_per_device_ratelimit {
+	D_RL_D_NOLIMIT = -1,
+	D_RL_D_GENERIC,
+	D_RL_D_METADATA,
+	D_RL_D_BACKEND,
+	__D_RL_D_N
+};
+
 struct drbd_device {
 	struct drbd_resource *resource;
 
@@ -1424,10 +1470,12 @@ struct drbd_device {
 	struct dentry *debugfs_vol_openers;
 	struct dentry *debugfs_vol_md_io;
 	struct dentry *debugfs_vol_interval_tree;
+	struct dentry *debugfs_vol_al_updates;
 #ifdef CONFIG_DRBD_TIMING_STATS
 	struct dentry *debugfs_vol_req_timing;
 #endif
 #endif
+	struct ratelimit_state ratelimit[__D_RL_D_N];
 
 	unsigned int vnr;	/* volume number within the resource */
 	unsigned int minor;	/* device minor number */
@@ -1480,7 +1528,8 @@ struct drbd_device {
 
 	struct drbd_bitmap *bitmap;
 
-	int open_rw_cnt, open_ro_cnt;
+	int open_cnt;
+	bool writable;
 	/* FIXME clean comments, restructure so it is more obvious which
 	 * members are protected by what */
 
@@ -1634,7 +1683,7 @@ enum dds_flags {
 	 * See P_SIZES, struct p_sizes; */
 	DDSF_ASSUME_UNCONNECTED_PEER_HAS_SPACE    = 1,
 	DDSF_NO_RESYNC = 2, /* Do not run a resync for the new space */
-	DDSF_IGNORE_PEER_CONSTRAINTS = 4,
+	DDSF_IGNORE_PEER_CONSTRAINTS = 4, /* no longer used */
 	DDSF_2PC = 8, /* local only, not on the wire */
 };
 struct meta_data_on_disk_9;
@@ -1646,7 +1695,7 @@ extern void drbd_thread_current_set_cpu(struct drbd_thread *thi);
 #else
 #define drbd_thread_current_set_cpu(A) ({})
 #endif
-extern void tl_release(struct drbd_connection *,
+extern int tl_release(struct drbd_connection *,
 			uint64_t o_block_id,
 			uint64_t y_block_id,
 			unsigned int barrier_nr,
@@ -1751,6 +1800,7 @@ extern void tl_abort_disk_io(struct drbd_device *device);
 
 extern sector_t drbd_get_max_capacity(
 		struct drbd_device *device, struct drbd_backing_dev *bdev, bool warn);
+extern sector_t drbd_partition_data_capacity(struct drbd_device *device);
 
 /* Meta data layout
  *
@@ -1907,7 +1957,7 @@ extern void drbd_bm_merge_lel(struct drbd_peer_device *peer_device, size_t offse
 extern void drbd_bm_get_lel(struct drbd_peer_device *peer_device, size_t offset,
 		size_t number, unsigned long *buffer);
 
-extern void drbd_bm_lock(struct drbd_device *device, char *why, enum bm_flag flags);
+extern void drbd_bm_lock(struct drbd_device *device, const char *why, enum bm_flag flags);
 extern void drbd_bm_unlock(struct drbd_device *device);
 extern void drbd_bm_slot_lock(struct drbd_peer_device *peer_device, char *why, enum bm_flag flags);
 extern void drbd_bm_slot_unlock(struct drbd_peer_device *peer_device);
@@ -1954,7 +2004,8 @@ extern void drbd_destroy_resource(struct kref *kref);
 
 extern void drbd_destroy_device(struct kref *kref);
 
-extern int set_resource_options(struct drbd_resource *resource, struct res_opts *res_opts);
+extern int set_resource_options(struct drbd_resource *resource, struct res_opts *res_opts,
+		const char *tag);
 extern struct drbd_connection *drbd_create_connection(struct drbd_resource *resource,
 						      struct drbd_transport_class *tc);
 extern void drbd_transport_shutdown(struct drbd_connection *connection, enum drbd_tr_free_op op);
@@ -2010,12 +2061,14 @@ extern void resync_after_online_grow(struct drbd_peer_device *);
 extern void drbd_reconsider_queue_parameters(struct drbd_device *device,
 			struct drbd_backing_dev *bdev);
 extern bool barrier_pending(struct drbd_resource *resource);
-extern enum drbd_state_rv drbd_set_role(struct drbd_resource *, enum drbd_role, bool, struct sk_buff *);
-extern bool conn_try_outdate_peer(struct drbd_connection *connection);
+extern enum drbd_state_rv
+drbd_set_role(struct drbd_resource *resource, enum drbd_role role, bool force, const char *tag,
+		struct sk_buff *reply_skb);
 extern void conn_try_outdate_peer_async(struct drbd_connection *connection);
 extern int drbd_maybe_khelper(struct drbd_device *, struct drbd_connection *, char *);
 extern int drbd_create_peer_device_default_config(struct drbd_peer_device *peer_device);
 extern int drbd_unallocated_index(struct drbd_backing_dev *bdev, int bm_max_peers);
+extern void youngest_and_oldest_opener_to_str(struct drbd_device *device, char *buf, size_t len);
 
 /* drbd_sender.c */
 extern int drbd_sender(struct drbd_thread *thi);
@@ -2023,7 +2076,8 @@ extern int drbd_worker(struct drbd_thread *thi);
 enum drbd_ret_code drbd_resync_after_valid(struct drbd_device *device, int o_minor);
 void drbd_resync_after_changed(struct drbd_device *device);
 extern bool drbd_stable_sync_source_present(struct drbd_peer_device *, enum which_state);
-extern void drbd_start_resync(struct drbd_peer_device *, enum drbd_repl_state);
+extern void drbd_start_resync(struct drbd_peer_device *peer_device, enum drbd_repl_state side,
+		const char *tag);
 extern void resume_next_sg(struct drbd_device *device);
 extern void suspend_other_sg(struct drbd_device *device);
 extern void drbd_resync_finished(struct drbd_peer_device *, enum drbd_disk_state);
@@ -2046,6 +2100,7 @@ extern void drbd_conflict_send_resync_request(struct drbd_peer_request *peer_req
 extern void drbd_ping_peer(struct drbd_connection *connection);
 extern struct drbd_peer_device *peer_device_by_node_id(struct drbd_device *, int);
 extern void repost_up_to_date_fn(struct timer_list *t);
+extern void drbd_update_mdf_al_disabled(struct drbd_device *device, enum which_state which);
 
 static inline void ov_out_of_sync_print(struct drbd_peer_device *peer_device)
 {

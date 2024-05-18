@@ -321,5 +321,18 @@
 #define DRBD_TLS_DEF 0U /* disabled by default */
 #define DRBD_TLS_PRIVKEY_DEF 0 /* disabled by default */
 #define DRBD_TLS_CERTIFICATE_DEF 0 /* disabled by default */
+#define DRBD_TLS_KEYRING_DEF 0 /* disabled by default */
+
+#define DRBD_LOAD_BALANCE_PATHS_DEF 0U
+
+#define DRBD_RDMA_CTRL_RCVBUF_SIZE_MIN  0U
+#define DRBD_RDMA_CTRL_RCVBUF_SIZE_MAX  (10U<<20)
+#define DRBD_RDMA_CTRL_RCVBUF_SIZE_DEF 0
+#define DRBD_RDMA_CTRL_RCVBUF_SIZE_SCALE '1'
+
+#define DRBD_RDMA_CTRL_SNDBUF_SIZE_MIN  0U
+#define DRBD_RDMA_CTRL_SNDBUF_SIZE_MAX  (10U<<20)
+#define DRBD_RDMA_CTRL_SNDBUF_SIZE_DEF 0
+#define DRBD_RDMA_CTRL_SNDBUF_SIZE_SCALE '1'
 
 #endif

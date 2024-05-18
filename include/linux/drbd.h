@@ -357,6 +357,7 @@ enum mdf_flag {
 	MDF_AL_CLEAN =		1 << 7,
 	MDF_AL_DISABLED =       1 << 8,
 	MDF_PRIMARY_LOST_QUORUM = 1 << 9,
+	MDF_HAVE_QUORUM =       1 << 10,
 };
 
 enum mdf_peer_flag {
@@ -438,7 +439,11 @@ enum drbd_peer_state {
 #define DRBD_MD_INDEX_FLEX_EXT -2
 #define DRBD_MD_INDEX_FLEX_INT -3
 
-#define DRBD_CPU_MASK_SIZE 32
+/*
+ * This is the maximum string length accepted by drbdadm.
+ * It allows a full mask for up to 908 CPUs.
+ */
+#define DRBD_CPU_MASK_SIZE 256
 
 #define DRBD_MAX_BIO_SIZE (1U << 20)
 
