@@ -2,7 +2,6 @@
 
 * TODO
 - play with CONFIG_FW_LOADER_DEBUG! might not need my fw loading patch anymore!
-- DRBD v9.2.9
 - Shrink config down more?
 
 
