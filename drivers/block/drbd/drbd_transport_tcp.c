@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 // SPDX-License-Identifier: GPL-2.0-only
 /*
    drbd_transport_tcp.c
@@ -18,6 +19,7 @@
 #include <linux/file.h>
 #include <linux/tcp.h>
 #include <linux/highmem.h>
+#include <linux/bio.h>
 #include <linux/drbd_genl_api.h>
 #include <linux/drbd_config.h>
 #include <linux/tls.h>
@@ -55,7 +57,6 @@ struct buffer {
 
 struct drbd_tcp_transport {
 	struct drbd_transport transport; /* Must be first! */
-	spinlock_t paths_lock;
 	spinlock_t control_recv_lock;
 	unsigned long flags;
 	struct socket *stream[2];
@@ -95,7 +96,9 @@ static void dtt_socket_free(struct socket **sock);
 static int dtt_init_listener(struct drbd_transport *transport, const struct sockaddr *addr,
 			     struct net *net, struct drbd_listener *drbd_listener);
 static void dtt_destroy_listener(struct drbd_listener *generic_listener);
+static int dtt_prepare_connect(struct drbd_transport *transport);
 static int dtt_connect(struct drbd_transport *transport);
+static void dtt_finish_connect(struct drbd_transport *transport);
 static int dtt_recv(struct drbd_transport *transport, enum drbd_stream stream, void **buf, size_t size, int flags);
 static int dtt_recv_pages(struct drbd_transport *transport, struct drbd_page_chain_head *chain, size_t size);
 static void dtt_stats(struct drbd_transport *transport, struct drbd_transport_stats *stats);
@@ -110,7 +113,8 @@ static bool dtt_hint(struct drbd_transport *transport, enum drbd_stream stream, 
 static void dtt_debugfs_show(struct drbd_transport *transport, struct seq_file *m);
 static void dtt_update_congested(struct drbd_tcp_transport *tcp_transport);
 static int dtt_add_path(struct drbd_path *path);
-static int dtt_remove_path(struct drbd_path *);
+static bool dtt_may_remove_path(struct drbd_path *);
+static void dtt_remove_path(struct drbd_path *);
 static void dtt_control_timer_fn(struct timer_list *t);
 
 static struct drbd_transport_class tcp_transport_class = {
@@ -123,7 +127,9 @@ static struct drbd_transport_class tcp_transport_class = {
 		.free = dtt_free,
 		.init_listener = dtt_init_listener,
 		.release_listener = dtt_destroy_listener,
+		.prepare_connect = dtt_prepare_connect,
 		.connect = dtt_connect,
+		.finish_connect = dtt_finish_connect,
 		.recv = dtt_recv,
 		.recv_pages = dtt_recv_pages,
 		.stats = dtt_stats,
@@ -136,49 +142,12 @@ static struct drbd_transport_class tcp_transport_class = {
 		.hint = dtt_hint,
 		.debugfs_show = dtt_debugfs_show,
 		.add_path = dtt_add_path,
+		.may_remove_path = dtt_may_remove_path,
 		.remove_path = dtt_remove_path,
 	},
 	.module = THIS_MODULE,
 	.list = LIST_HEAD_INIT(tcp_transport_class.list),
 };
-
-/* Might restart iteration, if current element is removed from list!! */
-#define for_each_path_ref(path, transport)			\
-	for (path = __drbd_next_path_ref(NULL, transport);	\
-	     path;						\
-	     path = __drbd_next_path_ref(path, transport))
-
-/* This is save as long you use list_del_init() everytime something is removed
-   from the list. */
-static struct drbd_path *__drbd_next_path_ref(struct drbd_path *drbd_path,
-					      struct drbd_transport *transport)
-{
-	struct drbd_tcp_transport *tcp_transport =
-		container_of(transport, struct drbd_tcp_transport, transport);
-
-	spin_lock(&tcp_transport->paths_lock);
-	if (!drbd_path) {
-		drbd_path = list_first_entry_or_null(&transport->paths, struct drbd_path, list);
-	} else {
-		bool in_list = !list_empty(&drbd_path->list);
-		kref_put(&drbd_path->kref, drbd_destroy_path);
-		if (in_list) {
-			/* Element still on the list, ref count can not drop to zero! */
-			if (list_is_last(&drbd_path->list, &transport->paths))
-				drbd_path = NULL;
-			else
-				drbd_path = list_next_entry(drbd_path, list);
-		} else {
-			/* No longer on the list, element might be freed already, restart from the start */
-			drbd_path = list_first_entry_or_null(&transport->paths, struct drbd_path, list);
-		}
-	}
-	if (drbd_path)
-		kref_get(&drbd_path->kref);
-	spin_unlock(&tcp_transport->paths_lock);
-
-	return drbd_path;
-}
 
 static int dtt_init(struct drbd_transport *transport)
 {
@@ -186,7 +155,6 @@ static int dtt_init(struct drbd_transport *transport)
 		container_of(transport, struct drbd_tcp_transport, transport);
 	enum drbd_stream i;
 
-	spin_lock_init(&tcp_transport->paths_lock);
 	spin_lock_init(&tcp_transport->control_recv_lock);
 	tcp_transport->transport.class = &tcp_transport_class;
 	for (i = DATA_STREAM; i <= CONTROL_STREAM ; i++) {
@@ -233,30 +201,20 @@ static void dtt_free(struct drbd_transport *transport, enum drbd_tr_free_op free
 		dtt_socket_free(&tcp_transport->stream[i]);
 	}
 
-	for_each_path_ref(drbd_path, transport) {
-		bool was_established = drbd_path->established;
-		drbd_path->established = false;
-		if (free_op == DESTROY_TRANSPORT)
-			drbd_path_event(transport, drbd_path, true);
-		else if (was_established)
-			drbd_path_event(transport, drbd_path, false);
+	list_for_each_entry(drbd_path, &transport->paths, list) {
+		bool was_established = test_and_clear_bit(TR_ESTABLISHED, &drbd_path->flags);
+
+		if (free_op == CLOSE_CONNECTION && was_established)
+			drbd_path_event(transport, drbd_path);
 	}
 
 	del_timer_sync(&tcp_transport->control_timer);
 
 	if (free_op == DESTROY_TRANSPORT) {
-		struct drbd_path *tmp;
-
 		for (i = DATA_STREAM; i <= CONTROL_STREAM; i++) {
 			free_page((unsigned long)tcp_transport->rbuf[i].base);
 			tcp_transport->rbuf[i].base = NULL;
 		}
-		spin_lock(&tcp_transport->paths_lock);
-		list_for_each_entry_safe(drbd_path, tmp, &transport->paths, list) {
-			list_del_init(&drbd_path->list);
-			kref_put(&drbd_path->kref, drbd_destroy_path);
-		}
-		spin_unlock(&tcp_transport->paths_lock);
 	}
 }
 
@@ -697,23 +655,23 @@ static bool dtt_connection_established(struct drbd_transport *transport,
 	good += dtt_socket_ok_or_free(socket1);
 	good += dtt_socket_ok_or_free(socket2);
 
-	if (good == 0)
+	if (good == 0) {
+		kref_put(&(*first_path)->path.kref, drbd_destroy_path);
 		*first_path = NULL;
+	}
 
 	return good == 2;
 }
 
 static struct dtt_path *dtt_wait_connect_cond(struct drbd_transport *transport)
 {
-	struct drbd_tcp_transport *tcp_transport =
-		container_of(transport, struct drbd_tcp_transport, transport);
 	struct drbd_listener *listener;
 	struct drbd_path *drbd_path;
 	struct dtt_path *path = NULL;
 	bool rv = false;
 
-	spin_lock(&tcp_transport->paths_lock);
-	list_for_each_entry(drbd_path, &transport->paths, list) {
+	rcu_read_lock();
+	list_for_each_entry_rcu(drbd_path, &transport->paths, list) {
 		path = container_of(drbd_path, struct dtt_path, path);
 		listener = drbd_path->listener;
 
@@ -724,7 +682,9 @@ static struct dtt_path *dtt_wait_connect_cond(struct drbd_transport *transport)
 		if (rv)
 			break;
 	}
-	spin_unlock(&tcp_transport->paths_lock);
+	if (rv)
+		kref_get(&path->path.kref);
+	rcu_read_unlock();
 
 	return rv ? path : NULL;
 }
@@ -764,6 +724,8 @@ static int dtt_wait_for_connect(struct drbd_transport *transport,
 	timeo += get_random_u32_below(2) ? timeo / 7 : -timeo / 7; /* 28.5% random jitter */
 
 retry:
+	if (path)
+		kref_put(&path->path.kref, drbd_destroy_path);
 	timeo = wait_event_interruptible_timeout(listener->wait,
 			(path = dtt_wait_connect_cond(transport)),
 			timeo);
@@ -834,6 +796,8 @@ retry:
 	}
 	spin_unlock_bh(&listener->listener.waiters_lock);
 	*socket = s_estab;
+	if (*ret_path)
+		kref_put(&(*ret_path)->path.kref, drbd_destroy_path);
 	*ret_path = path;
 	return 0;
 
@@ -1093,46 +1057,61 @@ static void dtt_cleanup_accepted_sockets(struct dtt_path *path)
 	}
 }
 
-static void dtt_put_listeners(struct drbd_transport *transport)
+static void dtt_finish_connect(struct drbd_transport *transport)
 {
 	struct drbd_tcp_transport *tcp_transport =
 		container_of(transport, struct drbd_tcp_transport, transport);
-	struct drbd_path *drbd_path;
+	struct dtt_path *path;
 
-	spin_lock(&tcp_transport->paths_lock);
 	clear_bit(DTT_CONNECTING, &tcp_transport->flags);
-	spin_unlock(&tcp_transport->paths_lock);
 
-	for_each_path_ref(drbd_path, transport) {
-		struct dtt_path *path = container_of(drbd_path, struct dtt_path, path);
-
-		drbd_put_listener(drbd_path);
+	list_for_each_entry(path, &transport->paths, path.list) {
+		drbd_put_listener(&path->path);
 		dtt_cleanup_accepted_sockets(path);
 	}
 }
 
-static struct dtt_path *dtt_next_path(struct dtt_path *path)
+static struct dtt_path *dtt_next_path(struct dtt_path *path, struct drbd_transport *transport)
 {
-	struct drbd_transport *transport = path->path.transport;
-	struct drbd_tcp_transport *tcp_transport =
-		container_of(transport, struct drbd_tcp_transport, transport);
 	struct drbd_path *drbd_path;
 
-	spin_lock(&tcp_transport->paths_lock);
-	if (list_is_last(&path->path.list, &transport->paths))
-		drbd_path = list_first_entry(&transport->paths, struct drbd_path, list);
-	else
-		drbd_path = list_next_entry(&path->path, list);
-	spin_unlock(&tcp_transport->paths_lock);
+	drbd_path = __drbd_next_path_ref(path ? &path->path : NULL, transport);
 
-	return container_of(drbd_path, struct dtt_path, path);
+	/* Loop when we reach the end. */
+	if (!drbd_path)
+		drbd_path = __drbd_next_path_ref(NULL, transport);
+
+	return drbd_path ? container_of(drbd_path, struct dtt_path, path) : NULL;
+}
+
+static int dtt_prepare_connect(struct drbd_transport *transport)
+{
+	struct drbd_tcp_transport *tcp_transport =
+		container_of(transport, struct drbd_tcp_transport, transport);
+	struct dtt_path *path;
+	struct drbd_path *drbd_path;
+
+	list_for_each_entry(path, &transport->paths, path.list)
+		dtt_cleanup_accepted_sockets(path);
+
+	set_bit(DTT_CONNECTING, &tcp_transport->flags);
+
+	list_for_each_entry(drbd_path, &transport->paths, list) {
+		if (!drbd_path->listener) {
+			int err = drbd_get_listener(drbd_path);
+
+			if (err)
+				return err;
+		}
+	}
+
+	return 0;
 }
 
 static int dtt_connect(struct drbd_transport *transport)
 {
 	struct drbd_tcp_transport *tcp_transport =
 		container_of(transport, struct drbd_tcp_transport, transport);
-	struct drbd_path *drbd_path;
 	struct dtt_path *connect_to_path, *first_path = NULL;
 	struct socket *dsocket, *csocket;
 	struct net_conf *nc;
@@ -1145,58 +1124,34 @@ static int dtt_connect(struct drbd_transport *transport)
 	dsocket = NULL;
 	csocket = NULL;
 
-	for_each_path_ref(drbd_path, transport) {
-		struct dtt_path *path = container_of(drbd_path, struct dtt_path, path);
-
-		dtt_cleanup_accepted_sockets(path);
-	}
-
-	spin_lock(&tcp_transport->paths_lock);
-	set_bit(DTT_CONNECTING, &tcp_transport->flags);
-
-	err = -EDESTADDRREQ;
-	if (list_empty(&transport->paths)) {
-		spin_unlock(&tcp_transport->paths_lock);
+	connect_to_path = dtt_next_path(NULL, transport);
+	if (!connect_to_path) {
+		err = -EDESTADDRREQ;
 		goto out;
 	}
-
-	list_for_each_entry(drbd_path, &transport->paths, list) {
-		if (!drbd_path->listener) {
-			kref_get(&drbd_path->kref);
-			spin_unlock(&tcp_transport->paths_lock);
-			err = drbd_get_listener(drbd_path);
-			kref_put(&drbd_path->kref, drbd_destroy_path);
-			if (err)
-				goto out;
-			spin_lock(&tcp_transport->paths_lock);
-			drbd_path = list_first_entry_or_null(&transport->paths, struct drbd_path, list);
-			if (drbd_path)
-				continue;
-			else
-				break;
-		}
-	}
-
-	drbd_path = list_first_entry(&transport->paths, struct drbd_path, list);
-	connect_to_path = container_of(drbd_path, struct dtt_path, path);
-	spin_unlock(&tcp_transport->paths_lock);
 
 	do {
 		struct socket *s = NULL;
 
 		err = dtt_try_connect(connect_to_path, &s);
 		if (err < 0 && err != -EAGAIN)
-			goto out;
+			goto out_release_sockets;
 
 		if (s) {
 			bool use_for_data;
 
-			if (first_path && first_path != connect_to_path) {
-				tr_info(transport, "initial paths crossed A - fail over\n");
-				dtt_socket_free(&dsocket);
-				dtt_socket_free(&csocket);
+			if (first_path) {
+				if (first_path != connect_to_path) {
+					tr_info(transport, "initial paths crossed A - fail over\n");
+					dtt_socket_free(&dsocket);
+					dtt_socket_free(&csocket);
+				}
+
+				kref_put(&first_path->path.kref, drbd_destroy_path);
+				first_path = NULL;
 			}
 
+			kref_get(&connect_to_path->path.kref);
 			first_path = connect_to_path;
 
 			if (!dsocket && !csocket) {
@@ -1228,8 +1183,17 @@ static int dtt_connect(struct drbd_transport *transport)
 				csocket = s;
 				csocket_is_server = false;
 			}
-		} else if (!first_path)
-			connect_to_path = dtt_next_path(connect_to_path);
+		} else if (!first_path) {
+			connect_to_path = dtt_next_path(connect_to_path, transport);
+
+			/*
+			 * The final path should not be removed while
+			 * connecting, but handle the case for robustness.
+			 */
+			err = -EDESTADDRREQ;
+			if (!connect_to_path)
+				goto out_release_sockets;
+		}
 
 		if (dtt_connection_established(transport, &dsocket, &csocket, &first_path))
 			break;
@@ -1238,17 +1202,23 @@ retry:
 		s = NULL;
 		err = dtt_wait_for_connect(transport, connect_to_path->path.listener, &s, &connect_to_path);
 		if (err < 0 && err != -EAGAIN)
-			goto out;
+			goto out_release_sockets;
 
 		if (s) {
 			int fp = dtt_receive_first_packet(tcp_transport, s);
 
-			if (first_path && first_path != connect_to_path) {
-				tr_info(transport, "initial paths crossed P - fail over\n");
-				dtt_socket_free(&dsocket);
-				dtt_socket_free(&csocket);
+			if (first_path) {
+				if (first_path != connect_to_path) {
+					tr_info(transport, "initial paths crossed P - fail over\n");
+					dtt_socket_free(&dsocket);
+					dtt_socket_free(&csocket);
+				}
+
+				kref_put(&first_path->path.kref, drbd_destroy_path);
+				first_path = NULL;
 			}
 
+			kref_get(&connect_to_path->path.kref);
 			first_path = connect_to_path;
 
 			dtt_socket_ok_or_free(&dsocket);
@@ -1322,26 +1292,25 @@ randomize:
 			csocket_is_server ? tls_server_hello_x509 : tls_client_hello_x509,
 			&csocket_tls_wait);
 		if (err < 0)
-			goto out;
+			goto out_release_sockets;
 
 		err = tls_init_hello(
 			dsocket, peername, tls_keyring, tls_privkey, tls_certificate,
 			dsocket_is_server ? tls_server_hello_x509 : tls_client_hello_x509,
 			&dsocket_tls_wait);
 		if (err < 0)
-			goto out;
+			goto out_release_sockets;
 
 		err = tls_wait_hello(&csocket_tls_wait, &dsocket_tls_wait, timeout);
 		if (err < 0)
-			goto out;
+			goto out_release_sockets;
 
 		INIT_WORK(&tcp_transport->control_data_ready_work, dtt_control_data_ready_work);
 	}
 
 	TR_ASSERT(transport, first_path == connect_to_path);
-	connect_to_path->path.established = true;
-	drbd_path_event(transport, &connect_to_path->path, false);
-	dtt_put_listeners(transport);
+	set_bit(TR_ESTABLISHED, &connect_to_path->path.flags);
+	drbd_path_event(transport, &connect_to_path->path);
 
 	dsocket->sk->sk_reuse = SK_CAN_REUSE; /* SO_REUSEADDR */
 	csocket->sk->sk_reuse = SK_CAN_REUSE; /* SO_REUSEADDR */
@@ -1387,16 +1356,21 @@ randomize:
 	set_bit(DTT_DATA_READY_ARMED, &tcp_transport->flags);
 	write_unlock_bh(&csocket->sk->sk_callback_lock);
 
-	return 0;
+	err = 0;
+	goto out;
 
 out_eagain:
 	err = -EAGAIN;
 
-out:
-	dtt_put_listeners(transport);
-
+out_release_sockets:
 	dtt_socket_free(&dsocket);
 	dtt_socket_free(&csocket);
+
+out:
+	if (first_path)
+		kref_put(&first_path->path.kref, drbd_destroy_path);
+	if (connect_to_path)
+		kref_put(&connect_to_path->path.kref, drbd_destroy_path);
 
 	return err;
 }
@@ -1623,48 +1597,24 @@ static int dtt_add_path(struct drbd_path *drbd_path)
 	struct drbd_tcp_transport *tcp_transport =
 		container_of(transport, struct drbd_tcp_transport, transport);
 	struct dtt_path *path = container_of(drbd_path, struct dtt_path, path);
-	bool active;
 
-	drbd_path->established = false;
+	clear_bit(TR_ESTABLISHED, &drbd_path->flags);
 	INIT_LIST_HEAD(&path->sockets);
-retry:
-	active = test_bit(DTT_CONNECTING, &tcp_transport->flags);
-	if (!active && drbd_path->listener)
-		drbd_put_listener(drbd_path);
 
-	if (active && !drbd_path->listener) {
-		int err = drbd_get_listener(drbd_path);
-		if (err)
-			return err;
-	}
+	if (!test_bit(DTT_CONNECTING, &tcp_transport->flags))
+		return 0;
 
-	spin_lock(&tcp_transport->paths_lock);
-	if (active != test_bit(DTT_CONNECTING, &tcp_transport->flags)) {
-		spin_unlock(&tcp_transport->paths_lock);
-		goto retry;
-	}
-	list_add_tail(&drbd_path->list, &transport->paths);
-	spin_unlock(&tcp_transport->paths_lock);
-
-	return 0;
+	return drbd_get_listener(drbd_path);
 }
 
-static int dtt_remove_path(struct drbd_path *drbd_path)
+static bool dtt_may_remove_path(struct drbd_path *drbd_path)
 {
-	struct drbd_transport *transport = drbd_path->transport;
-	struct drbd_tcp_transport *tcp_transport =
-		container_of(transport, struct drbd_tcp_transport, transport);
-	struct dtt_path *path = container_of(drbd_path, struct dtt_path, path);
+	return !test_bit(TR_ESTABLISHED, &drbd_path->flags);
+}
 
-	if (drbd_path->established)
-		return -EBUSY;
-
-	spin_lock(&tcp_transport->paths_lock);
-	list_del_init(&drbd_path->list);
-	spin_unlock(&tcp_transport->paths_lock);
-	drbd_put_listener(&path->path);
-
-	return 0;
+static void dtt_remove_path(struct drbd_path *drbd_path)
+{
+	drbd_put_listener(drbd_path);
 }
 
 static int __init dtt_initialize(void)

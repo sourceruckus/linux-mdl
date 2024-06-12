@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd_actlog.c"
 // SPDX-License-Identifier: GPL-2.0-only
 /*
    drbd_actlog.c
@@ -187,6 +188,7 @@ struct lc_element *_al_get_nonblock(struct drbd_device *device, unsigned int enr
 	return al_ext;
 }
 
+#if IS_ENABLED(CONFIG_DEV_DAX_PMEM) && !defined(DAX_PMEM_IS_INCOMPLETE)
 static
 struct lc_element *_al_get(struct drbd_device *device, unsigned int enr)
 {
@@ -199,7 +201,6 @@ struct lc_element *_al_get(struct drbd_device *device, unsigned int enr)
 	return al_ext;
 }
 
-#if IS_ENABLED(CONFIG_DEV_DAX_PMEM) && !defined(DAX_PMEM_IS_INCOMPLETE)
 static bool
 drbd_dax_begin_io_fp(struct drbd_device *device, unsigned int first, unsigned int last)
 {
@@ -491,6 +492,10 @@ static bool put_actlog(struct drbd_device *device, unsigned int first, unsigned 
 	spin_lock_irqsave(&device->al_lock, flags);
 	for (enr = first; enr <= last; enr++) {
 		extent = lc_find(device->act_log, enr);
+		/* Yes, this masks a bug elsewhere.  However, during normal
+		 * operation this is harmless, so no need to crash the kernel
+		 * by the BUG_ON(refcount == 0) in lc_put().
+		 */
 		if (!extent || extent->refcnt == 0) {
 			drbd_err(device, "al_complete_io() called on inactive extent %u\n", enr);
 			continue;
@@ -504,109 +509,35 @@ static bool put_actlog(struct drbd_device *device, unsigned int first, unsigned 
 	return wake;
 }
 
-/**
- * drbd_al_begin_io_for_peer() - Gets (a) reference(s) to AL extent(s)
- * @peer_device:	DRBD peer device to be targeted
- * @i:			interval to check and register
- *
- * Ensures that the extents covered by the interval @i are hot in the
- * activity log.
- */
-int drbd_al_begin_io_for_peer(struct drbd_peer_device *peer_device, struct drbd_interval *i)
-{
-	struct drbd_device *device = peer_device->device;
-	struct drbd_connection *connection = peer_device->connection;
-	unsigned first = i->sector >> (AL_EXTENT_SHIFT-9);
-	unsigned last = i->size == 0 ? first : (i->sector + (i->size >> 9) - 1) >> (AL_EXTENT_SHIFT-9);
-	unsigned enr;
-	bool need_transaction = false;
-	long timeout = MAX_SCHEDULE_TIMEOUT;
-
-	if (connection->agreed_pro_version < 114) {
-		struct net_conf *nc;
-		rcu_read_lock();
-		nc = rcu_dereference(connection->transport.net_conf);
-		if (nc && nc->ko_count)
-			timeout = nc->ko_count * nc->timeout * HZ/10;
-		rcu_read_unlock();
-	}
-
-	D_ASSERT(peer_device, first <= last);
-	D_ASSERT(peer_device, atomic_read(&device->local_cnt) > 0);
-
-	for (enr = first; enr <= last; enr++) {
-		struct lc_element *al_ext;
-		timeout = wait_event_timeout(device->al_wait,
-				(al_ext = _al_get(device, enr)) != NULL ||
-				connection->cstate[NOW] < C_CONNECTED,
-				timeout);
-		/* If we ran into the timeout, we have been unresponsive to the
-		 * peer for so long. So in theory, it should already have
-		 * kicked us out.  But in case it did not, rather disconnect hard,
-		 * and try to re-establish the connection than block "forever",
-		 * in what is likely to be a distributed deadlock */
-		if (timeout == 0) {
-			drbd_err(connection, "Upgrade your peer(s) or increase al-extents or reduce max-epoch-size\n");
-			drbd_err(connection, "Breaking connection to avoid a distributed deadlock.\n");
-			change_cstate(connection, C_TIMEOUT, CS_HARD);
-		}
-		if (al_ext == NULL) {
-			if (enr > first)
-				put_actlog(device, first, enr-1);
-			return -ECONNABORTED;
-		}
-		if (al_ext->lc_number != enr)
-			need_transaction = true;
-	}
-
-	if (need_transaction)
-		drbd_al_begin_io_commit(device);
-	return 0;
-
-}
-
 int drbd_al_begin_io_nonblock(struct drbd_device *device, struct drbd_interval *i)
 {
-	struct lru_cache *al = device->act_log;
 	/* for bios crossing activity log extent boundaries,
 	 * we may need to activate two extents in one go */
 	unsigned first = i->sector >> (AL_EXTENT_SHIFT-9);
 	unsigned last = i->size == 0 ? first : (i->sector + (i->size >> 9) - 1) >> (AL_EXTENT_SHIFT-9);
-	unsigned nr_al_extents;
-	unsigned available_update_slots;
 	unsigned enr;
 
-	D_ASSERT(device, first <= last);
-
-	nr_al_extents = 1 + last - first; /* worst case: all touched extends are cold. */
-	available_update_slots = min(al->nr_elements - al->used,
-				al->max_pending_changes - al->pending_changes);
-
-	/* We want all necessary updates for a given request within the same transaction
-	 * We could first check how many updates are *actually* needed,
-	 * and use that instead of the worst-case nr_al_extents */
-	if (available_update_slots < nr_al_extents) {
-		/* Too many activity log extents are currently "hot".
-		 *
-		 * If we have accumulated pending changes already,
-		 * we made progress.
-		 *
-		 * If we cannot get even a single pending change through,
-		 * stop the fast path until we made some progress,
-		 * or requests to "cold" extents could be starved. */
-		if (!al->pending_changes)
-			set_bit(__LC_STARVING, &device->act_log->flags);
-		return -ENOBUFS;
+	if (i->partially_in_al_next_enr) {
+		D_ASSERT(device, first < i->partially_in_al_next_enr);
+		D_ASSERT(device, last >= i->partially_in_al_next_enr);
+		first = i->partially_in_al_next_enr;
 	}
 
-	/* Checkout the refcounts.
-	 * Given that we checked for available elements and update slots above,
-	 * this has to be successful. */
+	/* Try to checkout the refcounts. */
 	for (enr = first; enr <= last; enr++) {
 		struct lc_element *al_ext;
 		al_ext = lc_get_cumulative(device->act_log, enr);
-		if (!al_ext)
-			drbd_err(device, "LOGIC BUG for enr=%u\n", enr);
+
+		if (!al_ext) {
+			/* Did not work. We may have exhausted the possible
+			 * changes per transaction. Or raced with someone
+			 * "locking" it against changes.
+			 * Remember where to continue from.
+			 */
+			if (enr > first)
+				i->partially_in_al_next_enr = enr;
+			return -ENOBUFS;
+		}
 	}
 	return 0;
 }

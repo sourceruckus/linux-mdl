@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd_nl.c"
 // SPDX-License-Identifier: GPL-2.0-only
 /*
    drbd_nl.c
@@ -89,11 +90,16 @@ static int drbd_adm_get_initial_state_done(struct netlink_callback *cb);
 #include "drbd_nla.h"
 #include <linux/genl_magic_func.h>
 
+void drbd_enable_netns(void)
+{
+	drbd_genl_family.netnsok = true;
+}
+
 atomic_t drbd_genl_seq = ATOMIC_INIT(2); /* two. */
 
 DEFINE_MUTEX(notification_mutex);
 
-/* used blkdev_get_by_path, to claim our meta data device(s) */
+/* used bdev_open_by_path, to claim our meta data device(s) */
 static char *drbd_m_holder = "Hands off! this is DRBD's meta data device.";
 
 static void drbd_adm_send_reply(struct sk_buff *skb, struct genl_info *info)
@@ -185,7 +191,7 @@ static struct drbd_path *first_path(struct drbd_connection *connection)
 	   It was introduced when replacing the single address pair
 	   with a list of address pairs (or paths). */
 
-	return list_first_entry_or_null(&connection->transport.paths, struct drbd_path, list);
+	return list_first_or_null_rcu(&connection->transport.paths, struct drbd_path, list);
 }
 
 /* This would be a good candidate for a "pre_doit" hook,
@@ -620,12 +626,17 @@ static int drbd_khelper(struct drbd_device *device, struct drbd_connection *conn
 		}
 	}
 	if (connection) {
-		struct drbd_path *path = first_path(connection);
+		struct drbd_path *path;
+
+		rcu_read_lock();
+		path = first_path(connection);
 		if (path) {
 			/* TO BE DELETED */
 			env_print_address(&env, "DRBD_MY_", &path->my_addr);
 			env_print_address(&env, "DRBD_PEER_", &path->peer_addr);
 		}
+		rcu_read_unlock();
+
 		env_print(&env, "DRBD_PEER_NODE_ID=%u", connection->peer_node_id);
 		env_print(&env, "DRBD_CSTATE=%s", drbd_conn_str(connection->cstate[NOW]));
 	}
@@ -962,7 +973,7 @@ static bool after_primary_lost_events_settled(struct drbd_resource *resource)
 	struct drbd_device *device;
 	int vnr;
 
-	if (test_bit(TWOPC_AFTER_LOST_PEER_PENDING, &resource->flags))
+	if (test_bit(TRY_BECOME_UP_TO_DATE_PENDING, &resource->flags))
 		return false;
 
 	rcu_read_lock();
@@ -2709,14 +2720,14 @@ bool want_bitmap(struct drbd_peer_device *peer_device)
 	return want_bitmap;
 }
 
-static void close_backing_dev(struct drbd_device *device, struct block_device *bdev,
-	void *holder, bool do_bd_unlink)
+static void close_backing_dev(struct drbd_device *device,
+		struct bdev_handle *handle, bool do_bd_unlink)
 {
-	if (!bdev)
+	if (!handle)
 		return;
 	if (do_bd_unlink)
-		bd_unlink_disk_holder(bdev, device->vdisk);
-	blkdev_put(bdev, holder);
+		bd_unlink_disk_holder(handle->bdev, device->vdisk);
+	bdev_release(handle);
 }
 
 void drbd_backing_dev_free(struct drbd_device *device, struct drbd_backing_dev *ldev)
@@ -2727,33 +2738,33 @@ void drbd_backing_dev_free(struct drbd_device *device, struct drbd_backing_dev *
 	drbd_dax_close(ldev);
 
 	close_backing_dev(device,
-			  ldev->md_bdev,
-			  ldev->md.meta_dev_idx < 0 ? (void *)device : (void *)drbd_m_holder,
+			  ldev->md_bdev_handle,
 			  ldev->md_bdev != ldev->backing_bdev);
-	close_backing_dev(device, ldev->backing_bdev, device, true);
+	close_backing_dev(device, ldev->backing_bdev_handle, true);
 
 	kfree(ldev->disk_conf);
 	kfree(ldev);
 }
 
-static struct block_device *open_backing_dev(struct drbd_device *device,
+static struct bdev_handle *open_backing_dev(struct drbd_device *device,
 		const char *bdev_path, void *claim_ptr)
 {
-	struct block_device *bdev = blkdev_get_by_path(bdev_path,
-				  FMODE_READ | FMODE_WRITE,
+	struct bdev_handle *handle = bdev_open_by_path(bdev_path,
+				  BLK_OPEN_READ | BLK_OPEN_WRITE,
 				  claim_ptr, NULL);
-	if (IS_ERR(bdev)) {
+	if (IS_ERR(handle)) {
 		drbd_err(device, "open(\"%s\") failed with %ld\n",
-				bdev_path, PTR_ERR(bdev));
+				bdev_path, PTR_ERR(handle));
 	}
-	return bdev;
+	return handle;
 }
 
 static int link_backing_dev(struct drbd_device *device,
-		const char *bdev_path, struct block_device *bdev)
+		const char *bdev_path, struct bdev_handle *handle)
 {
-	int err = bd_link_disk_holder(bdev, device->vdisk);
+	int err = bd_link_disk_holder(handle->bdev, device->vdisk);
 	if (err) {
+		bdev_release(handle);
 		drbd_err(device, "bd_link_disk_holder(\"%s\", ...) failed with %d\n",
 				bdev_path, err);
 	}
@@ -2764,22 +2775,22 @@ static int open_backing_devices(struct drbd_device *device,
 		struct disk_conf *new_disk_conf,
 		struct drbd_backing_dev *nbc)
 {
-	struct block_device *bdev;
+	struct bdev_handle *handle;
 	void *meta_claim_ptr;
 	int err;
 
-	bdev = open_backing_dev(device, new_disk_conf->backing_dev, device);
-	if (IS_ERR(bdev))
+	handle = open_backing_dev(device, new_disk_conf->backing_dev, device);
+	if (IS_ERR(handle))
 		return ERR_OPEN_DISK;
 
-	err = link_backing_dev(device, new_disk_conf->backing_dev, bdev);
+	err = link_backing_dev(device, new_disk_conf->backing_dev, handle);
 	if (err) {
 		/* close without unlinking; otherwise error path will try to unlink */
-		close_backing_dev(device, bdev, device, false);
+		close_backing_dev(device, handle, false);
 		return ERR_OPEN_DISK;
 	}
-
-	nbc->backing_bdev = bdev;
+	nbc->backing_bdev = handle->bdev;
+	nbc->backing_bdev_handle = handle;
 
 	/* meta_claim_ptr: device, if claimed exclusively; shared drbd_m_holder,
 	 * if potentially shared with other drbd minors
@@ -2794,22 +2805,23 @@ static int open_backing_devices(struct drbd_device *device,
 	 * should check it for you already; but if you don't, or
 	 * someone fooled it, we need to double check here)
 	 */
-	bdev = open_backing_dev(device, new_disk_conf->meta_dev, meta_claim_ptr);
-	if (IS_ERR(bdev))
+	handle = open_backing_dev(device, new_disk_conf->meta_dev, meta_claim_ptr);
+	if (IS_ERR(handle))
 		return ERR_OPEN_MD_DISK;
 
 	/* avoid double bd_claim_by_disk() for the same (source,target) tuple,
 	 * as would happen with internal metadata. */
-	if (bdev != nbc->backing_bdev) {
-		err = link_backing_dev(device, new_disk_conf->meta_dev, bdev);
+	if (handle->bdev != nbc->backing_bdev) {
+		err = link_backing_dev(device, new_disk_conf->meta_dev, handle);
 		if (err) {
 			/* close without unlinking; otherwise error path will try to unlink */
-			close_backing_dev(device, bdev, meta_claim_ptr, false);
+			close_backing_dev(device, handle, false);
 			return ERR_OPEN_MD_DISK;
 		}
 	}
 
-	nbc->md_bdev = bdev;
+	nbc->md_bdev = handle->bdev;
+	nbc->md_bdev_handle = handle;
 	return NO_ERROR;
 }
 
@@ -3073,7 +3085,7 @@ err:
  * Called exactly once during drbd_adm_attach(), while still being D_DISKLESS,
  * even before @bdev is assigned to @device->ldev.
  */
-int drbd_md_read(struct drbd_config_context *adm_ctx, struct drbd_backing_dev *bdev)
+static int drbd_md_read(struct drbd_config_context *adm_ctx, struct drbd_backing_dev *bdev)
 {
 	struct drbd_device *device = adm_ctx->device;
 	struct meta_data_on_disk_9 *buffer;
@@ -4336,17 +4348,17 @@ static int adm_new_connection(struct drbd_config_context *adm_ctx, struct genl_i
 	 * prevent double cleanup. */
 	tr_class = NULL;
 
+	mutex_lock(&adm_ctx->resource->conf_update);
 	retcode = check_net_options(connection, new_net_conf);
 	if (retcode != NO_ERROR)
-		goto fail_free_connection;
+		goto unlock_fail_free_connection;
 
 	retcode = alloc_crypto(&crypto, new_net_conf, adm_ctx->reply_skb);
 	if (retcode != NO_ERROR)
-		goto fail_free_connection;
+		goto unlock_fail_free_connection;
 
 	((char *)new_net_conf->shared_secret)[SHARED_SECRET_MAX-1] = 0;
 
-	mutex_lock(&adm_ctx->resource->conf_update);
 	idr_for_each_entry(&adm_ctx->resource->devices, device, i) {
 		int id;
 
@@ -4458,9 +4470,8 @@ static int adm_new_connection(struct drbd_config_context *adm_ctx, struct genl_i
 	return NO_ERROR;
 
 unlock_fail_free_connection:
-	mutex_unlock(&adm_ctx->resource->conf_update);
-fail_free_connection:
 	drbd_unregister_connection(connection);
+	mutex_unlock(&adm_ctx->resource->conf_update);
 	synchronize_rcu();
 	drbd_reclaim_connection(&connection->rcu);
 fail_put_transport:
@@ -4526,6 +4537,8 @@ static enum drbd_ret_code
 adm_add_path(struct drbd_config_context *adm_ctx,  struct genl_info *info)
 {
 	struct drbd_transport *transport = &adm_ctx->connection->transport;
+	struct drbd_resource *resource = adm_ctx->resource;
+	struct drbd_connection *connection = adm_ctx->connection;
 	struct nlattr **nested_attr_tb;
 	struct nlattr *my_addr, *peer_addr;
 	struct drbd_path *path;
@@ -4572,13 +4585,26 @@ adm_add_path(struct drbd_config_context *adm_ctx,  struct genl_info *info)
 
 	kref_init(&path->kref);
 
+	/* Exclusive with transport op "prepare_connect()" */
+	mutex_lock(&resource->conf_update);
+
 	err = transport->class->ops.add_path(path);
+
 	if (err) {
 		kref_put(&path->kref, drbd_destroy_path);
-		drbd_err(adm_ctx->connection, "add_path() failed with %d\n", err);
+		drbd_err(connection, "add_path() failed with %d\n", err);
 		drbd_msg_put_info(adm_ctx->reply_skb, "add_path on transport failed");
+		mutex_unlock(&resource->conf_update);
 		return ERR_INVALID_REQUEST;
 	}
+
+	/* Exclusive with reading state, in particular remember_state_change() */
+	write_lock_irq(&resource->state_rwlock);
+	list_add_tail_rcu(&path->list, &transport->paths);
+	write_unlock_irq(&resource->state_rwlock);
+
+	mutex_unlock(&resource->conf_update);
+
 	notify_path(adm_ctx->connection, path, NOTIFY_CREATE);
 	return NO_ERROR;
 }
@@ -4718,6 +4744,7 @@ static int drbd_adm_new_path(struct sk_buff *skb, struct genl_info *info)
 static enum drbd_ret_code
 adm_del_path(struct drbd_config_context *adm_ctx,  struct genl_info *info)
 {
+	struct drbd_resource *resource = adm_ctx->resource;
 	struct drbd_connection *connection = adm_ctx->connection;
 	struct drbd_transport *transport = &connection->transport;
 	struct nlattr **nested_attr_tb;
@@ -4758,9 +4785,25 @@ adm_del_path(struct drbd_config_context *adm_ctx,  struct genl_info *info)
 		if (!addr_eq_nla(&path->peer_addr, path->peer_addr_len, peer_addr))
 			continue;
 
-		err = transport->class->ops.remove_path(path);
-		if (err)
+		/* Exclusive with transport op "prepare_connect()" */
+		mutex_lock(&resource->conf_update);
+
+		if (!transport->class->ops.may_remove_path(path)) {
+			err = -EBUSY;
+			mutex_unlock(&resource->conf_update);
 			break;
+		}
+
+		set_bit(TR_UNREGISTERED, &path->flags);
+		/* Ensure flag visible before list manipulation. */
+		smp_wmb();
+
+		/* Exclusive with reading state, in particular remember_state_change() */
+		write_lock_irq(&resource->state_rwlock);
+		list_del_rcu(&path->list);
+		write_unlock_irq(&resource->state_rwlock);
+
+		mutex_unlock(&resource->conf_update);
 
 		notify_path(connection, path, NOTIFY_DESTROY);
 		/* Transport modules might use RCU on the path list. */
@@ -4904,7 +4947,9 @@ static void del_connection(struct drbd_connection *connection, const char *tag)
 	 */
 	drbd_thread_stop(&connection->sender);
 
+	mutex_lock(&resource->conf_update);
 	drbd_unregister_connection(connection);
+	mutex_unlock(&resource->conf_update);
 
 	/*
 	 * Flush the resource work queue to make sure that no more
@@ -4960,9 +5005,7 @@ static int adm_disconnect(struct sk_buff *skb, struct genl_info *info, bool dest
 	}
 	rv = conn_try_disconnect(connection, parms.force_disconnect, tag, adm_ctx.reply_skb);
 	if (rv >= SS_SUCCESS && destroy) {
-		mutex_lock(&connection->resource->conf_update);
 		del_connection(connection, tag);
-		mutex_unlock(&connection->resource->conf_update);
 	}
 	if (rv < SS_SUCCESS)
 		retcode = (enum drbd_ret_code)rv;
@@ -5945,12 +5988,15 @@ static int connection_paths_to_skb(struct sk_buff *skb, struct drbd_connection *
 		goto nla_put_failure;
 
 	/* array of such paths. */
-	list_for_each_entry(path, &connection->transport.paths, list) {
-		if (nla_put(skb, T_my_addr, path->my_addr_len, &path->my_addr))
+	rcu_read_lock();
+	list_for_each_entry_rcu(path, &connection->transport.paths, list) {
+		if (nla_put(skb, T_my_addr, path->my_addr_len, &path->my_addr) ||
+				nla_put(skb, T_peer_addr, path->peer_addr_len, &path->peer_addr)) {
+			rcu_read_unlock();
 			goto nla_put_failure;
-		if (nla_put(skb, T_peer_addr, path->peer_addr_len, &path->peer_addr))
-			goto nla_put_failure;
+		}
 	}
+	rcu_read_unlock();
 	nla_nest_end(skb, tla);
 	return 0;
 
@@ -6005,7 +6051,14 @@ static int drbd_adm_dump_connections(struct sk_buff *skb, struct netlink_callbac
 
     next_resource:
 	rcu_read_unlock();
-	mutex_lock(&resource->conf_update);
+	if (mutex_lock_interruptible(&resource->conf_update)) {
+		kref_debug_put(&resource->kref_debug, 6);
+		kref_put(&resource->kref, drbd_destroy_resource);
+		resource = NULL;
+		retcode = ERR_INTR;
+		rcu_read_lock();
+		goto put_result;
+	}
 	rcu_read_lock();
 	if (cb->args[2]) {
 		for_each_connection_rcu(connection, resource)
@@ -6380,7 +6433,7 @@ put_result:
 		err = nla_put_drbd_cfg_context(skb, resource, connection, NULL, path);
 		if (err)
 			goto out;
-		path_info.path_established = path->established;
+		path_info.path_established = test_bit(TR_ESTABLISHED, &path->flags);
 		err = drbd_path_info_to_skb(skb, &path_info, !capable(CAP_SYS_ADMIN));
 		if (err)
 			goto out;
@@ -6975,9 +7028,9 @@ static int adm_del_resource(struct drbd_resource *resource)
 	drbd_debugfs_resource_cleanup(resource);
 	mutex_unlock(&resources_mutex);
 
+	cancel_work_sync(&resource->empty_twopc);
 	timer_shutdown_sync(&resource->twopc_timer);
 	timer_shutdown_sync(&resource->peer_ack_timer);
-	timer_shutdown_sync(&resource->repost_up_to_date_timer);
 	call_rcu(&resource->rcu, drbd_reclaim_resource);
 
 	mutex_lock(&notification_mutex);
@@ -7029,9 +7082,7 @@ static int drbd_adm_down(struct sk_buff *skb, struct genl_info *info)
 		if (connection->cstate[NOW] > C_STANDALONE)
 			retcode = conn_try_disconnect(connection, 0, "down", adm_ctx.reply_skb);
 		if (retcode >= SS_SUCCESS) {
-			mutex_lock(&resource->conf_update);
 			del_connection(connection, "down");
-			mutex_unlock(&resource->conf_update);
 		} else {
 			kref_debug_put(&connection->kref_debug, 13);
 			kref_put(&connection->kref, drbd_destroy_connection);
@@ -7326,7 +7377,7 @@ void drbd_broadcast_peer_device_state(struct drbd_peer_device *peer_device)
 	mutex_unlock(&notification_mutex);
 }
 
-int notify_path_state(struct sk_buff *skb,
+static int notify_path_state(struct sk_buff *skb,
 		       unsigned int seq,
 		       /* until we have a backpointer in drbd_path, we need an explicit connection: */
 		       struct drbd_connection *connection,
@@ -7382,7 +7433,7 @@ int notify_path(struct drbd_connection *connection, struct drbd_path *path, enum
 	struct drbd_path_info path_info;
 	int err;
 
-	path_info.path_established = path->established;
+	path_info.path_established = test_bit(TR_ESTABLISHED, &path->flags);
 	mutex_lock(&notification_mutex);
 	err = notify_path_state(NULL, 0, connection, path, &path_info, type);
 	mutex_unlock(&notification_mutex);

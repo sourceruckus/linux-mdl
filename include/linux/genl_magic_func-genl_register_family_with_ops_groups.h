@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd-headers/linux/genl_magic_func-genl_register_family_with_ops_groups.h"
 #define ZZZ_genl_mcgrps		CONCAT_(GENL_MAGIC_FAMILY, _genl_mcgrps)
 static const struct genl_multicast_group ZZZ_genl_mcgrps[] = {
 #undef GENL_mc_group

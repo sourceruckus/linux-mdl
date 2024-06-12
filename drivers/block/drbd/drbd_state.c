@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd_state.c"
 // SPDX-License-Identifier: GPL-2.0-only
 /*
    drbd_state.c
@@ -85,6 +86,8 @@ static enum drbd_state_rv change_peer_state(struct drbd_connection *, int, union
 					    union drbd_state, unsigned long *);
 static void check_wrongly_set_mdf_exists(struct drbd_device *);
 static void update_members(struct drbd_resource *resource);
+static bool calc_data_accessible(struct drbd_state_change *state_change, int n_device,
+				 enum which_state which);
 
 /* We need to stay consistent if we are neighbor of a diskless primary with
    different UUID. This function should be used if the device was D_UP_TO_DATE
@@ -405,7 +408,7 @@ struct drbd_state_change *remember_state_change(struct drbd_resource *resource, 
 			path_state->connection = connection;
 			kref_get(&path->kref);
 			path_state->path = path;
-			path_state->path_established = path->established;
+			path_state->path_established = test_bit(TR_ESTABLISHED, &path->flags);
 
 			path_state++;
 		}
@@ -2441,11 +2444,8 @@ static void update_members(struct drbd_resource *resource)
 
 		/* Connection to peer lost. Check if we should remove it from the members */
 		if (drbd_need_twopc_after_lost_peer(connection) &&
-				!test_bit(TWOPC_AFTER_LOST_PEER_PENDING, &resource->flags) &&
-				resource->members & peer_node_mask) {
-			set_bit(TWOPC_AFTER_LOST_PEER_PENDING, &resource->flags);
-			drbd_post_work(resource, TWOPC_AFTER_LOST_PEER);
-		}
+				resource->members & peer_node_mask)
+			schedule_work(&resource->empty_twopc);
 	}
 }
 
@@ -2990,10 +2990,8 @@ static void finish_state_change(struct drbd_resource *resource, const char *tag)
 		if (role[OLD] == R_PRIMARY && role[NEW] == R_SECONDARY)
 			clear_bit(NEW_CUR_UUID, &device->flags);
 
-		/* The NEW state version here is the same as the NOW version in
-		 * the context of w_after_state_change(). */
 		if (should_try_become_up_to_date(device, disk_state, NEW))
-			set_bit(TWOPC_AFTER_LOST_PEER_PENDING, &resource->flags);
+			set_bit(TRY_BECOME_UP_TO_DATE_PENDING, &resource->flags);
 	}
 
 	for_each_connection(connection, resource) {
@@ -3729,6 +3727,7 @@ static int w_after_state_change(struct drbd_work *w, int unused)
 	int n_device, n_connection;
 	bool still_connected = false;
 	bool try_become_up_to_date = false;
+	bool healed_primary = false;
 
 	notify_state_change(state_change);
 
@@ -3740,6 +3739,7 @@ static int w_after_state_change(struct drbd_work *w, int unused)
 		bool *have_quorum = device_state_change->have_quorum;
 		bool effective_disk_size_determined = false;
 		bool device_stable[2], resync_target[2];
+		bool data_accessible[2];
 		bool resync_finished = false;
 		bool some_peer_demoted = false;
 		bool new_current_uuid = false;
@@ -3748,6 +3748,8 @@ static int w_after_state_change(struct drbd_work *w, int unused)
 		for (which = OLD; which <= NEW; which++) {
 			device_stable[which] = calc_device_stable(state_change, n_device, which);
 			resync_target[which] = calc_resync_target(state_change, n_device, which);
+			data_accessible[which] =
+				calc_data_accessible(state_change, n_device, which);
 		}
 
 		if (disk_state[NEW] == D_UP_TO_DATE)
@@ -3788,6 +3790,9 @@ static int w_after_state_change(struct drbd_work *w, int unused)
 				}
 			}
 		}
+
+		if (role[NEW] == R_PRIMARY && !data_accessible[OLD] && data_accessible[NEW])
+			healed_primary = true;
 
 		for (n_connection = 0; n_connection < state_change->n_connections; n_connection++) {
 			struct drbd_connection_state_change *connection_state_change = &state_change->connections[n_connection];
@@ -3834,8 +3839,8 @@ static int w_after_state_change(struct drbd_work *w, int unused)
 			if (peer_disk_state[NEW] == D_UP_TO_DATE)
 				effective_disk_size_determined = true;
 
-			if (!(role[OLD] == R_PRIMARY && !drbd_data_accessible(device, OLD)) &&
-			     (role[NEW] == R_PRIMARY && !drbd_data_accessible(device, NEW)) &&
+			if (!(role[OLD] == R_PRIMARY && !data_accessible[OLD]) &&
+			     (role[NEW] == R_PRIMARY && !data_accessible[NEW]) &&
 			    !test_bit(UNREGISTERED, &device->flags))
 				drbd_maybe_khelper(device, connection, "pri-on-incon-degr");
 
@@ -4182,9 +4187,7 @@ static int w_after_state_change(struct drbd_work *w, int unused)
 		if (disk_state[OLD] == D_UP_TO_DATE && disk_state[NEW] == D_INCONSISTENT)
 			send_new_state_to_all_peer_devices(state_change, n_device);
 
-		/* We cannot test the flag TWOPC_AFTER_LOST_PEER_PENDING here
-		 * because that would cause us to queue the work more often
-		 * than necessary. */
+		/* Testing EMPTY_TWOPC_PENDING would cause more queuing than necessary */
 		if (should_try_become_up_to_date(device, disk_state, NOW))
 			try_become_up_to_date = true;
 
@@ -4258,10 +4261,10 @@ static int w_after_state_change(struct drbd_work *w, int unused)
 		end_state_change(resource, &irq_flags, "susp-uuid");
 	}
 
-	if (try_become_up_to_date)
-		drbd_post_work(resource, TWOPC_AFTER_LOST_PEER);
-	else
-		drbd_notify_peers_lost_primary(resource);
+	if (try_become_up_to_date || healed_primary)
+		schedule_work(&resource->empty_twopc);
+
+	drbd_notify_peers_lost_primary(resource);
 
 	if (!still_connected)
 		mod_timer_pending(&resource->twopc_timer, jiffies);
@@ -4935,10 +4938,21 @@ change_cluster_wide_state(bool (*change)(struct change_context *, enum change_ph
 
 			if ((context->mask.role == role_MASK && context->val.role == R_PRIMARY) ||
 			    (context->mask.role != role_MASK && resource->role[NOW] == R_PRIMARY)) {
-				reply->primary_nodes |=
-					NODE_MASK(resource->res_opts.node_id);
-				reply->weak_nodes |= ~directly_reachable;
+				reply->primary_nodes |= NODE_MASK(resource->res_opts.node_id);
+				if (drbd_res_data_accessible(resource))
+					reply->weak_nodes |= ~directly_reachable;
 			}
+
+			/*
+			 * When a node is Primary and has access to UpToDate data, it sets
+			 * weak_nodes to the mask of those it is not connected to. This includes the
+			 * bits for nodes which are not configured, so will always have some set
+			 * bits. Thus if there is a Primary node and no bits are set in weak_nodes,
+			 * the Primary cannot have access to UpToDate data.
+			 */
+			if (reply->primary_nodes && !reply->weak_nodes)
+				request.flags |= TWOPC_PRI_INCAPABLE;
+
 			drbd_info(resource, "State change %u: primary_nodes=%lX, weak_nodes=%lX\n",
 				  reply->tid, (unsigned long)reply->primary_nodes,
 				  (unsigned long)reply->weak_nodes);
@@ -5365,27 +5379,14 @@ enum drbd_state_rv change_role(struct drbd_resource *resource,
 	bool got_state_sem = false;
 
 	if (role == R_SECONDARY) {
-		struct drbd_device *device;
-		int vnr;
-
 		if (!(flags & CS_ALREADY_SERIALIZED)) {
 			down(&resource->state_sem);
 			got_state_sem = true;
 			role_context.flags |= CS_ALREADY_SERIALIZED;
 		}
-		idr_for_each_entry(&resource->devices, device, vnr) {
-			long t = wait_event_interruptible_timeout(device->misc_wait,
-						!atomic_read(&device->ap_bio_cnt[WRITE]),
-						twopc_timeout(resource));
-			if (t <= 0) {
-				rv = t == 0 ? SS_TIMEOUT : SS_INTERRUPTED;
-				goto out;
-			}
-		}
 		role_context.change_local_state_last = true;
 	}
 	rv = change_cluster_wide_state(do_change_role, &role_context, tag);
-out:
 	if (got_state_sem)
 		up(&resource->state_sem);
 	return rv;
@@ -5523,8 +5524,8 @@ static bool do_twopc_after_lost_peer(struct change_context *context, enum change
 	return phase != PH_PREPARE || reply->reachable_nodes != NODE_MASK(resource->res_opts.node_id);
 }
 
-enum drbd_state_rv twopc_after_lost_peer(struct drbd_resource *resource,
-					  enum chg_state_flags flags)
+static enum drbd_state_rv twopc_after_lost_peer(struct drbd_resource *resource,
+						enum chg_state_flags flags)
 {
 	struct change_context context = {
 		.resource = resource,
@@ -5540,6 +5541,17 @@ enum drbd_state_rv twopc_after_lost_peer(struct drbd_resource *resource,
 	   will agree to this change request. At commit time we know where to
 	   go from the D_CONSISTENT, since we got the primary mask. */
 	return change_cluster_wide_state(do_twopc_after_lost_peer, &context, "lost-peer");
+}
+
+void drbd_empty_twopc_work_fn(struct work_struct *work)
+{
+	struct drbd_resource *resource = container_of(work, struct drbd_resource, empty_twopc);
+
+	twopc_after_lost_peer(resource, CS_VERBOSE | CS_SERIALIZE);
+
+	clear_bit(TRY_BECOME_UP_TO_DATE_PENDING, &resource->flags);
+	wake_up_all(&resource->state_wait);
+	drbd_notify_peers_lost_primary(resource);
 }
 
 static bool do_change_disk_state(struct change_context *context, enum change_phase phase)
@@ -5626,7 +5638,8 @@ static enum outdate_what outdate_on_disconnect(struct drbd_connection *connectio
 {
 	struct drbd_resource *resource = connection->resource;
 
-	if ((connection->fencing_policy >= FP_RESOURCE ||
+	if (connection->cstate[NOW] == C_CONNECTED &&
+	    (connection->fencing_policy >= FP_RESOURCE ||
 	     connection->resource->res_opts.quorum != QOU_OFF) &&
 	    resource->role[NOW] != connection->peer_role[NOW]) {
 		/* primary politely disconnects from secondary,
@@ -5949,6 +5962,71 @@ static void log_current_uuids(struct drbd_device *device)
 	drbd_warn(device, "%s", msg);
 }
 
+bool drbd_res_data_accessible(struct drbd_resource *resource)
+{
+	bool data_accessible = false;
+	struct drbd_device *device;
+	int vnr;
+
+	idr_for_each_entry(&resource->devices, device, vnr) {
+		if (drbd_data_accessible(device, NOW)) {
+			data_accessible = true;
+			break;
+		}
+	}
+
+	return data_accessible;
+}
+
+/**
+ * calc_data_accessible() - returns if up-to-data data is reachable
+ *
+ * @state_change: where to get the state information from
+ * @n_device:     index into the devices array
+ * @which:        OLD or NEW
+ *
+ * calc_data_accessible() returns true if either the local disk is up-to-date
+ * or of the peers. The related drbd_data_accessible() computes the same
+ * result from different inputs.
+ */
+static bool calc_data_accessible(struct drbd_state_change *state_change, int n_device,
+				 enum which_state which)
+{
+	struct drbd_device_state_change *device_state_change = &state_change->devices[n_device];
+	enum drbd_disk_state *disk_state = device_state_change->disk_state;
+	int n_connection;
+
+	if (disk_state[which] == D_UP_TO_DATE)
+		return true;
+
+	for (n_connection = 0; n_connection < state_change->n_connections; n_connection++) {
+		struct drbd_peer_device_state_change *peer_device_state_change =
+			&state_change->peer_devices[
+				n_device * state_change->n_connections + n_connection];
+		struct drbd_peer_device *peer_device = peer_device_state_change->peer_device;
+		enum drbd_disk_state *peer_disk_state = peer_device_state_change->disk_state;
+		struct net_conf *nc;
+
+		nc = rcu_dereference(peer_device->connection->transport.net_conf);
+		if (nc && !nc->allow_remote_read)
+			continue;
+		if (peer_disk_state[which] == D_UP_TO_DATE)
+			return true;
+	}
+
+	return false;
+}
+
+/**
+ * drbd_data_accessible() - returns if up-to-data data is reachable
+ *
+ * @device: the device, the question is about
+ * @which:  OLD, NEW, or NOW (Only use OLD within a state change!)
+ *
+ * drbd_data_accessible() returns true if either the local disk is up-to-date
+ * or of the peers. The related calc_data_accessible() computes the same
+ * result from different inputs.
+ */
 bool drbd_data_accessible(struct drbd_device *device, enum which_state which)
 {
 	struct drbd_peer_device *peer_device;

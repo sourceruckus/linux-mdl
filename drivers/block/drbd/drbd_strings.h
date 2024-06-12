@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd-headers/drbd_strings.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef __DRBD_STRINGS_H
 #define __DRBD_STRINGS_H

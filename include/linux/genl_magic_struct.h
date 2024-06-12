@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd-headers/linux/genl_magic_struct.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef GENL_MAGIC_STRUCT_H
 #define GENL_MAGIC_STRUCT_H

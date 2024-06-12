@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd_kref_debug.c"
 // SPDX-License-Identifier: GPL-2.0-only
 #include <drbd_kref_debug.h>
 #include "drbd_int.h"
@@ -89,6 +90,7 @@ struct kref_debug_class kref_class_device = {
 		[6] = "drbd_request",
 		[7] = "flush_after_epoch",
 		[8] = "send_acks_wf",
+		[9] = "peer_req",
 	}
 };
 

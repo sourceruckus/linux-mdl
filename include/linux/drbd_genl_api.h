@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd-headers/linux/drbd_genl_api.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef DRBD_GENL_STRUCT_H
 #define DRBD_GENL_STRUCT_H

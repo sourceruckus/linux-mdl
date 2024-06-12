@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/linux/drbd_config.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
   drbd_config.h
@@ -9,7 +10,7 @@
 
 extern const char *drbd_buildtag(void);
 
-#define REL_VERSION "9.2.8"
+#define REL_VERSION "9.2.10"
 #define PRO_VERSION_MIN 86
 #define PRO_VERSION_MAX 122
 

@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd_main.c"
 // SPDX-License-Identifier: GPL-2.0-only
 /*
    drbd_main.c
@@ -134,8 +135,6 @@ unsigned int drbd_protocol_version_min = PRO_VERSION_MIN;
 module_param_named(protocol_version_min, drbd_protocol_version_min, drbd_protocol_version, 0644);
 
 
-/* defined in drbd_nl.c, where it is used */
-int param_set_drbd_strict_names(const char *s, const struct kernel_param *kp);
 #define param_check_drbd_strict_names		param_check_bool
 #define param_get_drbd_strict_names		param_get_bool
 const struct kernel_param_ops param_ops_drbd_strict_names = {
@@ -2894,7 +2893,7 @@ restart:
 	rcu_read_unlock();
 }
 
-void drbd_fsync_device(struct drbd_device *device)
+static void drbd_fsync_device(struct drbd_device *device)
 {
 	struct drbd_resource *resource = device->resource;
 
@@ -3008,6 +3007,31 @@ static void drbd_release(struct gendisk *gd)
 	kref_put(&device->kref, drbd_destroy_device);  /* might destroy the resource as well */
 }
 
+static void drbd_remove_all_paths(struct drbd_connection *connection)
+{
+	struct drbd_resource *resource = connection->resource;
+	struct drbd_transport *transport = &connection->transport;
+	struct drbd_path *path, *tmp;
+
+	lockdep_assert_held(&resource->conf_update);
+
+	list_for_each_entry(path, &transport->paths, list)
+		set_bit(TR_UNREGISTERED, &path->flags);
+
+	/* Ensure flag visible before list manipulation. */
+	smp_wmb();
+
+	list_for_each_entry_safe(path, tmp, &transport->paths, list) {
+		/* Exclusive with reading state, in particular remember_state_change() */
+		write_lock_irq(&resource->state_rwlock);
+		list_del_rcu(&path->list);
+		write_unlock_irq(&resource->state_rwlock);
+
+		notify_path(connection, path, NOTIFY_DESTROY);
+		call_rcu(&path->rcu, drbd_reclaim_path);
+	}
+}
+
 /** __drbd_net_exit is called when a network namespace is removed.
  *
  * For DRBD this means it needs to remove any sockets assigned to that namespace,
@@ -3062,23 +3086,15 @@ static void __net_exit __drbd_net_exit(struct net *net)
 
 	/* Step 3 */
 	list_for_each_entry_safe(connection, n, &connections_wait_list, remove_net_list) {
-		struct drbd_path *path, *tmp;
 		list_del_init(&connection->remove_net_list);
 
 		/* Wait here for StandAlone: a path can only be removed if it's not established */
 		wait_event(connection->resource->state_wait, connection->cstate[NOW] == C_STANDALONE);
 
 		mutex_lock(&connection->resource->adm_mutex);
-		list_for_each_entry_safe(path, tmp, &connection->transport.paths, list) {
-			struct drbd_transport *transport = &connection->transport;
-
-			int err = transport->class->ops.remove_path(path);
-			if (err)
-				drbd_err(connection, "Failed to remove path after disconnect: %d\n", err);
-
-			notify_path(connection, path, NOTIFY_DESTROY);
-			call_rcu(&path->rcu, drbd_reclaim_path);
-		}
+		mutex_lock(&connection->resource->conf_update);
+		drbd_remove_all_paths(connection);
+		mutex_unlock(&connection->resource->conf_update);
 		mutex_unlock(&connection->resource->adm_mutex);
 
 		kref_debug_put(&connection->kref_debug, 16);
@@ -3655,7 +3671,6 @@ struct drbd_resource *drbd_create_resource(const char *name,
 	INIT_LIST_HEAD(&resource->peer_ack_work.list);
 	resource->peer_ack_work.cb = w_queue_peer_ack;
 	timer_setup(&resource->peer_ack_timer, peer_ack_timer_fn, 0);
-	timer_setup(&resource->repost_up_to_date_timer, repost_up_to_date_fn, 0);
 	sema_init(&resource->state_sem, 1);
 	resource->role[NOW] = R_SECONDARY;
 	resource->max_node_id = res_opts->node_id;
@@ -3678,6 +3693,7 @@ struct drbd_resource *drbd_create_resource(const char *name,
 	drbd_debugfs_resource_add(resource);
 	resource->cached_min_aggreed_protocol_version = drbd_protocol_version_min;
 	resource->members = NODE_MASK(res_opts->node_id);
+	INIT_WORK(&resource->empty_twopc, drbd_empty_twopc_work_fn);
 
 	ratelimit_state_init(&resource->ratelimit[D_RL_R_GENERIC], 5*HZ, 10);
 
@@ -3809,18 +3825,32 @@ fail:
 	return NULL;
 }
 
-/* free the transport specific members (e.g., sockets) of a connection */
+/**
+ * drbd_transport_shutdown() - Free the transport specific members (e.g., sockets) of a connection
+ *
+ * Must be called with conf_update held.
+ */
 void drbd_transport_shutdown(struct drbd_connection *connection, enum drbd_tr_free_op op)
 {
+	struct drbd_transport *transport = &connection->transport;
+
+	lockdep_assert_held(&connection->resource->conf_update);
+
 	mutex_lock(&connection->mutex[DATA_STREAM]);
 	mutex_lock(&connection->mutex[CONTROL_STREAM]);
 
 	flush_send_buffer(connection, DATA_STREAM);
 	flush_send_buffer(connection, CONTROL_STREAM);
 
-	connection->transport.class->ops.free(&connection->transport, op);
-	if (op == DESTROY_TRANSPORT)
-		drbd_put_transport_class(connection->transport.class);
+	/* Holding conf_update ensures that paths list is not modified concurrently. */
+	transport->class->ops.free(transport, op);
+	if (op == DESTROY_TRANSPORT) {
+		drbd_remove_all_paths(connection);
+
+		/* Wait for the delayed drbd_reclaim_path() calls. */
+		rcu_barrier();
+		drbd_put_transport_class(transport->class);
+	}
 
 	mutex_unlock(&connection->mutex[CONTROL_STREAM]);
 	mutex_unlock(&connection->mutex[DATA_STREAM]);
@@ -3831,6 +3861,8 @@ void drbd_destroy_path(struct kref *kref)
 	struct drbd_path *path = container_of(kref, struct drbd_path, kref);
 	struct drbd_connection *connection =
 		container_of(path->transport, struct drbd_connection, transport);
+
+	connection->transport.class->ops.remove_path(path);
 
 	kref_debug_put(&connection->kref_debug, 17);
 	kref_put(&connection->kref, drbd_destroy_connection);
@@ -4375,6 +4407,7 @@ static int __init drbd_init(void)
 		goto fail;
 	}
 
+	drbd_enable_netns();
 	err = drbd_genl_register();
 	if (err) {
 		pr_err("unable to register generic netlink family\n");

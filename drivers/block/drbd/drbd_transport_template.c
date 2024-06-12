@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd_transport_template.c"
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/module.h>
 #include "drbd_transport.h"

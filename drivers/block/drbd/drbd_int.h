@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd_int.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
   drbd_int.h
@@ -736,7 +737,9 @@ struct drbd_md {
 
 struct drbd_backing_dev {
 	struct block_device *backing_bdev;
+	struct bdev_handle *backing_bdev_handle;
 	struct block_device *md_bdev;
+	struct bdev_handle *md_bdev_handle;
 	struct drbd_md md;
 	struct disk_conf __rcu *disk_conf; /* RCU, for updates: resource->conf_update */
 	sector_t known_size; /* last known size of that backing device */
@@ -815,15 +818,13 @@ enum resource_flag {
 	TWOPC_ABORT_LOCAL,
 	TWOPC_EXECUTED,         /* Commited or aborted */
 	TWOPC_STATE_CHANGE_PENDING, /* set between sending commit and changing local state */
-	TWOPC_AFTER_LOST_PEER_PENDING,  /* set when we change our disk state to
-		* D_CONSISTENT until we have determined whether we can return to
-		* being D_UP_TO_DATE */
+
+	TRY_BECOME_UP_TO_DATE_PENDING,
+
 	DEVICE_WORK_PENDING,	/* tell worker that some device has pending work */
 	PEER_DEVICE_WORK_PENDING,/* tell worker that some peer_device has pending work */
-	RESOURCE_WORK_PENDING,  /* tell worker that some peer_device has pending work */
 
         /* to be used in drbd_post_work() */
-	TWOPC_AFTER_LOST_PEER,  /* try to become D_UP_TO_DATE and/or update resource->members */
 	R_UNREGISTERED,
 	DOWN_IN_PROGRESS,
 	CHECKING_PEERS,
@@ -927,8 +928,11 @@ struct drbd_resource {
 	struct list_head resources;     /* list entry in global resources list */
 	struct res_opts res_opts;
 	int max_node_id;
-	struct mutex conf_update;	/* for read-copy-update of net_conf and disk_conf
-					   and devices, connection and peer_devices lists */
+	/*
+	 * For read-copy-update of net_conf and disk_conf and devices,
+	 * connection, peer_devices and paths lists.
+	 */
+	struct mutex conf_update;
 	struct mutex adm_mutex;		/* mutex to serialize administrative requests */
 	struct mutex open_release;	/* serialize open/release */
 	struct {
@@ -1012,7 +1016,6 @@ struct drbd_resource {
 	spinlock_t listeners_lock;
 
 	struct timer_list peer_ack_timer; /* send a P_PEER_ACK after last completion */
-	struct timer_list repost_up_to_date_timer;
 
 	unsigned int w_cb_nr; /* keeps counting up */
 	struct drbd_thread_timing_details w_timing_details[DRBD_THREAD_DETAILS_HIST];
@@ -1041,6 +1044,19 @@ struct drbd_resource {
 	spinlock_t pp_lock;
 	int pp_vacant;
 	wait_queue_head_t pp_wait;
+
+	/*
+	 * The side effects of an empty state change two-phase commit are:
+	 *
+	 * * A local consistent disk can upgrade to up-to-date when no primary is reachable
+	 *   (or become outdated if the prepare packets reach a primary).
+	 *
+	 * * resource->members are updates
+	 *
+	 * * Faraway nodes might outdate themselves if they learn about the existence of a primary
+	 *   (with access to data) node.
+	 */
+	struct work_struct empty_twopc;
 };
 
 enum drbd_per_connection_ratelimit {
@@ -2069,6 +2085,8 @@ extern int drbd_maybe_khelper(struct drbd_device *, struct drbd_connection *, ch
 extern int drbd_create_peer_device_default_config(struct drbd_peer_device *peer_device);
 extern int drbd_unallocated_index(struct drbd_backing_dev *bdev, int bm_max_peers);
 extern void youngest_and_oldest_opener_to_str(struct drbd_device *device, char *buf, size_t len);
+extern int param_set_drbd_strict_names(const char *s, const struct kernel_param *kp);
+extern void drbd_enable_netns(void);
 
 /* drbd_sender.c */
 extern int drbd_sender(struct drbd_thread *thi);
@@ -2099,7 +2117,6 @@ extern void drbd_check_peers_new_current_uuid(struct drbd_device *);
 extern void drbd_conflict_send_resync_request(struct drbd_peer_request *peer_req);
 extern void drbd_ping_peer(struct drbd_connection *connection);
 extern struct drbd_peer_device *peer_device_by_node_id(struct drbd_device *, int);
-extern void repost_up_to_date_fn(struct timer_list *t);
 extern void drbd_update_mdf_al_disabled(struct drbd_device *device, enum which_state which);
 
 static inline void ov_out_of_sync_print(struct drbd_peer_device *peer_device)
@@ -2276,7 +2293,6 @@ extern bool drbd_al_try_lock_for_transaction(struct drbd_device *device);
 extern int drbd_al_begin_io_nonblock(struct drbd_device *device, struct drbd_interval *i);
 extern void drbd_al_begin_io_commit(struct drbd_device *device);
 extern bool drbd_al_begin_io_fastpath(struct drbd_device *device, struct drbd_interval *i);
-extern int drbd_al_begin_io_for_peer(struct drbd_peer_device *peer_device, struct drbd_interval *i);
 extern bool drbd_al_complete_io(struct drbd_device *device, struct drbd_interval *i);
 extern void drbd_advance_rs_marks(struct drbd_peer_device *, unsigned long);
 extern void drbd_maybe_schedule_on_disk_bitmap_update(struct drbd_peer_device *peer_device,
@@ -2450,16 +2466,6 @@ drbd_peer_device_post_work(struct drbd_peer_device *peer_device, int work_bit)
 		struct drbd_resource *resource = peer_device->device->resource;
 		struct drbd_work_queue *q = &resource->work;
 		if (!test_and_set_bit(PEER_DEVICE_WORK_PENDING, &resource->flags))
-			wake_up(&q->q_wait);
-	}
-}
-
-static inline void
-drbd_post_work(struct drbd_resource *resource, int work_bit)
-{
-	if (!test_and_set_bit(work_bit, &resource->flags)) {
-		struct drbd_work_queue *q = &resource->work;
-		if (!test_and_set_bit(RESOURCE_WORK_PENDING, &resource->flags))
 			wake_up(&q->q_wait);
 	}
 }
@@ -2767,14 +2773,14 @@ static inline struct drbd_connection *first_connection(struct drbd_resource *res
 static inline struct net *drbd_net_assigned_to_connection(struct drbd_connection *connection)
 {
 	struct drbd_path *path;
+	struct net *net;
 
-	path = list_first_entry_or_null(&connection->transport.paths, struct drbd_path, list);
+	rcu_read_lock();
+	path = list_first_or_null_rcu(&connection->transport.paths, struct drbd_path, list);
+	net = path ? path->net : NULL;
+	rcu_read_unlock();
 
-	if (path == NULL) {
-		return NULL;
-	}
-
-	return path->net;
+	return net;
 }
 
 #define NODE_MASK(id) ((u64)1 << (id))
