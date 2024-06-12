@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd-headers/linux/genl_magic_func.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef GENL_MAGIC_FUNC_H
 #define GENL_MAGIC_FUNC_H

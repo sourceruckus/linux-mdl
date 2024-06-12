@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd-kernel-compat/handshake/handshake.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Generic netlink handshake service

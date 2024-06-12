@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd-headers/drbd_meta_data.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef DRBD_META_DATA_H
 #define DRBD_META_DATA_H

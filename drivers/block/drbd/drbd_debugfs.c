@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd_debugfs.c"
 // SPDX-License-Identifier: GPL-2.0-only
 #define pr_fmt(fmt)	KBUILD_MODNAME " debugfs: " fmt
 #include <linux/kernel.h>
@@ -1892,19 +1893,28 @@ static const struct file_operations drbd_refcounts_fops = {
 	.release = single_release,
 };
 
+# 5 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_debugfs.c.patch"
+# 1895 "/scrap/drbd/drbd/drbd_debugfs.c"
 static int drbd_compat_show(struct seq_file *m, void *ignored)
 {
+# 1897 "/scrap/drbd/drbd/drbd_debugfs.c"
+# 7 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_debugfs.c.patch"
+# 1901 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_debugfs.c"
+	seq_puts(m, "sendpage__yes_present\n");
 	seq_puts(m, "kvfree_rcu_mightsleep__no_present\n");
 	seq_puts(m, "sk_use_task_frag__no_present\n");
 	seq_puts(m, "timer_shutdown__no_present\n");
+	seq_puts(m, "bdev_open_by_path__no_present\n");
 	seq_puts(m, "blkdev_get_by_path__no_has_holder_ops\n");
 	seq_puts(m, "block_device_operations_open__no_takes_gendisk\n");
-	seq_puts(m, "blkdev_put__no_has_holder\n");
 	seq_puts(m,
 		 "block_device_operations_release__no_takes_single_argument\n");
 	seq_puts(m, "blk_mode_t__no_present\n");
+	seq_puts(m, "blkdev_put__no_has_holder\n");
 	seq_puts(m, "genl_info_userhdr__no_present\n");
-	seq_puts(m, "tls_get_record_type__no_present__yes_present\n");
+	seq_puts(m, "tls_get_record_type__no_present\n");
+# 20 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_debugfs.c.patch"
+# 1897 "/scrap/drbd/drbd/drbd_debugfs.c"
 	return 0;
 }
 

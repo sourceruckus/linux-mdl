@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd-headers/linux/genl_magic_func-genl_register_mc_group.h"
 #undef GENL_mc_group
 #define GENL_mc_group(group)						\
 static struct genl_multicast_group					\

@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd-kernel-compat/drbd_wrappers.c"
 #include "drbd_wrappers.h"
 
 #ifndef COMPAT_HAVE_PROC_CREATE_SINGLE

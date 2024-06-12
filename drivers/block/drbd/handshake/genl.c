@@ -1,3 +1,4 @@
+# 1 "/scrap/drbd/drbd/drbd-kernel-compat/handshake/genl.c"
 // SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause)
 /* Do not edit directly, auto-generated from: */
 /*	Documentation/netlink/specs/handshake.yaml */
