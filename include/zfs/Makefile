@@ -184,7 +184,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-misc-minor.m4 \
 	$(top_srcdir)/config/kernel-mkdir.m4 \
 	$(top_srcdir)/config/kernel-mknod.m4 \
-	$(top_srcdir)/config/kernel-mm-page-size.m4 \
+	$(top_srcdir)/config/kernel-mm-pagemap.m4 \
 	$(top_srcdir)/config/kernel-objtool.m4 \
 	$(top_srcdir)/config/kernel-pagemap-folio_wait_bit.m4 \
 	$(top_srcdir)/config/kernel-pde-data.m4 \
@@ -218,6 +218,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-totalhigh_pages.m4 \
 	$(top_srcdir)/config/kernel-totalram-pages-func.m4 \
 	$(top_srcdir)/config/kernel-truncate-setsize.m4 \
+	$(top_srcdir)/config/kernel-types.m4 \
 	$(top_srcdir)/config/kernel-user-ns-inum.m4 \
 	$(top_srcdir)/config/kernel-userns-capabilities.m4 \
 	$(top_srcdir)/config/kernel-usleep_range.m4 \
@@ -250,6 +251,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/po.m4 $(top_srcdir)/config/progtest.m4 \
 	$(top_srcdir)/config/toolchain-simd.m4 \
 	$(top_srcdir)/config/user-aio.h.m4 \
+	$(top_srcdir)/config/user-backtrace.m4 \
 	$(top_srcdir)/config/user-clock_gettime.m4 \
 	$(top_srcdir)/config/user-dracut.m4 \
 	$(top_srcdir)/config/user-gettext.m4 \
@@ -261,6 +263,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/user-libfetch.m4 \
 	$(top_srcdir)/config/user-libtirpc.m4 \
 	$(top_srcdir)/config/user-libudev.m4 \
+	$(top_srcdir)/config/user-libunwind.m4 \
 	$(top_srcdir)/config/user-libuuid.m4 \
 	$(top_srcdir)/config/user-makedev.m4 \
 	$(top_srcdir)/config/user-pam.m4 \
@@ -592,6 +595,7 @@ AUTOCONF = ${SHELL} /scrap/zfs/config/missing autoconf
 AUTOHEADER = ${SHELL} /scrap/zfs/config/missing autoheader
 AUTOMAKE = ${SHELL} /scrap/zfs/config/missing automake-1.15
 AWK = gawk
+BACKTRACE_LIBS = 
 CC = gcc
 CCAS = gcc
 CCASDEPMODE = depmode=gcc3
@@ -700,13 +704,16 @@ LIBTOOL = $(SHELL) $(top_builddir)/libtool
 LIBUDEV_CFLAGS = 
 LIBUDEV_LIBS = -ludev
 LIBUDEV_PC = libudev
+LIBUNWIND_CFLAGS = 
+LIBUNWIND_LIBS = 
+LIBUNWIND_PC = 
 LIBUUID_CFLAGS = -I/usr/include/uuid
 LIBUUID_LIBS = -luuid
 LIBUUID_PC = uuid
 LINUX = /scrap/linux-mdl-6.6
 LINUX_OBJ = /scrap/linux-mdl-6.6
 LINUX_SYMBOLS = NONE
-LINUX_VERSION = 6.6.0-mdl+
+LINUX_VERSION = 6.6.52-mdl+
 LIPO = 
 LN_S = ln -s
 LTLIBICONV = -liconv
@@ -735,10 +742,10 @@ OTOOL64 =
 PACKAGE = zfs
 PACKAGE_BUGREPORT = 
 PACKAGE_NAME = zfs
-PACKAGE_STRING = zfs 2.2.4
+PACKAGE_STRING = zfs 2.2.6
 PACKAGE_TARNAME = zfs
 PACKAGE_URL = 
-PACKAGE_VERSION = 2.2.4
+PACKAGE_VERSION = 2.2.6
 PARALLEL = 
 PATH_SEPARATOR = :
 PKG_CONFIG = /usr/bin/pkg-config
@@ -790,17 +797,17 @@ UBSAN_LDFLAGS =
 UBSAN_ZFS = _without_ubsan
 USE_NLS = yes
 VENDOR = ubuntu
-VERSION = 2.2.4
+VERSION = 2.2.6
 WITH_DEBUG = 
 WITH_INVARIANTS = 
 XGETTEXT = /usr/bin/xgettext
 XGETTEXT_015 = /usr/bin/xgettext
 XGETTEXT_EXTRA_OPTIONS = 
 ZFS_CONFIG = all
-ZFS_META_ALIAS = zfs-2.2.4-1
+ZFS_META_ALIAS = zfs-2.2.6-1
 ZFS_META_AUTHOR = OpenZFS
 ZFS_META_DATA = 
-ZFS_META_KVER_MAX = 6.8
+ZFS_META_KVER_MAX = 6.10
 ZFS_META_KVER_MIN = 3.10
 ZFS_META_LICENSE = CDDL
 ZFS_META_LT_AGE = 
@@ -808,7 +815,7 @@ ZFS_META_LT_CURRENT =
 ZFS_META_LT_REVISION = 
 ZFS_META_NAME = zfs
 ZFS_META_RELEASE = 1
-ZFS_META_VERSION = 2.2.4
+ZFS_META_VERSION = 2.2.6
 ZLIB_CFLAGS = 
 ZLIB_LIBS = -lz
 ZLIB_PC = zlib

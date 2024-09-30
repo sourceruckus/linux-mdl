@@ -80,6 +80,9 @@
 /* Define if host toolchain supports AVX512VL */
 #define HAVE_AVX512VL 1
 
+/* backtrace() is available */
+#define HAVE_BACKTRACE 1
+
 /* bdevname() is available */
 /* #undef HAVE_BDEVNAME */
 
@@ -103,6 +106,9 @@
 
 /* bdev_max_secure_erase_sectors() is available */
 #define HAVE_BDEV_MAX_SECURE_ERASE_SECTORS 1
+
+/* bdev_nr_bytes() is available */
+#define HAVE_BDEV_NR_BYTES 1
 
 /* bdev_open_by_path() exists */
 /* #undef HAVE_BDEV_OPEN_BY_PATH */
@@ -176,6 +182,9 @@
 /* blkdev_put() accepts void* as arg 2 */
 #define HAVE_BLKDEV_PUT_HOLDER 1
 
+/* struct queue_limits has a features field */
+/* #undef HAVE_BLKDEV_QUEUE_LIMITS_FEATURES */
+
 /* blkdev_reread_part() exists */
 /* #undef HAVE_BLKDEV_REREAD_PART */
 
@@ -214,6 +223,9 @@
 
 /* blk_queue_discard() is available */
 /* #undef HAVE_BLK_QUEUE_DISCARD */
+
+/* backing_dev_info is available through queue gendisk */
+#define HAVE_BLK_QUEUE_DISK_BDI 1
 
 /* blk_queue_flag_clear() exists */
 #define HAVE_BLK_QUEUE_FLAG_CLEAR 1
@@ -336,6 +348,9 @@
 /* sops->evict_inode() exists */
 #define HAVE_EVICT_INODE 1
 
+/* Define to 1 if you have the `execvpe' function. */
+#define HAVE_EXECVPE 1
+
 /* FALLOC_FL_ZERO_RANGE is defined */
 #define HAVE_FALLOC_FL_ZERO_RANGE 1
 
@@ -408,6 +423,9 @@
 /* Define if the GNU gettext() function is already present or preinstalled. */
 #define HAVE_GETTEXT 1
 
+/* Define to 1 if you have the `gettid' function. */
+/* #undef HAVE_GETTID */
+
 /* iops->get_acl() exists */
 /* #undef HAVE_GET_ACL */
 
@@ -454,13 +472,13 @@
 /* #undef HAVE_INFINITE_RECURSION */
 
 /* inode_get_atime() exists in linux/fs.h */
-/* #undef HAVE_INODE_GET_ATIME */
+#define HAVE_INODE_GET_ATIME 1
 
 /* inode_get_ctime() exists in linux/fs.h */
 #define HAVE_INODE_GET_CTIME 1
 
 /* inode_get_mtime() exists in linux/fs.h */
-/* #undef HAVE_INODE_GET_MTIME */
+#define HAVE_INODE_GET_MTIME 1
 
 /* yes */
 #define HAVE_INODE_LOCK_SHARED 1
@@ -475,7 +493,7 @@
 /* #undef HAVE_INODE_OWNER_OR_CAPABLE_USERNS */
 
 /* inode_set_atime_to_ts() exists in linux/fs.h */
-/* #undef HAVE_INODE_SET_ATIME_TO_TS */
+#define HAVE_INODE_SET_ATIME_TO_TS 1
 
 /* inode_set_ctime_to_ts() exists in linux/fs.h */
 #define HAVE_INODE_SET_CTIME_TO_TS 1
@@ -487,7 +505,7 @@
 #define HAVE_INODE_SET_IVERSION 1
 
 /* inode_set_mtime_to_ts() exists in linux/fs.h */
-/* #undef HAVE_INODE_SET_MTIME_TO_TS */
+#define HAVE_INODE_SET_MTIME_TO_TS 1
 
 /* inode->i_*time's are timespec64 */
 #define HAVE_INODE_TIMESPEC64_TIMES 1
@@ -585,6 +603,9 @@
 /* Define if compiler supports -Winfinite-recursion */
 /* #undef HAVE_KERNEL_INFINITE_RECURSION */
 
+/* kernel defines intptr_t */
+#define HAVE_KERNEL_INTPTR_T 1
+
 /* kernel has kernel_neon_* functions */
 /* #undef HAVE_KERNEL_NEON */
 
@@ -645,6 +666,12 @@
 /* Define if you have [udev] */
 #define HAVE_LIBUDEV 1
 
+/* Define if you have [unwind] */
+/* #undef HAVE_LIBUNWIND */
+
+/* libunwind has unw_get_elf_filename */
+/* #undef HAVE_LIBUNWIND_ELF */
+
 /* Define if you have [uuid] */
 #define HAVE_LIBUUID 1
 
@@ -674,6 +701,9 @@
 
 /* Define to 1 if you have the `mlockall' function. */
 #define HAVE_MLOCKALL 1
+
+/* page_mapping() is available */
+/* #undef HAVE_MM_PAGE_MAPPING */
 
 /* page_size() is available */
 #define HAVE_MM_PAGE_SIZE 1
@@ -720,6 +750,9 @@
 /* posix_acl_valid() wants user namespace */
 #define HAVE_POSIX_ACL_VALID_WITH_NS 1
 
+/* proc_handler ctl_table arg is const */
+/* #undef HAVE_PROC_HANDLER_CTL_TABLE_CONST */
+
 /* proc_ops structure exists */
 #define HAVE_PROC_OPS_STRUCT 1
 
@@ -743,6 +776,9 @@
 
 /* register_shrinker is vararg */
 #define HAVE_REGISTER_SHRINKER_VARARG 1
+
+/* register_sysctl_sz exists */
+#define HAVE_REGISTER_SYSCTL_SZ 1
 
 /* register_sysctl_table exists */
 /* #undef HAVE_REGISTER_SYSCTL_TABLE */
@@ -1162,7 +1198,7 @@
 /* #undef ZFS_IS_GPL_COMPATIBLE */
 
 /* Define the project alias string. */
-#define ZFS_META_ALIAS "zfs-2.2.4-1"
+#define ZFS_META_ALIAS "zfs-2.2.6-1"
 
 /* Define the project author. */
 #define ZFS_META_AUTHOR "OpenZFS"
@@ -1171,7 +1207,7 @@
 /* #undef ZFS_META_DATA */
 
 /* Define the maximum compatible kernel version. */
-#define ZFS_META_KVER_MAX "6.8"
+#define ZFS_META_KVER_MAX "6.10"
 
 /* Define the minimum compatible kernel version. */
 #define ZFS_META_KVER_MIN "3.10"
@@ -1195,7 +1231,7 @@
 #define ZFS_META_RELEASE "1"
 
 /* Define the project version. */
-#define ZFS_META_VERSION "2.2.4"
+#define ZFS_META_VERSION "2.2.6"
 
 /* count is located in percpu_ref.data */
 #define ZFS_PERCPU_REF_COUNT_IN_DATA 1
