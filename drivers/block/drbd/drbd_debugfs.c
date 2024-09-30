@@ -1893,8 +1893,17 @@ static const struct file_operations drbd_refcounts_fops = {
 	.release = single_release,
 };
 
+# 5 "/scrap/drbd/drbd/build-6.6.52-mdl+/.patches/drbd_debugfs.c.patch"
+# 1895 "/scrap/drbd/drbd/drbd_debugfs.c"
 static int drbd_compat_show(struct seq_file *m, void *ignored)
 {
+# 1897 "/scrap/drbd/drbd/drbd_debugfs.c"
+# 7 "/scrap/drbd/drbd/build-6.6.52-mdl+/.patches/drbd_debugfs.c.patch"
+# 1901 "/scrap/drbd/drbd/build-6.6.52-mdl+/drbd_debugfs.c"
+	seq_puts(m, "blk_alloc_disk__no_takes_queue_limits\n");
+	seq_puts(m, "bdev_file_open_by_path__no_present\n");
+# 9 "/scrap/drbd/drbd/build-6.6.52-mdl+/.patches/drbd_debugfs.c.patch"
+# 1897 "/scrap/drbd/drbd/drbd_debugfs.c"
 	return 0;
 }
 

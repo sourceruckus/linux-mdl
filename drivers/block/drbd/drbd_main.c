@@ -641,11 +641,11 @@ int drbd_thread_start(struct drbd_thread *thi)
 	switch (thi->t_state) {
 	case NONE:
 		if (connection)
-			drbd_info(connection, "Starting %s thread (from %s [%d])\n",
-				 thi->name, current->comm, current->pid);
+			drbd_info(connection, "Starting %s thread (peer-node-id %d)\n",
+				 thi->name, connection->peer_node_id);
 		else
-			drbd_info(resource, "Starting %s thread (from %s [%d])\n",
-				 thi->name, current->comm, current->pid);
+			drbd_info(resource, "Starting %s thread (node-id %d)\n",
+				 thi->name, resource->res_opts.node_id);
 
 		init_completion(&thi->stop);
 		D_ASSERT(resource, thi->task == NULL);
@@ -674,11 +674,9 @@ int drbd_thread_start(struct drbd_thread *thi)
 	case EXITING:
 		thi->t_state = RESTARTING;
 		if (connection)
-			drbd_info(connection, "Restarting %s thread (from %s [%d])\n",
-					thi->name, current->comm, current->pid);
+			drbd_info(connection, "Restarting %s thread\n", thi->name);
 		else
-			drbd_info(resource, "Restarting %s thread (from %s [%d])\n",
-					thi->name, current->comm, current->pid);
+			drbd_info(resource, "Restarting %s thread\n", thi->name);
 		fallthrough;
 	case RUNNING:
 	case RESTARTING:
@@ -1580,14 +1578,9 @@ int drbd_send_sizes(struct drbd_peer_device *peer_device,
 		struct block_device *bdev = device->ldev->backing_bdev;
 		struct request_queue *q = bdev_get_queue(bdev);
 
-		struct disk_conf *dc;
-		bool disable_write_same;
-
 		d_size = drbd_get_max_capacity(device, device->ldev, false);
 		rcu_read_lock();
 		u_size = rcu_dereference(device->ldev->disk_conf)->disk_size;
-		dc = rcu_dereference(device->ldev->disk_conf);
-		disable_write_same = dc->disable_write_same;
 		rcu_read_unlock();
 		q_order_type = drbd_queue_order_type(device);
 		max_bio_size = queue_max_hw_sectors(q) << 9;
@@ -2751,8 +2744,8 @@ static int drbd_open(struct gendisk *gd, blk_mode_t mode)
 	struct drbd_device *device = gd->private_data;
 	struct drbd_resource *resource = device->resource;
 	long timeout = resource->res_opts.auto_promote_timeout * HZ / 10;
+	enum drbd_state_rv rv = SS_UNKNOWN_ERROR;
 	bool was_writable;
-	bool did_auto_promote = false;
 	enum ioc_rv r;
 	int err = 0;
 
@@ -2791,7 +2784,6 @@ static int drbd_open(struct gendisk *gd, blk_mode_t mode)
 	}
 
 	if (resource->res_opts.auto_promote) {
-		enum drbd_state_rv rv;
 		/* Allow opening in read-only mode on an unconnected secondary.
 		   This avoids split brain when the drbd volume gets opened
 		   temporarily by udev while it scans for PV signatures. */
@@ -2802,8 +2794,6 @@ static int drbd_open(struct gendisk *gd, blk_mode_t mode)
 				if (rv < SS_SUCCESS)
 					drbd_info(resource, "Auto-promote failed: %s (%d)\n",
 						  drbd_set_st_err_str(rv), rv);
-				else
-					did_auto_promote = true;
 			}
 		} else if ((mode & BLK_OPEN_NDELAY) == 0) {
 			/* Double check peers
@@ -2834,15 +2824,24 @@ static int drbd_open(struct gendisk *gd, blk_mode_t mode)
 		err = -ENODEV;
 	} else if (mode & BLK_OPEN_WRITE) {
 		if (resource->role[NOW] != R_PRIMARY)
-			err = -EROFS;
+			err = rv == SS_INTERRUPTED ? -ERESTARTSYS : -EROFS;
 	} else /* READ access only */ {
 		err = ro_open_cond(device);
 	}
 out:
 	/* still keep mutex, but release ASAP */
-	if (!err)
-		add_opener(device, did_auto_promote);
-	else
+	if (!err) {
+		add_opener(device, rv >= SS_SUCCESS);
+		/* Only interested in first open and last close. */
+		if (device->open_cnt == 1) {
+			struct device_info info;
+
+			device_to_info(&info, device);
+			mutex_lock(&notification_mutex);
+			notify_device_state(NULL, 0, device, &info, NOTIFY_CHANGE);
+			mutex_unlock(&notification_mutex);
+		}
+	} else
 		device->writable = was_writable;
 
 	mutex_unlock(&resource->open_release);
@@ -3001,6 +3000,14 @@ static void drbd_release(struct gendisk *gd)
 	prune_or_free_openers(device, (device->open_cnt == 0) ? 0 : task_pid_nr(current));
 	if (open_rw_cnt == 0 && open_ro_cnt == 0 && resource->auto_promoted_by.pid != 0)
 		memset(&resource->auto_promoted_by, 0, sizeof(resource->auto_promoted_by));
+	if (device->open_cnt == 0) {
+		struct device_info info;
+
+		device_to_info(&info, device);
+		mutex_lock(&notification_mutex);
+		notify_device_state(NULL, 0, device, &info, NOTIFY_CHANGE);
+		mutex_unlock(&notification_mutex);
+	}
 	mutex_unlock(&resource->open_release);
 
 	kref_debug_put(&device->kref_debug, 3);
@@ -3468,6 +3475,23 @@ void drbd_flush_workqueue(struct drbd_work_queue *work_queue)
 	wait_for_completion(&completion_work.done);
 }
 
+void drbd_flush_workqueue_interruptible(struct drbd_device *device)
+{
+	struct completion_work completion_work;
+	int err;
+
+	completion_work.w.cb = w_complete;
+	init_completion(&completion_work.done);
+	drbd_queue_work(&device->resource->work, &completion_work.w);
+	err = wait_for_completion_interruptible(&completion_work.done);
+	if (err == -ERESTARTSYS) {
+		set_bit(ABORT_MDIO, &device->flags);
+		wake_up_all(&device->misc_wait);
+		wait_for_completion(&completion_work.done);
+		clear_bit(ABORT_MDIO, &device->flags);
+	}
+}
+
 struct drbd_resource *drbd_find_resource(const char *name)
 {
 	struct drbd_resource *resource;
@@ -3685,10 +3709,9 @@ struct drbd_resource *drbd_create_resource(const char *name,
 	init_waitqueue_head(&resource->twopc_wait);
 	init_waitqueue_head(&resource->barrier_wait);
 	timer_setup(&resource->twopc_timer, twopc_timer_fn, 0);
-	INIT_LIST_HEAD(&resource->twopc_work.list);
+	INIT_WORK(&resource->twopc_work, nested_twopc_work);
 	drbd_init_workqueue(&resource->work);
 	drbd_thread_init(resource, &resource->worker, drbd_worker, "worker");
-	drbd_thread_start(&resource->worker);
 	spin_lock_init(&resource->current_tle_lock);
 	drbd_debugfs_resource_add(resource);
 	resource->cached_min_aggreed_protocol_version = drbd_protocol_version_min;
@@ -3713,6 +3736,8 @@ struct drbd_resource *drbd_create_resource(const char *name,
 
 	if (set_resource_options(resource, res_opts, "create-resource"))
 		goto fail_free_pages;
+
+	drbd_thread_start(&resource->worker);
 
 	list_add_tail_rcu(&resource->resources, &drbd_resources);
 
@@ -4069,11 +4094,19 @@ enum drbd_ret_code drbd_create_device(struct drbd_config_context *adm_ctx, unsig
 	init_waitqueue_head(&device->al_wait);
 	init_waitqueue_head(&device->seq_wait);
 
+# 5 "/scrap/drbd/drbd/build-6.6.52-mdl+/.patches/drbd_main.c.patch"
+# 4096 "/scrap/drbd/drbd/drbd_main.c"
 	init_rwsem(&device->uuid_sem);
 
+# 4101 "/scrap/drbd/drbd/drbd_main.c"
+# 10 "/scrap/drbd/drbd/build-6.6.52-mdl+/.patches/drbd_main.c.patch"
+# 4102 "/scrap/drbd/drbd/build-6.6.52-mdl+/drbd_main.c"
 	disk = blk_alloc_disk(NUMA_NO_NODE);
-	if (!disk)
+	if (!disk) {
+# 12 "/scrap/drbd/drbd/build-6.6.52-mdl+/.patches/drbd_main.c.patch"
+# 4101 "/scrap/drbd/drbd/drbd_main.c"
 		goto out_no_disk;
+	}
 
 	INIT_WORK(&device->ldev_destroy_work, drbd_ldev_destroy);
 
