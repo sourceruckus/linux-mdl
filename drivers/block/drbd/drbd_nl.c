@@ -206,15 +206,15 @@ static struct drbd_path *first_path(struct drbd_connection *connection)
 #define DRBD_ADM_NEED_PEER_NODE    (1 << 4)
 #define DRBD_ADM_IGNORE_VERSION    (1 << 5)
 static int drbd_adm_prepare(struct drbd_config_context *adm_ctx,
-# 5 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
+# 5 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
 # 208 "/scrap/drbd/drbd/drbd_nl.c"
 	struct sk_buff *skb, struct genl_info *info, unsigned flags)
 {
 # 211 "/scrap/drbd/drbd/drbd_nl.c"
-# 8 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 214 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 8 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 214 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	struct drbd_genlmsghdr *d_in = info->userhdr;
-# 9 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
+# 9 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
 # 211 "/scrap/drbd/drbd/drbd_nl.c"
 	const u8 cmd = info->genlhdr->cmd;
 	int err;
@@ -2207,10 +2207,10 @@ static void drbd_try_suspend_al(struct drbd_device *device)
 static bool should_set_defaults(struct genl_info *info)
 {
 # 2202 "/scrap/drbd/drbd/drbd_nl.c"
-# 17 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2212 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 17 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2212 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	unsigned int flags = ((struct drbd_genlmsghdr *) info->userhdr)->flags;
-# 18 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
+# 18 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
 # 2202 "/scrap/drbd/drbd/drbd_nl.c"
 	return 0 != (flags & DRBD_GENL_F_SET_DEFAULTS);
 }
@@ -2512,10 +2512,10 @@ static int drbd_adm_disk_opts(struct sk_buff *skb, struct genl_info *info)
 	}
 
 # 2502 "/scrap/drbd/drbd/drbd_nl.c"
-# 26 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2517 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 26 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2517 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	kvfree_rcu(old_disk_conf);
-# 27 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
+# 27 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
 # 2502 "/scrap/drbd/drbd/drbd_nl.c"
 	mod_timer(&device->request_timer, jiffies + HZ);
 	goto success;
@@ -2671,6 +2671,8 @@ static int clear_peer_slot(struct drbd_device *device, int peer_node_id, u32 md_
 		freed_index = peer_md->bitmap_index;
 	}
 	buffer = drbd_md_get_buffer(device, __func__); /* lock meta-data IO to superblock */
+	if (buffer == NULL)
+		goto out_no_buffer;
 
 	/* Look for day0 UUID before changing this peer slot to a day0 slot. */
 	day0_md = day0_peer_md(device);
@@ -2715,6 +2717,7 @@ static int clear_peer_slot(struct drbd_device *device, int peer_node_id, u32 md_
 	drbd_md_write(device, buffer);
 	drbd_md_put_buffer(device);
 
+ out_no_buffer:
 	if (free_bitmap_slot)
 		drbd_resume_io(device);
 
@@ -2738,28 +2741,28 @@ bool want_bitmap(struct drbd_peer_device *peer_device)
 }
 
 static void close_backing_dev(struct drbd_device *device,
-# 2724 "/scrap/drbd/drbd/drbd_nl.c"
-# 35 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2744 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2727 "/scrap/drbd/drbd/drbd_nl.c"
+# 35 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2747 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 		struct block_device *bdev, bool do_bd_unlink)
-# 36 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2724 "/scrap/drbd/drbd/drbd_nl.c"
+# 36 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2727 "/scrap/drbd/drbd/drbd_nl.c"
 {
-# 2726 "/scrap/drbd/drbd/drbd_nl.c"
-# 38 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2749 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2729 "/scrap/drbd/drbd/drbd_nl.c"
+# 38 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2752 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	if (!bdev)
-# 39 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2726 "/scrap/drbd/drbd/drbd_nl.c"
+# 39 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2729 "/scrap/drbd/drbd/drbd_nl.c"
 		return;
 	if (do_bd_unlink)
-# 2730 "/scrap/drbd/drbd/drbd_nl.c"
-# 43 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2755 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2733 "/scrap/drbd/drbd/drbd_nl.c"
+# 43 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2758 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 		bd_unlink_disk_holder(bdev, device->vdisk);
 	blkdev_put(bdev, FMODE_READ | FMODE_WRITE | FMODE_EXCL);
-# 45 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2730 "/scrap/drbd/drbd/drbd_nl.c"
+# 45 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2733 "/scrap/drbd/drbd/drbd_nl.c"
 }
 
 void drbd_backing_dev_free(struct drbd_device *device, struct drbd_backing_dev *ldev)
@@ -2770,74 +2773,74 @@ void drbd_backing_dev_free(struct drbd_device *device, struct drbd_backing_dev *
 	drbd_dax_close(ldev);
 
 	close_backing_dev(device,
-# 2741 "/scrap/drbd/drbd/drbd_nl.c"
-# 53 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2776 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2744 "/scrap/drbd/drbd/drbd_nl.c"
+# 53 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2779 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 			  ldev->md_bdev,
-# 54 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2741 "/scrap/drbd/drbd/drbd_nl.c"
+# 54 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2744 "/scrap/drbd/drbd/drbd_nl.c"
 			  ldev->md_bdev != ldev->backing_bdev);
-# 2743 "/scrap/drbd/drbd/drbd_nl.c"
-# 56 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2781 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2746 "/scrap/drbd/drbd/drbd_nl.c"
+# 56 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2784 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	close_backing_dev(device, ldev->backing_bdev, true);
-# 57 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2743 "/scrap/drbd/drbd/drbd_nl.c"
+# 57 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2746 "/scrap/drbd/drbd/drbd_nl.c"
 
 	kfree(ldev->disk_conf);
 	kfree(ldev);
 }
 
-# 2749 "/scrap/drbd/drbd/drbd_nl.c"
-# 63 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2790 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2752 "/scrap/drbd/drbd/drbd_nl.c"
+# 63 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2793 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 static struct block_device *open_backing_dev(struct drbd_device *device,
-# 64 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2749 "/scrap/drbd/drbd/drbd_nl.c"
+# 64 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2752 "/scrap/drbd/drbd/drbd_nl.c"
 		const char *bdev_path, void *claim_ptr)
 {
-# 2755 "/scrap/drbd/drbd/drbd_nl.c"
-# 70 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2796 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2758 "/scrap/drbd/drbd/drbd_nl.c"
+# 70 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2799 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	struct block_device * bdev = blkdev_get_by_path(bdev_path,
 				  FMODE_READ | FMODE_WRITE | FMODE_EXCL,
 				  claim_ptr);
 	if (IS_ERR(bdev)) {
-# 74 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2755 "/scrap/drbd/drbd/drbd_nl.c"
+# 74 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2758 "/scrap/drbd/drbd/drbd_nl.c"
 		drbd_err(device, "open(\"%s\") failed with %ld\n",
-# 2757 "/scrap/drbd/drbd/drbd_nl.c"
-# 76 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2804 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2760 "/scrap/drbd/drbd/drbd_nl.c"
+# 76 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2807 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 				bdev_path, PTR_ERR(bdev));
-# 77 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2757 "/scrap/drbd/drbd/drbd_nl.c"
+# 77 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2760 "/scrap/drbd/drbd/drbd_nl.c"
 	}
-# 2759 "/scrap/drbd/drbd/drbd_nl.c"
-# 79 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2809 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2762 "/scrap/drbd/drbd/drbd_nl.c"
+# 79 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2812 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	return bdev;
-# 80 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2759 "/scrap/drbd/drbd/drbd_nl.c"
+# 80 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2762 "/scrap/drbd/drbd/drbd_nl.c"
 }
 
 static int link_backing_dev(struct drbd_device *device,
-# 2763 "/scrap/drbd/drbd/drbd_nl.c"
-# 84 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2816 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2766 "/scrap/drbd/drbd/drbd_nl.c"
+# 84 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2819 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 		const char *bdev_path, struct block_device *bdev)
-# 85 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2763 "/scrap/drbd/drbd/drbd_nl.c"
+# 85 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2766 "/scrap/drbd/drbd/drbd_nl.c"
 {
-# 2765 "/scrap/drbd/drbd/drbd_nl.c"
-# 87 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2821 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2768 "/scrap/drbd/drbd/drbd_nl.c"
+# 87 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2824 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	int err = bd_link_disk_holder(bdev, device->vdisk);
-# 88 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2765 "/scrap/drbd/drbd/drbd_nl.c"
+# 88 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2768 "/scrap/drbd/drbd/drbd_nl.c"
 	if (err) {
-# 90 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2767 "/scrap/drbd/drbd/drbd_nl.c"
+# 90 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2770 "/scrap/drbd/drbd/drbd_nl.c"
 		drbd_err(device, "bd_link_disk_holder(\"%s\", ...) failed with %d\n",
 				bdev_path, err);
 	}
@@ -2848,46 +2851,46 @@ static int open_backing_devices(struct drbd_device *device,
 		struct disk_conf *new_disk_conf,
 		struct drbd_backing_dev *nbc)
 {
-# 2778 "/scrap/drbd/drbd/drbd_nl.c"
-# 98 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2854 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2781 "/scrap/drbd/drbd/drbd_nl.c"
+# 98 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2857 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	struct block_device *bdev;
-# 99 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2778 "/scrap/drbd/drbd/drbd_nl.c"
+# 99 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2781 "/scrap/drbd/drbd/drbd_nl.c"
 	void *meta_claim_ptr;
 	int err;
 
-# 2783 "/scrap/drbd/drbd/drbd_nl.c"
-# 104 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2861 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2786 "/scrap/drbd/drbd/drbd_nl.c"
+# 104 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2864 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	bdev = open_backing_dev(device, new_disk_conf->backing_dev, device);
 	if (IS_ERR(bdev))
-# 106 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2783 "/scrap/drbd/drbd/drbd_nl.c"
+# 106 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2786 "/scrap/drbd/drbd/drbd_nl.c"
 		return ERR_OPEN_DISK;
 
-# 2786 "/scrap/drbd/drbd/drbd_nl.c"
-# 109 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2868 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2789 "/scrap/drbd/drbd/drbd_nl.c"
+# 109 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2871 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	err = link_backing_dev(device, new_disk_conf->backing_dev, bdev);
-# 110 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2786 "/scrap/drbd/drbd/drbd_nl.c"
+# 110 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2789 "/scrap/drbd/drbd/drbd_nl.c"
 	if (err) {
 		/* close without unlinking; otherwise error path will try to unlink */
-# 2789 "/scrap/drbd/drbd/drbd_nl.c"
-# 113 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2874 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2792 "/scrap/drbd/drbd/drbd_nl.c"
+# 113 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2877 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 		close_backing_dev(device, bdev, false);
-# 114 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2789 "/scrap/drbd/drbd/drbd_nl.c"
+# 114 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2792 "/scrap/drbd/drbd/drbd_nl.c"
 		return ERR_OPEN_DISK;
 	}
-# 2793 "/scrap/drbd/drbd/drbd_nl.c"
-# 118 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2880 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2796 "/scrap/drbd/drbd/drbd_nl.c"
+# 118 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2883 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	nbc->backing_bdev = bdev;
-# 119 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2793 "/scrap/drbd/drbd/drbd_nl.c"
+# 119 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2796 "/scrap/drbd/drbd/drbd_nl.c"
 
 	/* meta_claim_ptr: device, if claimed exclusively; shared drbd_m_holder,
 	 * if potentially shared with other drbd minors
@@ -2902,42 +2905,43 @@ static int open_backing_devices(struct drbd_device *device,
 	 * should check it for you already; but if you don't, or
 	 * someone fooled it, we need to double check here)
 	 */
-# 2809 "/scrap/drbd/drbd/drbd_nl.c"
-# 128 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2908 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2812 "/scrap/drbd/drbd/drbd_nl.c"
+# 128 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2911 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	bdev = open_backing_dev(device, new_disk_conf->meta_dev, meta_claim_ptr);
 	if (IS_ERR(bdev))
-# 130 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2809 "/scrap/drbd/drbd/drbd_nl.c"
+# 130 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2812 "/scrap/drbd/drbd/drbd_nl.c"
 		return ERR_OPEN_MD_DISK;
 
 	/* avoid double bd_claim_by_disk() for the same (source,target) tuple,
 	 * as would happen with internal metadata. */
-# 2815 "/scrap/drbd/drbd/drbd_nl.c"
-# 136 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2917 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2818 "/scrap/drbd/drbd/drbd_nl.c"
+# 136 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2920 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	if (bdev != nbc->backing_bdev) {
-		err = link_backing_dev(device, new_disk_conf->meta_dev, bdev);
-# 138 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2815 "/scrap/drbd/drbd/drbd_nl.c"
+		err = link_backing_dev(device, new_disk_conf->meta_dev,
+				       bdev);
+# 139 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2818 "/scrap/drbd/drbd/drbd_nl.c"
 		if (err) {
 			/* close without unlinking; otherwise error path will try to unlink */
-# 2818 "/scrap/drbd/drbd/drbd_nl.c"
-# 141 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2924 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2821 "/scrap/drbd/drbd/drbd_nl.c"
+# 142 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2928 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 			close_backing_dev(device, bdev, false);
-# 142 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2818 "/scrap/drbd/drbd/drbd_nl.c"
+# 143 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2821 "/scrap/drbd/drbd/drbd_nl.c"
 			return ERR_OPEN_MD_DISK;
 		}
 	}
 
-# 2824 "/scrap/drbd/drbd/drbd_nl.c"
-# 148 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2932 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 2827 "/scrap/drbd/drbd/drbd_nl.c"
+# 149 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2936 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	nbc->md_bdev = bdev;
-# 149 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 2824 "/scrap/drbd/drbd/drbd_nl.c"
+# 150 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 2827 "/scrap/drbd/drbd/drbd_nl.c"
 	return NO_ERROR;
 }
 
@@ -3736,8 +3740,15 @@ static int adm_detach(struct drbd_device *device, bool force, bool intentional_d
 	drbd_suspend_io(device, READ_AND_WRITE); /* so no-one is stuck in drbd_al_begin_io */
 	retcode = stable_state_change(device->resource,
 		change_disk_state(device, D_DETACHING,
-			CS_VERBOSE | CS_WAIT_COMPLETE | CS_SERIALIZE, tag, &err_str));
-	/* D_DETACHING will transition to DISKLESS. */
+			CS_VERBOSE | CS_SERIALIZE, tag, &err_str));
+	/*
+	 * D_DETACHING will transition to DISKLESS.
+	 * I did not use CS_WAIT_COMPLETE above since that would deadlock on a backing device that
+	 * does not finish the I/O requests from writing to internal meta-data.  Instead, I
+	 * explicitly flush the worker queue here to ensure w_after_state_change() is completed.
+	 */
+	drbd_flush_workqueue_interruptible(device);
+
 	drbd_resume_io(device);
 	ret = wait_event_interruptible(device->misc_wait,
 			get_disk_state(device) != D_DETACHING);
@@ -4111,12 +4122,12 @@ static int drbd_adm_net_opts(struct sk_buff *skb, struct genl_info *info)
 
 	mutex_unlock(&connection->mutex[DATA_STREAM]);
 	mutex_unlock(&connection->resource->conf_update);
-# 3998 "/scrap/drbd/drbd/drbd_nl.c"
-# 157 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 4117 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 4008 "/scrap/drbd/drbd/drbd_nl.c"
+# 158 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 4128 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	kvfree_rcu(old_net_conf);
-# 158 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 3998 "/scrap/drbd/drbd/drbd_nl.c"
+# 159 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 4008 "/scrap/drbd/drbd/drbd_nl.c"
 
 	if (connection->cstate[NOW] >= C_CONNECTED) {
 		struct drbd_peer_device *peer_device;
@@ -4252,12 +4263,12 @@ static int drbd_adm_peer_device_opts(struct sk_buff *skb, struct genl_info *info
 
 	rcu_assign_pointer(peer_device->conf, new_peer_device_conf);
 
-# 4134 "/scrap/drbd/drbd/drbd_nl.c"
-# 166 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 4258 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 4144 "/scrap/drbd/drbd/drbd_nl.c"
+# 167 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 4269 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	kvfree_rcu(old_peer_device_conf);
-# 167 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 4134 "/scrap/drbd/drbd/drbd_nl.c"
+# 168 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 4144 "/scrap/drbd/drbd/drbd_nl.c"
 	kfree(old_plan);
 
 	/* No need to call drbd_send_sync_param() here. The values in
@@ -4345,6 +4356,7 @@ static void __device_to_info(struct device_info *info,
 			     struct drbd_device *device)
 {
 	info->is_intentional_diskless = device->device_conf.intentional_diskless;
+	info->dev_is_open = device->open_cnt != 0;
 
 	rcu_read_lock();
 	if (get_ldev(device)) {
@@ -4359,7 +4371,7 @@ static void __device_to_info(struct device_info *info,
 	rcu_read_unlock();
 }
 
-static void device_to_info(struct device_info *info,
+void device_to_info(struct device_info *info,
 			   struct drbd_device *device)
 {
 	info->dev_disk_state = device->disk_state[NOW];
@@ -5340,12 +5352,12 @@ static int drbd_adm_resize(struct sk_buff *skb, struct genl_info *info)
 		new_disk_conf->disk_size = (sector_t)rs.resize_size;
 		rcu_assign_pointer(device->ldev->disk_conf, new_disk_conf);
 		mutex_unlock(&device->resource->conf_update);
-# 5217 "/scrap/drbd/drbd/drbd_nl.c"
-# 175 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 5346 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 5228 "/scrap/drbd/drbd/drbd_nl.c"
+# 176 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 5358 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 		kvfree_rcu(old_disk_conf);
-# 176 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 5217 "/scrap/drbd/drbd/drbd_nl.c"
+# 177 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 5228 "/scrap/drbd/drbd/drbd_nl.c"
 		new_disk_conf = NULL;
 	}
 
@@ -6989,12 +7001,12 @@ out_no_unlock:
 static int drbd_adm_new_minor(struct sk_buff *skb, struct genl_info *info)
 {
 	struct drbd_config_context adm_ctx;
-# 6861 "/scrap/drbd/drbd/drbd_nl.c"
-# 184 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 6995 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 6872 "/scrap/drbd/drbd/drbd_nl.c"
+# 185 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 7007 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	struct drbd_genlmsghdr *dh = info->userhdr;
-# 185 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 6861 "/scrap/drbd/drbd/drbd_nl.c"
+# 186 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 6872 "/scrap/drbd/drbd/drbd_nl.c"
 	struct device_conf device_conf;
 	struct drbd_resource *resource;
 	struct drbd_device *device;
@@ -7165,13 +7177,13 @@ static int adm_del_resource(struct drbd_resource *resource)
 	mutex_unlock(&resources_mutex);
 
 	cancel_work_sync(&resource->empty_twopc);
-# 7033 "/scrap/drbd/drbd/drbd_nl.c"
-# 194 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 7171 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 7044 "/scrap/drbd/drbd/drbd_nl.c"
+# 195 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 7183 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	del_timer_sync(&resource->twopc_timer);
 	del_timer_sync(&resource->peer_ack_timer);
-# 196 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 7033 "/scrap/drbd/drbd/drbd_nl.c"
+# 197 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 7044 "/scrap/drbd/drbd/drbd_nl.c"
 	call_rcu(&resource->rcu, drbd_reclaim_resource);
 
 	mutex_lock(&notification_mutex);
@@ -7929,12 +7941,12 @@ static int drbd_adm_rename_resource(struct sk_buff *skb, struct genl_info *info)
 	}
 	old_res_name = resource->name;
 	resource->name = new_res_name;
-# 7791 "/scrap/drbd/drbd/drbd_nl.c"
-# 204 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 7935 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_nl.c"
+# 7802 "/scrap/drbd/drbd/drbd_nl.c"
+# 205 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 7947 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_nl.c"
 	kvfree_rcu(old_res_name);
-# 205 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_nl.c.patch"
-# 7791 "/scrap/drbd/drbd/drbd_nl.c"
+# 206 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_nl.c.patch"
+# 7802 "/scrap/drbd/drbd/drbd_nl.c"
 
 	drbd_debugfs_resource_rename(resource, new_res_name);
 

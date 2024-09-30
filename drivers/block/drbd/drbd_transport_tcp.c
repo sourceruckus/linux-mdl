@@ -24,11 +24,11 @@
 #include <linux/drbd_config.h>
 #include <linux/tls.h>
 #include <net/tcp.h>
-# 5 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 5 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
 # 26 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 #include <net/handshake.h>
 #include <net/tls.h>
-# 8 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 8 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
 # 29 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 #include "drbd_protocol.h"
 #include "drbd_transport.h"
@@ -270,8 +270,8 @@ static int _dtt_send(struct drbd_tcp_transport *tcp_transport, struct socket *so
 }
 
 # 268 "/scrap/drbd/drbd/drbd_transport_tcp.c"
-# 15 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 275 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_transport_tcp.c"
+# 15 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 275 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_transport_tcp.c"
 #define TLS_RECORD_TYPE_ALERT 0x15
 #define TLS_RECORD_TYPE_DATA 0x17
 #define TLS_ALERT_LEVEL_FATAL 2
@@ -284,7 +284,7 @@ static int _dtt_send(struct drbd_tcp_transport *tcp_transport, struct socket *so
   *
   * Returns zero or a TLS_RECORD_TYPE value.
   */
-static u8 tls_get_record_type(const struct sock *sk, const struct cmsghdr *cmsg){
+u8 tls_get_record_type(const struct sock *sk, const struct cmsghdr *cmsg){
 	if (cmsg->cmsg_level != SOL_TLS)
 		return 0;
 	if (cmsg->cmsg_type != TLS_GET_RECORD_TYPE)
@@ -302,8 +302,8 @@ static u8 tls_get_record_type(const struct sock *sk, const struct cmsghdr *cmsg)
   * @description: OUT - TLS AlertDescription value
   *
   */
-static void tls_alert_recv(const struct sock *sk, const struct msghdr *msg,
-			   u8 *level, u8 *description)
+void tls_alert_recv(const struct sock *sk, const struct msghdr *msg,
+		    u8 *level, u8 *description)
 {
 	const struct kvec *iov = msg->msg_iter.kvec;
 	u8 *data = iov->iov_base;
@@ -312,7 +312,7 @@ static void tls_alert_recv(const struct sock *sk, const struct msghdr *msg,
 	*description = data[1];
 }
 
-# 55 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 55 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
 # 268 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 static int dtt_recv_short(struct socket *socket, void *buf, size_t size, int flags)
 {
@@ -1366,7 +1366,7 @@ randomize:
 	dsocket->sk->sk_allocation = GFP_NOIO;
 	csocket->sk->sk_allocation = GFP_NOIO;
 
-# 65 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 65 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
 # 1323 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 	dsocket->sk->sk_priority = TC_PRIO_INTERACTIVE_BULK;
 	csocket->sk->sk_priority = TC_PRIO_INTERACTIVE;
@@ -1509,10 +1509,10 @@ static int dtt_send_page(struct drbd_transport *transport, enum drbd_stream stre
 		container_of(transport, struct drbd_tcp_transport, transport);
 	struct socket *socket = tcp_transport->stream[stream];
 # 1465 "/scrap/drbd/drbd/drbd_transport_tcp.c"
-# 74 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 1514 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_transport_tcp.c"
+# 74 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1514 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_transport_tcp.c"
 	struct msghdr msg = { .msg_flags = msg_flags | MSG_NOSIGNAL };
-# 75 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 75 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
 # 1465 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 	int len = size;
 	int err = -EIO;
@@ -1525,11 +1525,11 @@ static int dtt_send_page(struct drbd_transport *transport, enum drbd_stream stre
 		int sent;
 
 # 1479 "/scrap/drbd/drbd/drbd_transport_tcp.c"
-# 86 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 1530 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_transport_tcp.c"
+# 86 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1530 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_transport_tcp.c"
 		sent = socket->ops->sendpage(socket, page, offset, len,
 					     msg.msg_flags);
-# 88 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 88 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
 # 1479 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 		if (sent <= 0) {
 			if (sent == -EAGAIN) {

@@ -5249,6 +5249,7 @@ static enum sync_strategy drbd_sync_handshake(struct drbd_peer_device *peer_devi
 	enum drbd_disk_state peer_disk_state = peer_state.disk;
 	int required_protocol;
 	enum sync_strategy strategy_from_user = discard_my_data_to_strategy(peer_device);
+	bool need_full_sync_after_split_brain;
 
 	strategy = drbd_handshake(peer_device, &rule, &peer_node_id, true);
 
@@ -5281,10 +5282,14 @@ static enum sync_strategy drbd_sync_handshake(struct drbd_peer_device *peer_devi
 	rr_conflict = nc->rr_conflict;
 	rcu_read_unlock();
 
+	/* Evaluate the original strategy,
+	 * before it is re-mapped by additional configuration below.
+	 */
+	need_full_sync_after_split_brain = (strategy == SPLIT_BRAIN_DISCONNECT);
+
 	if (strategy == SPLIT_BRAIN_AUTO_RECOVER || (strategy == SPLIT_BRAIN_DISCONNECT && always_asbp)) {
 		int pcount = (device->resource->role[NOW] == R_PRIMARY)
 			   + (peer_role == R_PRIMARY);
-		int forced = (strategy == SPLIT_BRAIN_DISCONNECT);
 
 		if (device->resource->res_opts.quorum != QOU_OFF &&
 		    connection->agreed_pro_version >= 113) {
@@ -5310,7 +5315,7 @@ static enum sync_strategy drbd_sync_handshake(struct drbd_peer_device *peer_devi
 			drbd_warn(peer_device, "Split-Brain detected, %d primaries, "
 			     "automatically solved. Sync from %s node\n",
 			     pcount, strategy_descriptor(strategy).is_sync_target ? "peer" : "this");
-			if (forced) {
+			if (need_full_sync_after_split_brain) {
 				if (!strategy_descriptor(strategy).full_sync_equivalent) {
 					drbd_alert(peer_device, "Want full sync but cannot decide direction, dropping connection!\n");
 					return SPLIT_BRAIN_DISCONNECT;
@@ -5323,9 +5328,17 @@ static enum sync_strategy drbd_sync_handshake(struct drbd_peer_device *peer_devi
 	}
 
 	if (strategy == SPLIT_BRAIN_DISCONNECT && strategy_from_user != UNDETERMINED) {
-		strategy = strategy_from_user;
-		drbd_warn(peer_device, "Split-Brain detected, manually solved. "
-			  "Sync from %s node\n",
+		/* strategy_from_user via "--discard-my-data" is either
+		 * SYNC_TARGET_USE_BITMAP or SYNC_SOURCE_USE_BITMAP.
+		 * But here we do no longer have a relevant bitmap anymore.
+		 * Map to their "full sync equivalent".
+		 */
+		if (need_full_sync_after_split_brain)
+			strategy = strategy_descriptor(strategy_from_user).full_sync_equivalent;
+		else
+			strategy = strategy_from_user;
+		drbd_warn(peer_device, "Split-Brain detected, manually solved. %s from %s node\n",
+			  need_full_sync_after_split_brain ? "Full sync" : "Sync",
 			  strategy_descriptor(strategy).is_sync_target ? "peer" : "this");
 	}
 
@@ -5555,16 +5568,16 @@ static int receive_protocol(struct drbd_connection *connection, struct packet_in
 
 	if (strcmp(old_net_conf->integrity_alg, integrity_alg))
 		drbd_info(connection, "peer data-integrity-alg: %s\n",
-# 5 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_receiver.c.patch"
-# 5557 "/scrap/drbd/drbd/drbd_receiver.c"
+# 5 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_receiver.c.patch"
+# 5570 "/scrap/drbd/drbd/drbd_receiver.c"
 			  integrity_alg[0] ? integrity_alg : "(none)");
 
-# 5560 "/scrap/drbd/drbd/drbd_receiver.c"
-# 8 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_receiver.c.patch"
-# 5563 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_receiver.c"
+# 5573 "/scrap/drbd/drbd/drbd_receiver.c"
+# 8 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_receiver.c.patch"
+# 5576 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_receiver.c"
 	kvfree_rcu(old_net_conf);
-# 9 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_receiver.c.patch"
-# 5560 "/scrap/drbd/drbd/drbd_receiver.c"
+# 9 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_receiver.c.patch"
+# 5573 "/scrap/drbd/drbd/drbd_receiver.c"
 	return 0;
 
 disconnect_rcu_unlock:
@@ -6021,12 +6034,12 @@ static int receive_sizes(struct drbd_connection *connection, struct packet_info 
 			new_disk_conf->disk_size = p_usize;
 
 			rcu_assign_pointer(device->ldev->disk_conf, new_disk_conf);
-# 6017 "/scrap/drbd/drbd/drbd_receiver.c"
-# 17 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_receiver.c.patch"
-# 6027 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_receiver.c"
+# 6030 "/scrap/drbd/drbd/drbd_receiver.c"
+# 17 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_receiver.c.patch"
+# 6040 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_receiver.c"
 			kvfree_rcu(old_disk_conf);
-# 18 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_receiver.c.patch"
-# 6017 "/scrap/drbd/drbd/drbd_receiver.c"
+# 18 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_receiver.c.patch"
+# 6030 "/scrap/drbd/drbd/drbd_receiver.c"
 
 			drbd_info(peer_device, "Peer sets u_size to %llu sectors (old: %llu)\n",
 				 (unsigned long long)p_usize, (unsigned long long)my_usize);
@@ -6940,15 +6953,12 @@ static int receive_req_state(struct drbd_connection *connection, struct packet_i
 	return 0;
 }
 
-static int abort_twopc_work(struct drbd_work *work, int cancel)
+static void drbd_abort_twopc(struct drbd_resource *resource)
 {
-	struct drbd_resource *resource =
-		container_of(work, struct drbd_resource, twopc_work);
 	struct drbd_connection *connection;
 	int initiator_node_id;
 	bool is_connect;
 
-	write_lock_irq(&resource->state_rwlock);
 	initiator_node_id = resource->twopc_reply.initiator_node_id;
 	if (initiator_node_id != -1) {
 		connection = drbd_get_connection_by_node_id(resource, initiator_node_id);
@@ -6957,11 +6967,7 @@ static int abort_twopc_work(struct drbd_work *work, int cancel)
 		resource->remote_state_change = false;
 		resource->twopc_reply.initiator_node_id = -1;
 		resource->twopc_parent_nodes = 0;
-	}
-	resource->twopc_work.cb = NULL;
-	write_unlock_irq(&resource->state_rwlock);
 
-	if (initiator_node_id != -1) {
 		if (connection) {
 			if (is_connect)
 				abort_connect(connection);
@@ -6974,7 +6980,6 @@ static int abort_twopc_work(struct drbd_work *work, int cancel)
 	}
 
 	wake_up_all(&resource->twopc_wait);
-	return 0;
 }
 
 void twopc_timer_fn(struct timer_list *t)
@@ -6983,11 +6988,10 @@ void twopc_timer_fn(struct timer_list *t)
 	unsigned long irq_flags;
 
 	write_lock_irqsave(&resource->state_rwlock, irq_flags);
-	if (resource->twopc_work.cb == NULL) {
+	if (!test_bit(TWOPC_WORK_PENDING, &resource->flags)) {
 		drbd_err(resource, "Two-phase commit %u timeout\n",
 			   resource->twopc_reply.tid);
-		resource->twopc_work.cb = &abort_twopc_work;
-		drbd_queue_work(&resource->work, &resource->twopc_work);
+		drbd_abort_twopc(resource);
 	} else {
 		mod_timer(&resource->twopc_timer, jiffies + HZ/10);
 	}
@@ -7303,12 +7307,12 @@ drbd_commit_size_change(struct drbd_device *device, struct resize_parms *rs, u64
 		new_disk_conf->disk_size = tr->user_size;
 
 		rcu_assign_pointer(device->ldev->disk_conf, new_disk_conf);
-# 7294 "/scrap/drbd/drbd/drbd_receiver.c"
-# 26 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_receiver.c.patch"
-# 7309 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_receiver.c"
+# 7298 "/scrap/drbd/drbd/drbd_receiver.c"
+# 26 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_receiver.c.patch"
+# 7313 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_receiver.c"
 		kvfree_rcu(old_disk_conf);
-# 27 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_receiver.c.patch"
-# 7294 "/scrap/drbd/drbd/drbd_receiver.c"
+# 27 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_receiver.c.patch"
+# 7298 "/scrap/drbd/drbd/drbd_receiver.c"
 	}
 cont:
 	dd = drbd_determine_dev_size(device, tr->new_size, tr->dds_flags | DDSF_2PC, rs);
@@ -7554,14 +7558,10 @@ retry:
 				} else {
 					/* if a node sends us a prepare, that means he has
 					   prepared this himsilf successfully. */
+					write_lock_irq(&resource->state_rwlock);
 					set_bit(TWOPC_YES, &connection->flags);
-
-					if (cluster_wide_reply_ready(resource)) {
-						if (resource->twopc_work.cb == NULL) {
-							resource->twopc_work.cb = nested_twopc_work;
-							drbd_queue_work(&resource->work, &resource->twopc_work);
-						}
-					}
+					drbd_maybe_cluster_wide_reply(resource);
+					write_unlock_irq(&resource->state_rwlock);
 				}
 			}
 		} else {
@@ -7672,7 +7672,9 @@ retry:
 
 	switch(pi->cmd) {
 	case P_TWOPC_PREPARE:
-		drbd_info(connection, "Preparing remote state change %u\n", reply->tid);
+		drbd_print_cluster_wide_state_change(resource, "Preparing remote state change",
+				reply->tid, reply->initiator_node_id, reply->target_node_id,
+				state_change->mask, state_change->val);
 		flags |= CS_PREPARE;
 		break;
 	case P_TWOPC_PREP_RSZ:
@@ -7836,16 +7838,9 @@ static void finish_nested_twopc(struct drbd_connection *connection)
 
 	wake_up_all(&resource->state_wait);
 
-	if (!resource->remote_state_change)
-		return;
-
-	if (resource->twopc_parent_nodes == 0) /* we are the initiator, no nesting here */
-		return;
-
-	if (cluster_wide_reply_ready(resource) && resource->twopc_work.cb == NULL) {
-		resource->twopc_work.cb = nested_twopc_work;
-		drbd_queue_work(&resource->work, &resource->twopc_work);
-	}
+	write_lock_irq(&resource->state_rwlock);
+	drbd_maybe_cluster_wide_reply(resource);
+	write_unlock_irq(&resource->state_rwlock);
 }
 
 static bool uuid_in_peer_history(struct drbd_peer_device *peer_device, u64 uuid)
@@ -9746,7 +9741,12 @@ static void conn_disconnect(struct drbd_connection *connection)
 		rcu_read_unlock();
 
 		peer_device_disconnected(peer_device);
-		drbd_reconsider_queue_parameters(device, device->ldev);
+		if (get_ldev(device)) {
+			drbd_reconsider_queue_parameters(device, device->ldev);
+			put_ldev(device);
+		} else {
+			drbd_reconsider_queue_parameters(device, NULL);
+		}
 
 		kref_put(&device->kref, drbd_destroy_device);
 		rcu_read_lock();
@@ -10326,16 +10326,7 @@ static int got_twopc_reply(struct drbd_connection *connection, struct packet_inf
 			set_bit(TWOPC_NO, &connection->flags);
 		else if (pi->cmd == P_TWOPC_RETRY)
 			set_bit(TWOPC_RETRY, &connection->flags);
-		if (cluster_wide_reply_ready(resource)) {
-			int my_node_id = resource->res_opts.node_id;
-			if (resource->twopc_reply.initiator_node_id == my_node_id) {
-				wake_up_all(&resource->state_wait);
-			} else if (resource->twopc_work.cb == NULL) {
-				/* in case the timeout timer was not quicker in queuing the work... */
-				resource->twopc_work.cb = nested_twopc_work;
-				drbd_queue_work(&resource->work, &resource->twopc_work);
-			}
-		}
+		drbd_maybe_cluster_wide_reply(resource);
 	} else {
 		dynamic_drbd_dbg(connection, "Ignoring %s reply for state change %u\n",
 			   drbd_packet_name(pi->cmd),
@@ -10353,16 +10344,7 @@ void twopc_connection_down(struct drbd_connection *connection)
 	if (resource->twopc_reply.initiator_node_id != -1 &&
 	    test_bit(TWOPC_PREPARED, &connection->flags)) {
 		set_bit(TWOPC_RETRY, &connection->flags);
-		if (cluster_wide_reply_ready(resource)) {
-			int my_node_id = resource->res_opts.node_id;
-			if (resource->twopc_reply.initiator_node_id == my_node_id) {
-				wake_up_all(&resource->state_wait);
-			} else if (resource->twopc_work.cb == NULL) {
-				/* in case the timeout timer was not quicker in queuing the work... */
-				resource->twopc_work.cb = nested_twopc_work;
-				drbd_queue_work(&resource->work, &resource->twopc_work);
-			}
-		}
+		drbd_maybe_cluster_wide_reply(resource);
 	}
 }
 
@@ -10454,7 +10436,6 @@ validate_req_change_req_state(struct drbd_peer_device *peer_device, u64 id, sect
 static int got_BlockAck(struct drbd_connection *connection, struct packet_info *pi)
 {
 	struct drbd_peer_device *peer_device;
-	struct drbd_device *device;
 	struct p_block_ack *p = pi->data;
 	sector_t sector = be64_to_cpu(p->sector);
 	enum drbd_req_event what;
@@ -10462,7 +10443,6 @@ static int got_BlockAck(struct drbd_connection *connection, struct packet_info *
 	peer_device = conn_peer_device(connection, pi->vnr);
 	if (!peer_device)
 		return -EIO;
-	device = peer_device->device;
 
 	update_peer_seq(peer_device, be32_to_cpu(p->seq_num));
 
@@ -10545,7 +10525,6 @@ static int got_RSWriteAck(struct drbd_connection *connection, struct packet_info
 static int got_NegAck(struct drbd_connection *connection, struct packet_info *pi)
 {
 	struct drbd_peer_device *peer_device;
-	struct drbd_device *device;
 	struct p_block_ack *p = pi->data;
 	sector_t sector = be64_to_cpu(p->sector);
 	int size = be32_to_cpu(p->blksize);
@@ -10558,7 +10537,6 @@ static int got_NegAck(struct drbd_connection *connection, struct packet_info *pi
 	peer_device = conn_peer_device(connection, pi->vnr);
 	if (!peer_device)
 		return -EIO;
-	device = peer_device->device;
 
 	update_peer_seq(peer_device, be32_to_cpu(p->seq_num));
 
@@ -10581,14 +10559,12 @@ static int got_NegAck(struct drbd_connection *connection, struct packet_info *pi
 static int got_NegDReply(struct drbd_connection *connection, struct packet_info *pi)
 {
 	struct drbd_peer_device *peer_device;
-	struct drbd_device *device;
 	struct p_block_ack *p = pi->data;
 	sector_t sector = be64_to_cpu(p->sector);
 
 	peer_device = conn_peer_device(connection, pi->vnr);
 	if (!peer_device)
 		return -EIO;
-	device = peer_device->device;
 
 	update_peer_seq(peer_device, be32_to_cpu(p->seq_num));
 

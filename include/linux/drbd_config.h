@@ -10,7 +10,7 @@
 
 extern const char *drbd_buildtag(void);
 
-#define REL_VERSION "9.2.10"
+#define REL_VERSION "9.2.11"
 #define PRO_VERSION_MIN 86
 #define PRO_VERSION_MAX 122
 

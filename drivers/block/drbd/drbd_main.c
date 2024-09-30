@@ -53,16 +53,16 @@
 #include "drbd_vli.h"
 #include "drbd_debugfs.h"
 #include "drbd_meta_data.h"
-# 5 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
+# 5 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
 # 55 "/scrap/drbd/drbd/drbd_main.c"
 #include "drbd_dax_pmem.h"
 
 # 59 "/scrap/drbd/drbd/drbd_main.c"
-# 9 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 61 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 9 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 61 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 static int drbd_open(struct block_device *bdev, fmode_t mode);
 static void drbd_release(struct gendisk *gd, fmode_t mode);
-# 11 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
+# 11 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
 # 59 "/scrap/drbd/drbd/drbd_main.c"
 static void md_sync_timer_fn(struct timer_list *t);
 static int w_bitmap_io(struct drbd_work *w, int unused);
@@ -648,11 +648,11 @@ int drbd_thread_start(struct drbd_thread *thi)
 	switch (thi->t_state) {
 	case NONE:
 		if (connection)
-			drbd_info(connection, "Starting %s thread (from %s [%d])\n",
-				 thi->name, current->comm, current->pid);
+			drbd_info(connection, "Starting %s thread (peer-node-id %d)\n",
+				 thi->name, connection->peer_node_id);
 		else
-			drbd_info(resource, "Starting %s thread (from %s [%d])\n",
-				 thi->name, current->comm, current->pid);
+			drbd_info(resource, "Starting %s thread (node-id %d)\n",
+				 thi->name, resource->res_opts.node_id);
 
 		init_completion(&thi->stop);
 		D_ASSERT(resource, thi->task == NULL);
@@ -681,11 +681,9 @@ int drbd_thread_start(struct drbd_thread *thi)
 	case EXITING:
 		thi->t_state = RESTARTING;
 		if (connection)
-			drbd_info(connection, "Restarting %s thread (from %s [%d])\n",
-					thi->name, current->comm, current->pid);
+			drbd_info(connection, "Restarting %s thread\n", thi->name);
 		else
-			drbd_info(resource, "Restarting %s thread (from %s [%d])\n",
-					thi->name, current->comm, current->pid);
+			drbd_info(resource, "Restarting %s thread\n", thi->name);
 		fallthrough;
 	case RUNNING:
 	case RESTARTING:
@@ -1587,14 +1585,9 @@ int drbd_send_sizes(struct drbd_peer_device *peer_device,
 		struct block_device *bdev = device->ldev->backing_bdev;
 		struct request_queue *q = bdev_get_queue(bdev);
 
-		struct disk_conf *dc;
-		bool disable_write_same;
-
 		d_size = drbd_get_max_capacity(device, device->ldev, false);
 		rcu_read_lock();
 		u_size = rcu_dereference(device->ldev->disk_conf)->disk_size;
-		dc = rcu_dereference(device->ldev->disk_conf);
-		disable_write_same = dc->disable_write_same;
 		rcu_read_unlock();
 		q_order_type = drbd_queue_order_type(device);
 		max_bio_size = queue_max_hw_sectors(q) << 9;
@@ -2664,20 +2657,20 @@ enum ioc_rv {
 	IOC_ABORT = 2,
 };
 
-# 2660 "/scrap/drbd/drbd/drbd_main.c"
-# 19 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2670 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 2653 "/scrap/drbd/drbd/drbd_main.c"
+# 19 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2663 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 static enum ioc_rv inc_open_count(struct drbd_device *device, fmode_t mode)
-# 20 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2660 "/scrap/drbd/drbd/drbd_main.c"
+# 20 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2653 "/scrap/drbd/drbd/drbd_main.c"
 {
 	struct drbd_resource *resource = device->resource;
-# 2663 "/scrap/drbd/drbd/drbd_main.c"
-# 23 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2676 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 2656 "/scrap/drbd/drbd/drbd_main.c"
+# 23 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2669 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 	enum ioc_rv r = mode & FMODE_NDELAY ? IOC_ABORT : IOC_SLEEP;
-# 24 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2663 "/scrap/drbd/drbd/drbd_main.c"
+# 24 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2656 "/scrap/drbd/drbd/drbd_main.c"
 
 	if (test_bit(DOWN_IN_PROGRESS, &resource->flags))
 		return IOC_ABORT;
@@ -2688,12 +2681,12 @@ static enum ioc_rv inc_open_count(struct drbd_device *device, fmode_t mode)
 	else if (!resource->remote_state_change) {
 		r = IOC_OK;
 		device->open_cnt++;
-# 2674 "/scrap/drbd/drbd/drbd_main.c"
-# 32 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2694 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 2667 "/scrap/drbd/drbd/drbd_main.c"
+# 32 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2687 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 		if (mode & FMODE_WRITE)
-# 33 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2674 "/scrap/drbd/drbd/drbd_main.c"
+# 33 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2667 "/scrap/drbd/drbd/drbd_main.c"
 			device->writable = true;
 	}
 	read_unlock_irq(&resource->state_rwlock);
@@ -2768,33 +2761,33 @@ out:
 	spin_unlock(&device->openers_lock);
 }
 
-# 2749 "/scrap/drbd/drbd/drbd_main.c"
-# 41 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2774 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 2742 "/scrap/drbd/drbd/drbd_main.c"
+# 41 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2767 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 static int drbd_open(struct block_device *bdev, fmode_t mode)
-# 42 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2749 "/scrap/drbd/drbd/drbd_main.c"
+# 42 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2742 "/scrap/drbd/drbd/drbd_main.c"
 {
-# 2751 "/scrap/drbd/drbd/drbd_main.c"
-# 44 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2779 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 2744 "/scrap/drbd/drbd/drbd_main.c"
+# 44 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2772 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 	struct drbd_device *device = bdev->bd_disk->private_data;
-# 45 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2751 "/scrap/drbd/drbd/drbd_main.c"
+# 45 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2744 "/scrap/drbd/drbd/drbd_main.c"
 	struct drbd_resource *resource = device->resource;
 	long timeout = resource->res_opts.auto_promote_timeout * HZ / 10;
+	enum drbd_state_rv rv = SS_UNKNOWN_ERROR;
 	bool was_writable;
-	bool did_auto_promote = false;
 	enum ioc_rv r;
 	int err = 0;
 
 	/* Fail read-only open from systemd-udev (version <= 238) */
-# 2760 "/scrap/drbd/drbd/drbd_main.c"
-# 53 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2795 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 2753 "/scrap/drbd/drbd/drbd_main.c"
+# 53 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2788 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 	if (!(mode & FMODE_WRITE) && !drbd_allow_oos) {
-# 54 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2760 "/scrap/drbd/drbd/drbd_main.c"
+# 54 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2753 "/scrap/drbd/drbd/drbd_main.c"
 		char comm[TASK_COMM_LEN];
 		get_task_comm(comm, current);
 		if (!strcmp("systemd-udevd", comm))
@@ -2803,12 +2796,12 @@ static int drbd_open(struct block_device *bdev, fmode_t mode)
 
 	/* Fail read-write open early,
 	 * in case someone explicitly set us read-only (blockdev --setro) */
-# 2769 "/scrap/drbd/drbd/drbd_main.c"
-# 62 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2809 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 2762 "/scrap/drbd/drbd/drbd_main.c"
+# 62 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2802 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 	if (bdev_read_only(bdev) && (mode & FMODE_WRITE))
-# 63 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2769 "/scrap/drbd/drbd/drbd_main.c"
+# 63 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2762 "/scrap/drbd/drbd/drbd_main.c"
 		return -EACCES;
 
 	if (resource->fail_io[NOW])
@@ -2833,37 +2826,34 @@ static int drbd_open(struct block_device *bdev, fmode_t mode)
 	}
 
 	if (resource->res_opts.auto_promote) {
-		enum drbd_state_rv rv;
 		/* Allow opening in read-only mode on an unconnected secondary.
 		   This avoids split brain when the drbd volume gets opened
 		   temporarily by udev while it scans for PV signatures. */
 
-# 2799 "/scrap/drbd/drbd/drbd_main.c"
-# 71 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2844 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 2791 "/scrap/drbd/drbd/drbd_main.c"
+# 71 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2836 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 		if (mode & FMODE_WRITE) {
-# 72 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2799 "/scrap/drbd/drbd/drbd_main.c"
+# 72 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2791 "/scrap/drbd/drbd/drbd_main.c"
 			if (resource->role[NOW] == R_SECONDARY) {
-# 2801 "/scrap/drbd/drbd/drbd_main.c"
-# 74 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2849 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 2793 "/scrap/drbd/drbd/drbd_main.c"
+# 74 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2841 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 				rv = try_to_promote(device, timeout,
 						    (mode & FMODE_NDELAY));
-# 76 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2801 "/scrap/drbd/drbd/drbd_main.c"
+# 76 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2793 "/scrap/drbd/drbd/drbd_main.c"
 				if (rv < SS_SUCCESS)
 					drbd_info(resource, "Auto-promote failed: %s (%d)\n",
 						  drbd_set_st_err_str(rv), rv);
-				else
-					did_auto_promote = true;
 			}
-# 2808 "/scrap/drbd/drbd/drbd_main.c"
-# 83 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2860 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 2798 "/scrap/drbd/drbd/drbd_main.c"
+# 81 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2850 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 		} else if ((mode & FMODE_NDELAY) == 0) {
-# 84 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2808 "/scrap/drbd/drbd/drbd_main.c"
+# 82 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2798 "/scrap/drbd/drbd/drbd_main.c"
 			/* Double check peers
 			 *
 			 * Some services may try to first open ro, and only if that
@@ -2883,45 +2873,54 @@ static int drbd_open(struct block_device *bdev, fmode_t mode)
 			}
 		}
 	} else if (resource->role[NOW] != R_PRIMARY &&
-# 2828 "/scrap/drbd/drbd/drbd_main.c"
-# 92 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2889 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 2818 "/scrap/drbd/drbd/drbd_main.c"
+# 90 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2879 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 			!(mode & FMODE_WRITE) && !drbd_allow_oos) {
-# 93 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2828 "/scrap/drbd/drbd/drbd_main.c"
+# 91 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2818 "/scrap/drbd/drbd/drbd_main.c"
 		err = -EMEDIUMTYPE;
 		goto out;
 	}
 
 	if (test_bit(UNREGISTERED, &device->flags)) {
 		err = -ENODEV;
-# 2835 "/scrap/drbd/drbd/drbd_main.c"
-# 100 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2899 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 2825 "/scrap/drbd/drbd/drbd_main.c"
+# 98 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2889 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 	} else if (mode & FMODE_WRITE) {
-# 101 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2835 "/scrap/drbd/drbd/drbd_main.c"
+# 99 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2825 "/scrap/drbd/drbd/drbd_main.c"
 		if (resource->role[NOW] != R_PRIMARY)
-			err = -EROFS;
+			err = rv == SS_INTERRUPTED ? -ERESTARTSYS : -EROFS;
 	} else /* READ access only */ {
 		err = ro_open_cond(device);
 	}
 out:
 	/* still keep mutex, but release ASAP */
-	if (!err)
-		add_opener(device, did_auto_promote);
-	else
+	if (!err) {
+		add_opener(device, rv >= SS_SUCCESS);
+		/* Only interested in first open and last close. */
+		if (device->open_cnt == 1) {
+			struct device_info info;
+
+			device_to_info(&info, device);
+			mutex_lock(&notification_mutex);
+			notify_device_state(NULL, 0, device, &info, NOTIFY_CHANGE);
+			mutex_unlock(&notification_mutex);
+		}
+	} else
 		device->writable = was_writable;
 
 	mutex_unlock(&resource->open_release);
 	if (err) {
-# 2851 "/scrap/drbd/drbd/drbd_main.c"
-# 110 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2921 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 2850 "/scrap/drbd/drbd/drbd_main.c"
+# 108 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2920 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 		drbd_release(bdev->bd_disk, 0);
 		if (err == -EAGAIN && !(mode & FMODE_NDELAY))
-# 112 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2851 "/scrap/drbd/drbd/drbd_main.c"
+# 110 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2850 "/scrap/drbd/drbd/drbd_main.c"
 			err = -EMEDIUMTYPE;
 	}
 
@@ -3002,12 +3001,12 @@ static void drbd_fsync_device(struct drbd_device *device)
 	drbd_flush_peer_acks(resource);
 }
 
-# 2932 "/scrap/drbd/drbd/drbd_main.c"
-# 120 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 3008 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 2931 "/scrap/drbd/drbd/drbd_main.c"
+# 118 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 3007 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 static void drbd_release(struct gendisk *gd, fmode_t mode)
-# 121 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 2932 "/scrap/drbd/drbd/drbd_main.c"
+# 119 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 2931 "/scrap/drbd/drbd/drbd_main.c"
 {
 	struct drbd_device *device = gd->private_data;
 	struct drbd_resource *resource = device->resource;
@@ -3079,6 +3078,14 @@ static void drbd_release(struct gendisk *gd, fmode_t mode)
 	prune_or_free_openers(device, (device->open_cnt == 0) ? 0 : task_pid_nr(current));
 	if (open_rw_cnt == 0 && open_ro_cnt == 0 && resource->auto_promoted_by.pid != 0)
 		memset(&resource->auto_promoted_by, 0, sizeof(resource->auto_promoted_by));
+	if (device->open_cnt == 0) {
+		struct device_info info;
+
+		device_to_info(&info, device);
+		mutex_lock(&notification_mutex);
+		notify_device_state(NULL, 0, device, &info, NOTIFY_CHANGE);
+		mutex_unlock(&notification_mutex);
+	}
 	mutex_unlock(&resource->open_release);
 
 	kref_debug_put(&device->kref_debug, 3);
@@ -3546,6 +3553,23 @@ void drbd_flush_workqueue(struct drbd_work_queue *work_queue)
 	wait_for_completion(&completion_work.done);
 }
 
+void drbd_flush_workqueue_interruptible(struct drbd_device *device)
+{
+	struct completion_work completion_work;
+	int err;
+
+	completion_work.w.cb = w_complete;
+	init_completion(&completion_work.done);
+	drbd_queue_work(&device->resource->work, &completion_work.w);
+	err = wait_for_completion_interruptible(&completion_work.done);
+	if (err == -ERESTARTSYS) {
+		set_bit(ABORT_MDIO, &device->flags);
+		wake_up_all(&device->misc_wait);
+		wait_for_completion(&completion_work.done);
+		clear_bit(ABORT_MDIO, &device->flags);
+	}
+}
+
 struct drbd_resource *drbd_find_resource(const char *name)
 {
 	struct drbd_resource *resource;
@@ -3763,10 +3787,9 @@ struct drbd_resource *drbd_create_resource(const char *name,
 	init_waitqueue_head(&resource->twopc_wait);
 	init_waitqueue_head(&resource->barrier_wait);
 	timer_setup(&resource->twopc_timer, twopc_timer_fn, 0);
-	INIT_LIST_HEAD(&resource->twopc_work.list);
+	INIT_WORK(&resource->twopc_work, nested_twopc_work);
 	drbd_init_workqueue(&resource->work);
 	drbd_thread_init(resource, &resource->worker, drbd_worker, "worker");
-	drbd_thread_start(&resource->worker);
 	spin_lock_init(&resource->current_tle_lock);
 	drbd_debugfs_resource_add(resource);
 	resource->cached_min_aggreed_protocol_version = drbd_protocol_version_min;
@@ -3791,6 +3814,8 @@ struct drbd_resource *drbd_create_resource(const char *name,
 
 	if (set_resource_options(resource, res_opts, "create-resource"))
 		goto fail_free_pages;
+
+	drbd_thread_start(&resource->worker);
 
 	list_add_tail_rcu(&resource->resources, &drbd_resources);
 
@@ -4149,9 +4174,15 @@ enum drbd_ret_code drbd_create_device(struct drbd_config_context *adm_ctx, unsig
 
 	init_rwsem(&device->uuid_sem);
 
+# 4101 "/scrap/drbd/drbd/drbd_main.c"
+# 129 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 4180 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 	disk = blk_alloc_disk(NUMA_NO_NODE);
-	if (!disk)
+	if (!disk) {
+# 131 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 4101 "/scrap/drbd/drbd/drbd_main.c"
 		goto out_no_disk;
+	}
 
 	INIT_WORK(&device->ldev_destroy_work, drbd_ldev_destroy);
 
@@ -4349,12 +4380,12 @@ void drbd_unregister_device(struct drbd_device *device)
 	device->submit_conflict.wq = NULL;
 	destroy_workqueue(device->submit.wq);
 	device->submit.wq = NULL;
-# 4274 "/scrap/drbd/drbd/drbd_main.c"
-# 129 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 4355 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 4301 "/scrap/drbd/drbd/drbd_main.c"
+# 139 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 4386 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 	del_timer_sync(&device->request_timer);
-# 130 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 4274 "/scrap/drbd/drbd/drbd_main.c"
+# 140 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 4301 "/scrap/drbd/drbd/drbd_main.c"
 }
 
 void drbd_reclaim_device(struct rcu_head *rp)
@@ -4376,12 +4407,12 @@ void drbd_reclaim_device(struct rcu_head *rp)
 
 static void shutdown_connect_timer(struct drbd_connection *connection)
 {
-# 4296 "/scrap/drbd/drbd/drbd_main.c"
-# 138 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 4382 "/scrap/drbd/drbd/build-6.1.92-mdl+/drbd_main.c"
+# 4323 "/scrap/drbd/drbd/drbd_main.c"
+# 148 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 4413 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_main.c"
 	if (del_timer_sync(&connection->connect_timer)) {
-# 139 "/scrap/drbd/drbd/build-6.1.92-mdl+/.patches/drbd_main.c.patch"
-# 4296 "/scrap/drbd/drbd/drbd_main.c"
+# 149 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_main.c.patch"
+# 4323 "/scrap/drbd/drbd/drbd_main.c"
 		kref_debug_put(&connection->kref_debug, 11);
 		kref_put(&connection->kref, drbd_destroy_connection);
 	}

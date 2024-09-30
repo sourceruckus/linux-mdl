@@ -31,12 +31,16 @@ void *drbd_md_get_buffer(struct drbd_device *device, const char *intent)
 			device->disk_state[NOW] <= D_FAILED,
 			HZ * 10);
 
-	if (t == 0)
-		drbd_err(device, "Waited 10 Seconds for md_buffer! BUG?\n");
-
 	if (r) {
-		drbd_err(device, "Failed to get md_buffer for %s, currently in use by %s\n",
-			 intent, device->md_io.current_use);
+		if (t == 0) {
+			drbd_err(device, "Waited 10 Seconds for md_buffer! BUG?\n");
+			drbd_err(device, "Failed to get md_buffer for %s, currently in use by %s\n",
+				 intent, device->md_io.current_use);
+		} else {
+			drbd_err(device, "Failed to get md_buffer for %s: disk state %s\n",
+				 intent, drbd_disk_str(device->disk_state[NOW]));
+		}
+
 		return NULL;
 	}
 
@@ -65,7 +69,11 @@ void wait_until_done_or_force_detached(struct drbd_device *device, struct drbd_b
 		dt = MAX_SCHEDULE_TIMEOUT;
 
 	dt = wait_event_timeout(device->misc_wait,
-			*done || test_bit(FORCE_DETACH, &device->flags), dt);
+			*done ||
+			test_bit(FORCE_DETACH, &device->flags) ||
+			test_bit(ABORT_MDIO, &device->flags),
+			dt);
+
 	if (dt == 0) {
 		drbd_err(device, "meta-data IO operation timed out\n");
 		drbd_handle_io_error(device, DRBD_FORCE_DETACH);
@@ -717,7 +725,7 @@ static int update_sync_bits(struct drbd_peer_device *peer_device,
 
 /* clear the bit corresponding to the piece of storage in question:
  * size byte of data starting from sector.  Only clear a bits of the affected
- * one ore more _aligned_ BM_BLOCK_SIZE blocks.
+ * one or more _aligned_ BM_BLOCK_SIZE blocks.
  *
  * called by worker on L_SYNC_TARGET and receiver on SyncSource.
  *

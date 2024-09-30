@@ -4318,7 +4318,7 @@ static bool when_done_lock(struct drbd_resource *resource,
 			   unsigned long *irq_flags)
 {
 	write_lock_irqsave(&resource->state_rwlock, *irq_flags);
-	if (!resource->remote_state_change && resource->twopc_work.cb == NULL)
+	if (!resource->remote_state_change && !test_bit(TWOPC_WORK_PENDING, &resource->flags))
 		return true;
 	write_unlock_irqrestore(&resource->state_rwlock, *irq_flags);
 	return false;
@@ -4705,6 +4705,60 @@ static void twopc_phase2(struct drbd_resource *resource,
 	}
 }
 
+void drbd_print_cluster_wide_state_change(struct drbd_resource *resource, const char *message,
+		unsigned int tid, unsigned int initiator_node_id, int target_node_id,
+		union drbd_state mask, union drbd_state val)
+{
+	char buffer[150], *b, *end = buffer + sizeof(buffer);
+
+	b = buffer;
+	b += scnprintf(b, end - b, "%u->", initiator_node_id);
+	if (target_node_id == -1)
+		b += scnprintf(b, end - b, "all");
+	else
+		b += scnprintf(b, end - b, "%d", target_node_id);
+
+	if (mask.role)
+		b += scnprintf(b, end - b, " role( %s )", drbd_role_str(val.role));
+
+	if (mask.peer)
+		b += scnprintf(b, end - b, " peer( %s )", drbd_role_str(val.peer));
+
+	if (mask.conn)
+		b += scnprintf(b, end - b, " conn( %s )", drbd_conn_str(val.conn));
+
+	if (mask.disk)
+		b += scnprintf(b, end - b, " disk( %s )", drbd_disk_str(val.disk));
+
+	if (mask.pdsk)
+		b += scnprintf(b, end - b, " pdsk( %s )", drbd_disk_str(val.pdsk));
+
+	// Any of "susp-io( user )", "susp-io( quorum )" or "susp-io( uuid )"
+	if (mask.susp)
+		b += scnprintf(b, end - b, " %ssusp-io", val.susp ? "+" : "-");
+
+	if (mask.susp_nod)
+		b += scnprintf(b, end - b, " susp-io( %sno-disk )", val.susp_nod ? "+" : "-");
+
+	if (mask.susp_fen)
+		b += scnprintf(b, end - b, " susp-io( %sfencing )", val.susp_fen ? "+" : "-");
+
+	if (mask.user_isp)
+		b += scnprintf(b, end - b, " resync-susp( %suser )", val.user_isp ? "+" : "-");
+
+	if (mask.peer_isp)
+		b += scnprintf(b, end - b, " resync-susp( %speer )", val.peer_isp ? "+" : "-");
+
+	if (mask.aftr_isp)
+		b += scnprintf(b, end - b, " resync-susp( %safter dependency )",
+				val.aftr_isp ? "+" : "-");
+
+	if (!mask.i)
+		b += scnprintf(b, end - b, " empty");
+
+	drbd_info(resource, "%s %u: %s\n", message, tid, buffer);
+}
+
 /**
  * change_cluster_wide_state  -  Cluster-wide two-phase commit
  *
@@ -4867,12 +4921,9 @@ change_cluster_wide_state(bool (*change)(struct change_context *, enum change_ph
 	resource->twopc_parent_nodes = 0;
 	resource->remote_state_change = true;
 
-	drbd_info(resource, "Preparing cluster-wide state change %u (%u->%d %u/%u)\n",
-		  request.tid,
-		  resource->res_opts.node_id,
-		  context->target_node_id,
-		  context->mask.i,
-		  context->val.i);
+	drbd_print_cluster_wide_state_change(resource, "Preparing cluster-wide state change",
+			request.tid, resource->res_opts.node_id, context->target_node_id,
+			context->mask, context->val);
 
 	reply->initiator_node_id = resource->res_opts.node_id;
 	reply->target_node_id = context->target_node_id;
@@ -4894,7 +4945,7 @@ change_cluster_wide_state(bool (*change)(struct change_context *, enum change_ph
 		reply->target_reachable_nodes = reply->reachable_nodes;
 	}
 
-	D_ASSERT(resource, resource->twopc_work.cb == NULL);
+	D_ASSERT(resource, !test_bit(TWOPC_WORK_PENDING, &resource->flags));
 	begin_remote_state_change(resource, &irq_flags);
 	rv = __cluster_wide_request(resource, &request, reach_immediately);
 
@@ -5206,7 +5257,7 @@ retry:
 	return dd;
 }
 
-static void twopc_end_nested(struct drbd_resource *resource, enum drbd_packet cmd, bool as_work)
+static void twopc_end_nested(struct drbd_resource *resource, enum drbd_packet cmd)
 {
 	struct drbd_connection *twopc_parent;
 	u64 im;
@@ -5220,8 +5271,7 @@ static void twopc_end_nested(struct drbd_resource *resource, enum drbd_packet cm
 		resource->twopc_prepare_reply_cmd = cmd;
 		twopc_parent_nodes = resource->twopc_parent_nodes;
 	}
-	if (as_work)
-		resource->twopc_work.cb = NULL;
+	clear_bit(TWOPC_WORK_PENDING, &resource->flags);
 	write_unlock_irq(&resource->state_rwlock);
 
 	if (!twopc_reply.tid)
@@ -5242,10 +5292,8 @@ static void twopc_end_nested(struct drbd_resource *resource, enum drbd_packet cm
 	wake_up_all(&resource->twopc_wait);
 }
 
-static void __nested_twopc_work(struct drbd_work *work, bool as_work)
+static void __nested_twopc_work(struct drbd_resource *resource)
 {
-	struct drbd_resource *resource =
-		container_of(work, struct drbd_resource, twopc_work);
 	enum drbd_state_rv rv;
 	enum drbd_packet cmd;
 
@@ -5256,13 +5304,36 @@ static void __nested_twopc_work(struct drbd_work *work, bool as_work)
 		cmd = P_TWOPC_RETRY;
 	else
 		cmd = P_TWOPC_NO;
-	twopc_end_nested(resource, cmd, as_work);
+	twopc_end_nested(resource, cmd);
 }
 
-int nested_twopc_work(struct drbd_work *work, int cancel)
+void nested_twopc_work(struct work_struct *work)
 {
-	__nested_twopc_work(work, true);
-	return 0;
+	struct drbd_resource *resource =
+		container_of(work, struct drbd_resource, twopc_work);
+
+	__nested_twopc_work(resource);
+
+	kref_put(&resource->kref, drbd_destroy_resource);
+}
+
+void drbd_maybe_cluster_wide_reply(struct drbd_resource *resource)
+{
+	lockdep_assert_held(&resource->state_rwlock);
+
+	if (!resource->remote_state_change || !cluster_wide_reply_ready(resource))
+		return;
+
+	if (resource->twopc_reply.initiator_node_id == resource->res_opts.node_id) {
+		wake_up_all(&resource->state_wait);
+		return;
+	}
+
+	if (test_and_set_bit(TWOPC_WORK_PENDING, &resource->flags))
+		return;
+
+	kref_get(&resource->kref);
+	schedule_work(&resource->twopc_work);
 }
 
 enum drbd_state_rv
@@ -5284,9 +5355,9 @@ nested_twopc_request(struct drbd_resource *resource, struct twopc_request *reque
 	have_peers = rv == SS_CW_SUCCESS;
 	if (cmd == P_TWOPC_PREPARE || cmd == P_TWOPC_PREP_RSZ) {
 		if (rv < SS_SUCCESS)
-			twopc_end_nested(resource, P_TWOPC_NO, false);
+			twopc_end_nested(resource, P_TWOPC_NO);
 		else if (!have_peers && cluster_wide_reply_ready(resource)) /* no nested nodes */
-			__nested_twopc_work(&resource->twopc_work, false);
+			__nested_twopc_work(resource);
 	}
 	return rv;
 }
@@ -6006,9 +6077,13 @@ static bool calc_data_accessible(struct drbd_state_change *state_change, int n_d
 		struct drbd_peer_device *peer_device = peer_device_state_change->peer_device;
 		enum drbd_disk_state *peer_disk_state = peer_device_state_change->disk_state;
 		struct net_conf *nc;
+		bool allow_remote_read;
 
+		rcu_read_lock();
 		nc = rcu_dereference(peer_device->connection->transport.net_conf);
-		if (nc && !nc->allow_remote_read)
+		allow_remote_read = nc->allow_remote_read;
+		rcu_read_unlock();
+		if (nc && !allow_remote_read)
 			continue;
 		if (peer_disk_state[which] == D_UP_TO_DATE)
 			return true;
