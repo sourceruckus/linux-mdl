@@ -82,13 +82,13 @@ clean: clean-Linux
 modules_uninstall-Linux-legacy:
 	$(RM) -r $(addprefix $(KMODDIR)/$(INSTALL_MOD_DIR)/,spl/ avl/ icp/ lua/ nvpair/ unicode/ zcommon/ zfs/ zstd/)
 
-KMODDIR := $(INSTALL_MOD_PATH)/lib/modules/6.1.60-mdl+
+KMODDIR := $(INSTALL_MOD_PATH)/lib/modules/6.1.111-mdl+
 modules_install-Linux: modules_uninstall-Linux-legacy
 	@# Install the kernel modules
 	$(MAKE) -C /scrap/linux-mdl-6.1 M="$$PWD" modules_install \
 		INSTALL_MOD_PATH=$(INSTALL_MOD_PATH) \
 		INSTALL_MOD_DIR=$(INSTALL_MOD_DIR) \
-		KERNELRELEASE=6.1.60-mdl+
+		KERNELRELEASE=6.1.111-mdl+
 	@# Remove extraneous build products when packaging
 	if [ -n "$(DESTDIR)" ]; then \
 		find $(KMODDIR) -name 'modules.*' -delete; \
@@ -99,11 +99,11 @@ modules_install-Linux: modules_uninstall-Linux-legacy
 	@# Naturally, depmod is less than amused by this.
 	@# So if we find it missing or with one of these present,
 	@# we check for the alternate path for the System.map
-	sysmap=$(INSTALL_MOD_PATH)/boot/System.map-6.1.60-mdl+; \
+	sysmap=$(INSTALL_MOD_PATH)/boot/System.map-6.1.111-mdl+; \
 	{ [ -f "$$sysmap" ] && [ $$(wc -l < "$$sysmap") -ge 100 ]; } || \
-		sysmap=$(INSTALL_MOD_PATH)/usr/lib/debug/boot/System.map-6.1.60-mdl+; \
+		sysmap=$(INSTALL_MOD_PATH)/usr/lib/debug/boot/System.map-6.1.111-mdl+; \
 	if [ -f $$sysmap ]; then \
-		depmod -ae -F $$sysmap 6.1.60-mdl+; \
+		depmod -ae -F $$sysmap 6.1.111-mdl+; \
 	fi
 
 modules_install-FreeBSD:
@@ -113,8 +113,8 @@ modules_install-FreeBSD:
 modules_install: modules_install-Linux
 
 data_install-Linux:
-	@mkdir -p $(DESTDIR)//usr/src/zfs-2.2.4/6.1.60-mdl+
-	cp ../zfs.release ../zfs_config.h NONE $(DESTDIR)//usr/src/zfs-2.2.4/6.1.60-mdl+
+	@mkdir -p $(DESTDIR)//usr/src/zfs-2.2.6/6.1.111-mdl+
+	cp ../zfs.release ../zfs_config.h NONE $(DESTDIR)//usr/src/zfs-2.2.6/6.1.111-mdl+
 
 data_install-FreeBSD:
 	@
@@ -131,7 +131,7 @@ modules_uninstall-FreeBSD:
 modules_uninstall: modules_uninstall-Linux
 
 data_uninstall-Linux:
-	$(RM) $(addprefix $(DESTDIR)//usr/src/zfs-2.2.4/6.1.60-mdl+/,zfs.release zfs_config.h NONE)
+	$(RM) $(addprefix $(DESTDIR)//usr/src/zfs-2.2.6/6.1.111-mdl+/,zfs.release zfs_config.h NONE)
 
 data_uninstall-FreeBSD:
 	@
