@@ -49,6 +49,12 @@ extern unsigned int drbd_minor_count;
 extern unsigned int drbd_protocol_version_min;
 extern bool drbd_strict_names;
 
+static inline bool drbd_protocol_version_acceptable(unsigned int pv)
+{
+	return	/* DRBD 9 */ (pv >= PRO_VERSION_MIN && pv <= PRO_VERSION_MAX) ||
+		/* DRBD 8 */ (pv >= PRO_VERSION_8_MIN && pv <= PRO_VERSION_8_MAX);
+}
+
 #ifdef CONFIG_DRBD_FAULT_INJECTION
 extern int drbd_enable_faults;
 extern int drbd_fault_rate;
@@ -246,12 +252,12 @@ extern u64 directly_connected_nodes(struct drbd_resource *, enum which_state);
 
 /* sequence arithmetic for dagtag (data generation tag) sector numbers.
  * dagtag_newer_eq: true, if a is newer than b */
-#define dagtag_newer_eq(a,b)      \
+#define dagtag_newer_eq(a, b)      \
 	(typecheck(u64, a) && \
 	 typecheck(u64, b) && \
 	((s64)(a) - (s64)(b) >= 0))
 
-#define dagtag_newer(a,b)      \
+#define dagtag_newer(a, b)      \
 	(typecheck(u64, a) && \
 	 typecheck(u64, b) && \
 	((s64)(a) - (s64)(b) > 0))
@@ -563,11 +569,11 @@ enum device_flag {
 	FLUSH_PENDING,		/* if set, device->flush_jif is when we submitted that flush
 				 * from drbd_flush_after_epoch() */
 
-        /* cleared only after backing device related structures have been destroyed. */
-        GOING_DISKLESS,         /* Disk is being detached, because of io-error, or admin request. */
+	/* cleared only after backing device related structures have been destroyed. */
+	GOING_DISKLESS,         /* Disk is being detached, because of io-error, or admin request. */
 
-        /* to be used in drbd_device_post_work() */
-        GO_DISKLESS,            /* tell worker to schedule cleanup before detach */
+	/* to be used in drbd_device_post_work() */
+	GO_DISKLESS,            /* tell worker to schedule cleanup before detach */
 	MD_SYNC,		/* tell worker to call drbd_md_sync() */
 	MAKE_NEW_CUR_UUID,	/* tell worker to ping peers and eventually write new current uuid */
 
@@ -736,15 +742,15 @@ struct drbd_md {
 	u32 al_size_4k; /* cached product of the above */
 };
 
-# 5 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_int.h.patch"
-# 738 "/scrap/drbd/drbd/drbd_int.h"
+# 5 "/scrap/drbd/drbd/build-6.1.134-mdl+/.patches/drbd_int.h.patch"
+# 744 "/scrap/drbd/drbd/drbd_int.h"
 struct drbd_backing_dev {
 	struct block_device *backing_bdev;
-# 8 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_int.h.patch"
-# 741 "/scrap/drbd/drbd/drbd_int.h"
+# 8 "/scrap/drbd/drbd/build-6.1.134-mdl+/.patches/drbd_int.h.patch"
+# 747 "/scrap/drbd/drbd/drbd_int.h"
 	struct block_device *md_bdev;
-# 10 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_int.h.patch"
-# 743 "/scrap/drbd/drbd/drbd_int.h"
+# 10 "/scrap/drbd/drbd/build-6.1.134-mdl+/.patches/drbd_int.h.patch"
+# 749 "/scrap/drbd/drbd/drbd_int.h"
 	struct drbd_md md;
 	struct disk_conf __rcu *disk_conf; /* RCU, for updates: resource->conf_update */
 	sector_t known_size; /* last known size of that backing device */
@@ -783,13 +789,18 @@ struct fifo_buffer {
 	unsigned int head_index;
 	unsigned int size;
 	int total; /* sum of all values */
+# 788 "/scrap/drbd/drbd/drbd_int.h"
+# 18 "/scrap/drbd/drbd/build-6.1.134-mdl+/.patches/drbd_int.h.patch"
+# 795 "/scrap/drbd/drbd/build-6.1.134-mdl+/drbd_int.h"
 	int values[];
+# 19 "/scrap/drbd/drbd/build-6.1.134-mdl+/.patches/drbd_int.h.patch"
+# 788 "/scrap/drbd/drbd/drbd_int.h"
 };
 extern struct fifo_buffer *fifo_alloc(unsigned int fifo_size);
 
 /* flag bits per connection */
 enum connection_flag {
-	GOT_PING_ACK,		/* set when we receive a ping_ack packet, state_wait gets woken */
+	PING_PENDING,		/* cleared upon receiveing a ping_ack packet, wakes state_wait */
 	TWOPC_PREPARED,
 	TWOPC_YES,
 	TWOPC_NO,
@@ -830,7 +841,7 @@ enum resource_flag {
 	DEVICE_WORK_PENDING,	/* tell worker that some device has pending work */
 	PEER_DEVICE_WORK_PENDING,/* tell worker that some peer_device has pending work */
 
-        /* to be used in drbd_post_work() */
+	/* to be used in drbd_post_work() */
 	R_UNREGISTERED,
 	DOWN_IN_PROGRESS,
 	CHECKING_PEERS,
@@ -1331,7 +1342,7 @@ struct drbd_peer_device {
 	int resync_again; /* decided to resync again while resync running */
 	sector_t last_peers_in_sync_end; /* sector after end of last scheduled peers-in-sync */
 	unsigned long resync_next_bit; /* bitmap bit to search from for next resync request */
-	unsigned long last_resync_next_bit; /* value of resync_next_bit before last set of resync requests */
+	unsigned long last_resync_next_bit; /* resync_next_bit from before last resync request */
 	spinlock_t resync_next_bit_lock;
 
 	atomic_t ap_pending_cnt; /* AP data packets on the wire, ack expected (RQ_NET_PENDING set) */
@@ -1364,6 +1375,7 @@ struct drbd_peer_device {
 	unsigned long rs_paused;
 	/* skipped because csum was equal [unit BM_BLOCK_SIZE] */
 	unsigned long rs_same_csum;
+	unsigned long rs_last_progress_report_ts;
 #define DRBD_SYNC_MARKS 8
 #define DRBD_SYNC_MARK_STEP (3*HZ)
 	/* block not up-to-date at mark [unit BM_BLOCK_SIZE] */
@@ -1555,7 +1567,6 @@ struct drbd_device {
 	/* FIXME clean comments, restructure so it is more obvious which
 	 * members are protected by what */
 
-	int next_barrier_nr;
 	struct drbd_md_io md_io;
 	spinlock_t al_lock;
 	wait_queue_head_t al_wait;
@@ -1773,7 +1784,7 @@ extern void drbd_md_set_sector_offsets(struct drbd_device *device,
 extern int drbd_md_write(struct drbd_device *device, struct meta_data_on_disk_9 *buffer);
 extern int drbd_md_sync(struct drbd_device *device);
 extern int drbd_md_sync_if_dirty(struct drbd_device *device);
-extern void drbd_uuid_received_new_current(struct drbd_peer_device *, u64 , u64) __must_hold(local);
+extern void drbd_uuid_received_new_current(struct drbd_peer_device *, u64, u64) __must_hold(local);
 extern void drbd_uuid_set_bitmap(struct drbd_peer_device *peer_device, u64 val) __must_hold(local);
 extern void _drbd_uuid_set_bitmap(struct drbd_peer_device *peer_device, u64 val) __must_hold(local);
 extern void _drbd_uuid_set_current(struct drbd_device *device, u64 val) __must_hold(local);
@@ -1809,7 +1820,7 @@ extern int drbd_bitmap_io_from_worker(struct drbd_device *,
 extern int drbd_bmio_set_n_write(struct drbd_device *device, struct drbd_peer_device *) __must_hold(local);
 extern int drbd_bmio_clear_all_n_write(struct drbd_device *device, struct drbd_peer_device *) __must_hold(local);
 extern int drbd_bmio_set_all_n_write(struct drbd_device *device, struct drbd_peer_device *) __must_hold(local);
-extern int drbd_bmio_set_allocated_n_write(struct drbd_device *,struct drbd_peer_device *) __must_hold(local);
+extern int drbd_bmio_set_allocated_n_write(struct drbd_device *, struct drbd_peer_device *) __must_hold(local);
 extern int drbd_bmio_clear_one_peer(struct drbd_device *, struct drbd_peer_device *) __must_hold(local);
 extern bool drbd_device_stable(struct drbd_device *device, u64 *authoritative);
 extern void drbd_flush_peer_acks(struct drbd_resource *resource);
@@ -2043,7 +2054,7 @@ extern void conn_free_crypto(struct drbd_connection *connection);
 extern void drbd_do_submit_conflict(struct work_struct *ws);
 extern void do_submit(struct work_struct *ws);
 #ifndef CONFIG_DRBD_TIMING_STATS
-#define __drbd_make_request(d,b,k,j) __drbd_make_request(d,b,j)
+#define __drbd_make_request(d, b, k, j) __drbd_make_request(d, b, j)
 #endif
 extern void __drbd_make_request(struct drbd_device *, struct bio *, ktime_t, unsigned long);
 extern void drbd_submit_bio(struct bio *bio);
@@ -2054,7 +2065,7 @@ enum drbd_force_detach_flags {
 	DRBD_META_IO_ERROR,
 	DRBD_FORCE_DETACH,
 };
-#define drbd_handle_io_error(m,f) drbd_handle_io_error_(m,f, __func__)
+#define drbd_handle_io_error(m, f) drbd_handle_io_error_(m, f,  __func__)
 extern void drbd_handle_io_error_(struct drbd_device *device,
 	enum drbd_force_detach_flags df, const char *where);
 
@@ -2186,11 +2197,11 @@ void __update_timing_details(
 		const char *fn, const unsigned int line);
 
 #define update_sender_timing_details(c, cb) \
-	__update_timing_details(c->s_timing_details, &c->s_cb_nr, cb, __func__ , __LINE__ )
+	__update_timing_details(c->s_timing_details, &c->s_cb_nr, cb, __func__, __LINE__)
 #define update_receiver_timing_details(c, cb) \
-	__update_timing_details(c->r_timing_details, &c->r_cb_nr, cb, __func__ , __LINE__ )
+	__update_timing_details(c->r_timing_details, &c->r_cb_nr, cb, __func__, __LINE__)
 #define update_worker_timing_details(r, cb) \
-	__update_timing_details(r->w_timing_details, &r->w_cb_nr, cb, __func__ , __LINE__ )
+	__update_timing_details(r->w_timing_details, &r->w_cb_nr, cb, __func__, __LINE__)
 
 /* drbd_receiver.c */
 struct packet_info {
@@ -2266,6 +2277,7 @@ drbd_commit_size_change(struct drbd_device *device, struct resize_parms *rs, u64
 extern void drbd_try_to_get_resynced(struct drbd_device *device);
 extern void drbd_process_rs_discards(struct drbd_peer_device *peer_device, bool submit_all);
 extern void drbd_last_resync_request(struct drbd_peer_device *peer_device, bool submit_all);
+extern void drbd_init_connect_state(struct drbd_connection *connection);
 
 static inline sector_t drbd_get_capacity(struct block_device *bdev)
 {
@@ -2422,10 +2434,10 @@ static inline sector_t drbd_md_last_sector(struct drbd_backing_dev *bdev)
 	switch (bdev->md.meta_dev_idx) {
 	case DRBD_MD_INDEX_INTERNAL:
 	case DRBD_MD_INDEX_FLEX_INT:
-		return bdev->md.md_offset + (4096 >> 9) -1;
+		return bdev->md.md_offset + (4096 >> 9) - 1;
 	case DRBD_MD_INDEX_FLEX_EXT:
 	default:
-		return bdev->md.md_offset + bdev->md.md_size_sect -1;
+		return bdev->md.md_offset + bdev->md.md_size_sect - 1;
 	}
 }
 
@@ -2981,11 +2993,11 @@ static inline struct drbd_interval *drbd_find_conflict(struct drbd_device *devic
 }
 
 #ifdef CONFIG_DRBD_TIMING_STATS
-#define ktime_aggregate_delta(D, ST, M) D->M = ktime_add(D->M, ktime_sub(ktime_get(), ST))
-#define ktime_aggregate(D, R, M) D->M = ktime_add(D->M, ktime_sub(R->M, R->start_kt))
-#define ktime_aggregate_pd(P, N, R, M) P->M = ktime_add(P->M, ktime_sub(R->M[N], R->start_kt))
-#define ktime_get_accounting(V) V = ktime_get()
-#define ktime_get_accounting_assign(V, T) V = T
+#define ktime_aggregate_delta(D, ST, M) (D->M = ktime_add(D->M, ktime_sub(ktime_get(), ST)))
+#define ktime_aggregate(D, R, M) (D->M = ktime_add(D->M, ktime_sub(R->M, R->start_kt)))
+#define ktime_aggregate_pd(P, N, R, M) (P->M = ktime_add(P->M, ktime_sub(R->M[N], R->start_kt)))
+#define ktime_get_accounting(V) (V = ktime_get())
+#define ktime_get_accounting_assign(V, T) (V = T)
 #define ktime_var_for_accounting(V) ktime_t V = ktime_get()
 #else
 #define ktime_aggregate_delta(D, ST, M)

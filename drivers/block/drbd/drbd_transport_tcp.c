@@ -24,11 +24,11 @@
 #include <linux/drbd_config.h>
 #include <linux/tls.h>
 #include <net/tcp.h>
-# 5 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 5 "/scrap/drbd/drbd/build-6.1.134-mdl+/.patches/drbd_transport_tcp.c.patch"
 # 26 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 #include <net/handshake.h>
 #include <net/tls.h>
-# 8 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 8 "/scrap/drbd/drbd/build-6.1.134-mdl+/.patches/drbd_transport_tcp.c.patch"
 # 29 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 #include "drbd_protocol.h"
 #include "drbd_transport.h"
@@ -41,12 +41,28 @@ MODULE_DESCRIPTION("TCP (SDP, SSOCKS) transport layer for DRBD");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(REL_VERSION);
 
-static unsigned int drbd_keepcnt;
+/* TCP keepalive has proven to be vital in many deployment scenarios.
+ * Without keepalive, after a device has seen a sufficiently long period of
+ * idle time, packets on our "bulk data" socket may be dropped because an
+ * overly "smart" network infrastructure decided that TCP session was stale.
+ * Note that we don't try to use this to detect "broken" tcp sessions here,
+ * these will still be handled by the DRBD effective network timeout via
+ * timeout / ko-count settings.
+ * We use this to try to keep "idle" TCP sessions "alive".
+ * Default to send a probe every 23 seconds.
+ */
+#define DRBD_KEEP_IDLE	(23*HZ)
+#define DRBD_KEEP_INTVL (23*HZ)
+#define DRBD_KEEP_CNT	9
+static unsigned int drbd_keepcnt = DRBD_KEEP_CNT;
 module_param_named(keepcnt, drbd_keepcnt, uint, 0664);
-static unsigned int drbd_keepidle;
+MODULE_PARM_DESC(keepcnt, "see tcp(7) tcp_keepalive_probes; set TCP_KEEPCNT for data sockets; default: 9");
+static unsigned int drbd_keepidle = DRBD_KEEP_IDLE;
 module_param_named(keepidle, drbd_keepidle, uint, 0664);
-static unsigned int drbd_keepintvl;
+MODULE_PARM_DESC(keepidle, "see tcp(7) tcp_keepalive_time; set TCP_KEEPIDLE for data sockets; default: 23s");
+static unsigned int drbd_keepintvl = DRBD_KEEP_INTVL;
 module_param_named(keepintvl, drbd_keepintvl, uint, 0664);
+MODULE_PARM_DESC(keepintvtl, "see tcp(7) tcp_keepalive_intvl; set TCP_KEEPINTVL for data sockets; default: 23s");
 
 static struct workqueue_struct *dtt_csocket_recv;
 
@@ -269,9 +285,9 @@ static int _dtt_send(struct drbd_tcp_transport *tcp_transport, struct socket *so
 	return sent;
 }
 
-# 268 "/scrap/drbd/drbd/drbd_transport_tcp.c"
-# 15 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 275 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_transport_tcp.c"
+# 284 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 15 "/scrap/drbd/drbd/build-6.1.134-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 291 "/scrap/drbd/drbd/build-6.1.134-mdl+/drbd_transport_tcp.c"
 #define TLS_RECORD_TYPE_ALERT 0x15
 #define TLS_RECORD_TYPE_DATA 0x17
 #define TLS_ALERT_LEVEL_FATAL 2
@@ -284,12 +300,11 @@ static int _dtt_send(struct drbd_tcp_transport *tcp_transport, struct socket *so
   *
   * Returns zero or a TLS_RECORD_TYPE value.
   */
-u8 tls_get_record_type(const struct sock *sk, const struct cmsghdr *cmsg){
+u8 tls_get_record_type(const struct sock *sk, const struct cmsghdr *cmsg) {
 	if (cmsg->cmsg_level != SOL_TLS)
 		return 0;
 	if (cmsg->cmsg_type != TLS_GET_RECORD_TYPE)
 		return 0;
-
 
 	return *((u8 *)CMSG_DATA(cmsg));
 }
@@ -302,8 +317,7 @@ u8 tls_get_record_type(const struct sock *sk, const struct cmsghdr *cmsg){
   * @description: OUT - TLS AlertDescription value
   *
   */
-void tls_alert_recv(const struct sock *sk, const struct msghdr *msg,
-		    u8 *level, u8 *description)
+void tls_alert_recv(const struct sock *sk, const struct msghdr *msg, u8 *level, u8 *description)
 {
 	const struct kvec *iov = msg->msg_iter.kvec;
 	u8 *data = iov->iov_base;
@@ -312,8 +326,8 @@ void tls_alert_recv(const struct sock *sk, const struct msghdr *msg,
 	*description = data[1];
 }
 
-# 55 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 268 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 53 "/scrap/drbd/drbd/build-6.1.134-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 284 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 static int dtt_recv_short(struct socket *socket, void *buf, size_t size, int flags)
 {
 	struct kvec iov = {
@@ -418,7 +432,7 @@ static int dtt_recv_pages(struct drbd_transport *transport, struct drbd_page_cha
 		size -= err;
 	}
 	if (unlikely(size)) {
-		tr_warn(transport, "Not enough data received; missing %lu bytes\n", size);
+		tr_warn(transport, "Not enough data received; missing %zu bytes\n", size);
 		err = -ENODATA;
 		goto fail;
 	}
@@ -792,8 +806,10 @@ retry:
 
 		s_estab = NULL;
 		err = kernel_accept(listener->s_listen, &s_estab, O_NONBLOCK);
-		if (err < 0)
+		if (err < 0) {
+			kref_put(&path->path.kref, drbd_destroy_path);
 			return err;
+		}
 
 		/* The established socket inherits the sk_state_change callback
 		   from the listening socket. */
@@ -891,11 +907,11 @@ static int dtt_control_tcp_input(read_descriptor_t *rd_desc, struct sk_buff *skb
 				 unsigned int offset, size_t len)
 {
 	struct drbd_transport *transport = rd_desc->arg.data;
+	unsigned int avail, consumed = 0;
 	struct skb_seq_state seq;
-	unsigned int consumed = 0;
 
 	skb_prepare_seq_read(skb, offset, offset + len, &seq);
-	while (true) {
+	do {
 		struct drbd_const_buffer buffer;
 
 		/*
@@ -903,13 +919,15 @@ static int dtt_control_tcp_input(read_descriptor_t *rd_desc, struct sk_buff *skb
 		 * be more than is actually ready, so we ensure we only mark as available what
 		 * is ready.
 		 */
-		buffer.avail = skb_seq_read(consumed, &buffer.buffer, &seq);
-		buffer.avail = min_t(unsigned int, buffer.avail, len - consumed);
-		if (buffer.avail == 0)
+		avail = skb_seq_read(consumed, &buffer.buffer, &seq);
+		if (!avail)
 			break;
+		buffer.avail = min_t(unsigned int, avail, len - consumed);
 		consumed += buffer.avail;
 		drbd_control_data_ready(transport, &buffer);
-	}
+	} while (consumed < len);
+	skb_abort_seq_read(&seq);
+
 	return consumed;
 }
 
@@ -1339,19 +1357,25 @@ randomize:
 			csocket, peername, tls_keyring, tls_privkey, tls_certificate,
 			csocket_is_server ? tls_server_hello_x509 : tls_client_hello_x509,
 			&csocket_tls_wait);
-		if (err < 0)
+		if (err < 0) {
+			tr_warn(transport, "Error from control socket tls handshake: %d\n", err);
 			goto out_release_sockets;
+		}
 
 		err = tls_init_hello(
 			dsocket, peername, tls_keyring, tls_privkey, tls_certificate,
 			dsocket_is_server ? tls_server_hello_x509 : tls_client_hello_x509,
 			&dsocket_tls_wait);
-		if (err < 0)
+		if (err < 0) {
+			tr_warn(transport, "Error from data socket tls handshake: %d\n", err);
 			goto out_release_sockets;
+		}
 
 		err = tls_wait_hello(&csocket_tls_wait, &dsocket_tls_wait, timeout);
-		if (err < 0)
+		if (err < 0) {
+			tr_warn(transport, "Error from tls handshake: %d\n", err);
 			goto out_release_sockets;
+		}
 
 		INIT_WORK(&tcp_transport->control_data_ready_work, dtt_control_data_ready_work);
 	}
@@ -1363,11 +1387,17 @@ randomize:
 	dsocket->sk->sk_reuse = SK_CAN_REUSE; /* SO_REUSEADDR */
 	csocket->sk->sk_reuse = SK_CAN_REUSE; /* SO_REUSEADDR */
 
-	dsocket->sk->sk_allocation = GFP_NOIO;
-	csocket->sk->sk_allocation = GFP_NOIO;
+	/* We are a block device, we are in the write-out path,
+	 * we may need memory to facilitate memory reclaim
+	 */
+	dsocket->sk->sk_allocation = GFP_ATOMIC;
+	csocket->sk->sk_allocation = GFP_ATOMIC;
 
-# 65 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 1323 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 63 "/scrap/drbd/drbd/build-6.1.134-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1352 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+	sk_set_memalloc(dsocket->sk);
+	sk_set_memalloc(csocket->sk);
+
 	dsocket->sk->sk_priority = TC_PRIO_INTERACTIVE_BULK;
 	csocket->sk->sk_priority = TC_PRIO_INTERACTIVE;
 
@@ -1508,12 +1538,12 @@ static int dtt_send_page(struct drbd_transport *transport, enum drbd_stream stre
 	struct drbd_tcp_transport *tcp_transport =
 		container_of(transport, struct drbd_tcp_transport, transport);
 	struct socket *socket = tcp_transport->stream[stream];
-# 1465 "/scrap/drbd/drbd/drbd_transport_tcp.c"
-# 74 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 1514 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_transport_tcp.c"
+# 1497 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 72 "/scrap/drbd/drbd/build-6.1.134-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1544 "/scrap/drbd/drbd/build-6.1.134-mdl+/drbd_transport_tcp.c"
 	struct msghdr msg = { .msg_flags = msg_flags | MSG_NOSIGNAL };
-# 75 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 1465 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 73 "/scrap/drbd/drbd/build-6.1.134-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1497 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 	int len = size;
 	int err = -EIO;
 
@@ -1524,13 +1554,13 @@ static int dtt_send_page(struct drbd_transport *transport, enum drbd_stream stre
 	do {
 		int sent;
 
-# 1479 "/scrap/drbd/drbd/drbd_transport_tcp.c"
-# 86 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 1530 "/scrap/drbd/drbd/build-6.1.111-mdl+/drbd_transport_tcp.c"
+# 1511 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 84 "/scrap/drbd/drbd/build-6.1.134-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1560 "/scrap/drbd/drbd/build-6.1.134-mdl+/drbd_transport_tcp.c"
 		sent = socket->ops->sendpage(socket, page, offset, len,
 					     msg.msg_flags);
-# 88 "/scrap/drbd/drbd/build-6.1.111-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 1479 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 86 "/scrap/drbd/drbd/build-6.1.134-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1511 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 		if (sent <= 0) {
 			if (sent == -EAGAIN) {
 				if (drbd_stream_send_timed_out(transport, stream))
