@@ -137,3 +137,4 @@ obj-$(CONFIG_VBOXSF_FS)		+= vboxsf/
 obj-$(CONFIG_ZONEFS_FS)		+= zonefs/
 obj-$(CONFIG_ZFS) += zfs/
 obj-$(CONFIG_ZFS) += zfs/
+obj-$(CONFIG_ZFS) += zfs/

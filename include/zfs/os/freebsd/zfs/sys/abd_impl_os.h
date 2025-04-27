@@ -18,27 +18,24 @@
  *
  * CDDL HEADER END
  */
-
 /*
- * Copyright (c) 2020 by Delphix. All rights reserved.
+ * Copyright (c) 2014 by Chunwei Chen. All rights reserved.
+ * Copyright (c) 2016, 2019 by Delphix. All rights reserved.
+ * Copyright (c) 2023, 2024, Klara Inc.
  */
 
-#ifndef _ZFS_PERCPU_H
-#define	_ZFS_PERCPU_H
+#ifndef _ABD_IMPL_OS_H
+#define	_ABD_IMPL_OS_H
 
-#include <linux/percpu_counter.h>
-
-/*
- * 3.18 API change,
- * percpu_counter_init() now must be passed a gfp mask which will be
- * used for the dynamic allocation of the actual counter.
- */
-#ifdef HAVE_PERCPU_COUNTER_INIT_WITH_GFP
-#define	percpu_counter_init_common(counter, n, gfp) \
-	percpu_counter_init(counter, n, gfp)
-#else
-#define	percpu_counter_init_common(counter, n, gfp) \
-	percpu_counter_init(counter, n)
+#ifdef __cplusplus
+extern "C" {
 #endif
 
-#endif /* _ZFS_PERCPU_H */
+#define	abd_enter_critical(flags)	critical_enter()
+#define	abd_exit_critical(flags)	critical_exit()
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif	/* _ABD_IMPL_OS_H */
