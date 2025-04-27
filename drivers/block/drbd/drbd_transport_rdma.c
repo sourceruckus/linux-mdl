@@ -24,6 +24,7 @@
 
 #include <linux/module.h>
 #include <linux/sched/signal.h>
+#include <linux/bio.h>
 #include <rdma/ib_verbs.h>
 #include <rdma/rdma_cm.h>
 #include <rdma/ib_cm.h>
@@ -140,11 +141,13 @@ union dtr_immediate {
 
 enum dtr_state_bits {
 	DSB_CONNECT_REQ,
+	DSB_CONNECTING,
 	DSB_CONNECTED,
 	DSB_ERROR,
 };
 
 #define DSM_CONNECT_REQ   (1 << DSB_CONNECT_REQ)
+#define DSM_CONNECTING    (1 << DSB_CONNECTING)
 #define DSM_CONNECTED     (1 << DSB_CONNECTED)
 #define DSM_ERROR         (1 << DSB_ERROR)
 
@@ -180,7 +183,7 @@ struct dtr_tx_desc {
 	} type;
 	int nr_sges;
 	union dtr_immediate imm;
-	struct ib_sge sge[0]; /* must be last! */
+	struct ib_sge sge[]; /* must be last! */
 };
 
 struct dtr_flow {
@@ -270,7 +273,6 @@ struct dtr_transport {
 	atomic_t first_path_connect_err;
 	struct completion connected;
 
-	atomic_t cm_count;
 	struct tasklet_struct control_tasklet;
 };
 
@@ -466,8 +468,6 @@ static int dtr_init(struct drbd_transport *transport)
 
 	for (i = DATA_STREAM; i <= CONTROL_STREAM ; i++)
 		dtr_init_stream(&rdma_transport->stream[i], transport);
-
-	atomic_set(&rdma_transport->cm_count, 0);
 
 	tasklet_setup(&rdma_transport->control_tasklet, dtr_control_tasklet_fn);
 
@@ -760,7 +760,7 @@ static int dtr_recv(struct drbd_transport *transport, enum drbd_stream stream, v
 	return err;
 }
 
-static void dtr_stats(struct drbd_transport* transport, struct drbd_transport_stats *stats)
+static void dtr_stats(struct drbd_transport *transport, struct drbd_transport_stats *stats)
 {
 	struct dtr_transport *rdma_transport =
 		container_of(transport, struct dtr_transport, transport);
@@ -787,7 +787,7 @@ static void dtr_stats(struct drbd_transport* transport, struct drbd_transport_st
 }
 
 /* The following functions (at least)
-   dtr_path_established_work_fn(), dtr_path_established(),
+   dtr_path_established_work_fn(),
    dtr_cma_accept_work_fn(), dtr_cma_accept(),
    dtr_cma_retry_connect_work_fn(),
    dtr_cma_retry_connect(),
@@ -802,13 +802,16 @@ static void dtr_stats(struct drbd_transport* transport, struct drbd_transport_st
 
 static int dtr_path_prepare(struct dtr_path *path, struct dtr_cm *cm, bool active)
 {
-	int i, err = -ENOENT;
 	struct dtr_cm *cm2;
+	int i, err;
 
-	kref_get(&cm->kref); /* hold it for dtr_cm_alloc_rdma_res()... */
 	cm2 = cmpxchg(&path->cm, NULL, cm); // RCU xchg
 	if (cm2) {
-		/* Due to the cmpxchg() path->cm was not changed! */
+		/*
+		 * The caller needs to hold a ref on cm. dtr_path_prepare()
+		 * gifts that reference to the path. If setting the pointer in
+		 * the path fails, we have to put one ref of cm.
+		 */
 		kref_put(&cm->kref, dtr_destroy_cm);
 		return -ENOENT;
 	}
@@ -818,7 +821,6 @@ static int dtr_path_prepare(struct dtr_path *path, struct dtr_cm *cm, bool activ
 		dtr_init_flow(path, i);
 
 	err = dtr_cm_alloc_rdma_res(cm);
-	kref_put(&cm->kref, dtr_destroy_cm);
 
 	return err;
 }
@@ -860,13 +862,8 @@ static void dtr_path_established_work_fn(struct work_struct *work)
 		return;
 
 	p = atomic_cmpxchg(&cs->passive_state, PCS_CONNECTING, PCS_FINISHING);
-	if (p < PCS_CONNECTING) {
-		if (path->cs.active) {
-			atomic_set(&cs->active_state, PCS_INACTIVE);
-			wake_up(&cs->wq);
-		}
-		return;
-	}
+	if (p < PCS_CONNECTING)
+		goto out;
 
 	path->cm->state = DSM_CONNECTED;
 
@@ -897,29 +894,13 @@ static void dtr_path_established_work_fn(struct work_struct *work)
 	set_bit(TR_ESTABLISHED, &path->path.flags);
 	drbd_path_event(transport, &path->path);
 
+out:
 	atomic_set(&cs->active_state, PCS_INACTIVE);
 	p = atomic_xchg(&cs->passive_state, PCS_INACTIVE);
 	if (p > PCS_INACTIVE)
 		drbd_put_listener(&path->path);
 
 	wake_up(&cs->wq);
-}
-
-static void dtr_path_established(struct dtr_cm *cm)
-{
-	struct dtr_path *path = cm->path;
-	struct dtr_connect_state *cs = &path->cs;
-
-	if (atomic_read(&cs->passive_state) < PCS_CONNECTING) {
-		if (path->cs.active) {
-			atomic_set(&cs->active_state, PCS_INACTIVE);
-			wake_up(&cs->wq);
-		}
-		return;
-	}
-
-	kref_get(&cm->kref);
-	schedule_work(&cm->establish_work);
 }
 
 static struct dtr_cm *dtr_alloc_cm(struct dtr_path *path)
@@ -950,11 +931,9 @@ static struct dtr_cm *dtr_alloc_cm(struct dtr_path *path)
 	 * or a dtr_cm object exists because they might have a callback
 	 * registered in the RDMA code that will call back into this module. The
 	 * rx and tx descs have a reference to the dtr_cm object, so taking an
-	 * extra reference to the module as long as at least one dtr_cm object
-	 * exists is sufficient.
+	 * extra reference to the module for each dtr_cm object is sufficient.
 	 */
-	if (atomic_inc_return(&cm->rdma_transport->cm_count) == 1)
-		__module_get(THIS_MODULE);
+	__module_get(THIS_MODULE);
 
 	return cm;
 }
@@ -1022,15 +1001,14 @@ static int dtr_cma_accept(struct dtr_listener *listener, struct rdma_cm_id *new_
 	/* Expecting RDMA_CM_EVENT_ESTABLISHED, after rdma_accept(). Get
 	   the ref before dtr_path_prepare(), since that exposes the cm
 	   to the path, and the path might get destroyed, and with that
-           going to put the cm */
+	   going to put the cm */
 	kref_get(&cm->kref);
 
+	/* Gifting the initial kref to the path->cm pointer */
 	err = dtr_path_prepare(path, cm, false);
 	if (err) {
 		rdma_reject(new_cm_id, NULL, 0, IB_CM_REJ_CONSUMER_DEFINED);
-		kref_put(&cm->kref, dtr_destroy_cm);
-		/* after this kref_put() it has a count of 1. Returning it in ret_cm and
-		   returning an error causes the caller to drop the final reference */
+		/* Returning the cm via ret_cm and an error causes the caller to put one ref */
 
 		return -EAGAIN;
 	}
@@ -1121,15 +1099,22 @@ static void dtr_cma_retry_connect(struct dtr_path *path, struct dtr_cm *failed_c
 	struct dtr_connect_state *cs = &path->cs;
 	long connect_int = 10 * HZ;
 	struct net_conf *nc;
+	int a;
 
 	dtr_remove_cm_from_path(path, failed_cm);
 
-	rcu_read_lock();
-	nc = rcu_dereference(transport->net_conf);
-	if (nc)
-		connect_int = nc->connect_int * HZ;
-	rcu_read_unlock();
-
+	a = atomic_read(&cs->active_state);
+	if (a == PCS_INACTIVE) {
+		return;
+	} else if (a == PCS_CONNECTING) {
+		rcu_read_lock();
+		nc = rcu_dereference(transport->net_conf);
+		if (nc)
+			connect_int = nc->connect_int * HZ;
+		rcu_read_unlock();
+	} else {
+		connect_int = 1;
+	}
 	schedule_delayed_work(&cs->retry_connect_work, connect_int);
 }
 
@@ -1156,9 +1141,11 @@ static void dtr_cma_connect_work_fn(struct work_struct *work)
 	}
 
 	kref_get(&cm->kref); /* Expecting RDMA_CM_EVENT_ESTABLISHED */
+	set_bit(DSB_CONNECTING, &cm->state);
 	err = rdma_connect(cm->id, &dtr_conn_param);
 	if (err) {
-		kref_put(&cm->kref, dtr_destroy_cm); /* no RDMA_CM_EVENT_ESTABLISHED */
+		if (test_and_clear_bit(DSB_CONNECTING, &cm->state))
+			kref_put(&cm->kref, dtr_destroy_cm); /* no _EVENT_ESTABLISHED */
 		tr_err(transport, "rdma_connect error %d\n", err);
 		goto out;
 	}
@@ -1198,7 +1185,7 @@ static void dtr_cma_disconnect_work_fn(struct work_struct *work)
 
 	/* in dtr_disconnect_path() -> __dtr_uninit_path() we free the previous
 	   cm. That causes the reference on the path to be dropped.
-	   In dtr_activeate_path() -> dtr_start_try_connect() we allocate a new
+	   In dtr_activate_path() -> dtr_start_try_connect() we allocate a new
 	   cm, that holds a reference on the path again.
 
 	   Bridge the gap with a reference here!
@@ -1237,6 +1224,7 @@ static int dtr_cma_event_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event 
 	/* context comes from rdma_create_id() */
 	struct dtr_cm *cm = cm_id->context;
 	struct dtr_listener *listener;
+	bool connecting;
 
 	if (!cm) {
 		pr_err("id %p event %d, but no context!\n", cm_id, event->event);
@@ -1273,10 +1261,12 @@ static int dtr_cma_event_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event 
 		   pointer from the listening rdma_cm_id. The new context gets created in
 		   dtr_cma_accept() and is put into &cm here.
 		   cm now contains the accepted connection (no longer the listener); */
-		if (!err || cm == NULL)
-			return 0; /* do not touch kref of new connection/listener */
-
-		break; /* in case of error drop the last ref of cm upon function exit */
+		if (err) {
+			if (!cm)
+				return 1; /* caller destroy the cm_id */
+			break; /* drop the last ref of cm at function exit */
+		}
+		return 0; /* do not touch kref of the new connection */
 
 	case RDMA_CM_EVENT_CONNECT_RESPONSE:
 		// pr_info("%s: RDMA_CM_EVENT_CONNECT_RESPONSE\n", cm->name);
@@ -1289,15 +1279,25 @@ static int dtr_cma_event_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event 
 		/* cm->state = DSM_CONNECTED; is set later in the work item */
 		/* This is called for active and passive connections */
 
+		connecting = test_and_clear_bit(DSB_CONNECTING, &cm->state);
+		connecting |= test_bit(DSB_CONNECT_REQ, &cm->state);
 		kref_get(&cm->kref); /* connected -> expect a disconnect in the future */
+		kref_get(&cm->kref); /* for the work */
+		schedule_work(&cm->establish_work);
 
-		dtr_path_established(cm);
+		if (!connecting)
+			return 0; /* keep ref; __dtr_disconnect_path() won */
 		break;
 
 	case RDMA_CM_EVENT_ADDR_ERROR:
 		// pr_info("%s: RDMA_CM_EVENT_ADDR_ERROR\n", cm->name);
 	case RDMA_CM_EVENT_ROUTE_ERROR:
 		// pr_info("%s: RDMA_CM_EVENT_ROUTE_ERROR\n", cm->name);
+		set_bit(DSB_ERROR, &cm->state);
+
+		dtr_cma_retry_connect(cm->path, cm);
+		break;
+
 	case RDMA_CM_EVENT_CONNECT_ERROR:
 		// pr_info("%s: RDMA_CM_EVENT_CONNECT_ERROR\n", cm->name);
 	case RDMA_CM_EVENT_UNREACHABLE:
@@ -1308,6 +1308,8 @@ static int dtr_cma_event_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event 
 		set_bit(DSB_ERROR, &cm->state);
 
 		dtr_cma_retry_connect(cm->path, cm);
+		if (!test_and_clear_bit(DSB_CONNECTING, &cm->state))
+			return 0; /* keep ref; __dtr_disconnect_path() won */
 		break;
 
 	case RDMA_CM_EVENT_DISCONNECTED:
@@ -1365,8 +1367,8 @@ static int dtr_new_rx_descs(struct dtr_flow *flow)
 	known = atomic_read(&flow->rx_descs_known_to_peer);
 
 	/* If the two decrements in dtr_handle_rx_cq_event() execute in
-           parallel our result might be one too low, that does not matter.
-	   Only make sure to never return a -1 because that would matter! */
+	 * parallel our result might be one too low, that does not matter.
+	 * Only make sure to never return a -1 because that would matter! */
 	return max(posted - known, 0);
 }
 
@@ -1736,7 +1738,7 @@ static int dtr_handle_rx_cq_event(struct ib_cq *cq, struct dtr_cm *cm)
 
 	rx_desc = (struct dtr_rx_desc *) (unsigned long) wc.wr_id;
 
-	if (wc.status != IB_WC_SUCCESS || wc.opcode != IB_WC_RECV) {
+	if (wc.status != IB_WC_SUCCESS || !(wc.opcode & IB_WC_RECV)) {
 		struct drbd_transport *transport = &rdma_transport->transport;
 		unsigned long irq_flags;
 
@@ -1755,7 +1757,7 @@ static int dtr_handle_rx_cq_event(struct ib_cq *cq, struct dtr_cm *cm)
 				tr_warn(transport,
 					"wc.status = %d (%s), wc.opcode = %d (%s)\n",
 					wc.status, wc.status == IB_WC_SUCCESS ? "ok" : "bad",
-					wc.opcode, wc.opcode == IB_WC_RECV ? "ok": "bad");
+					wc.opcode, wc.opcode & IB_WC_RECV ? "ok" : "bad");
 
 				tr_warn(transport,
 					"wc.vendor_err = %d, wc.byte_len = %d wc.imm_data = %d\n",
@@ -2745,9 +2747,6 @@ static void __dtr_disconnect_path(struct dtr_path *path)
 	if (!cm)
 		return;
 
-	if (!(cm->state & (DSM_CONNECTED | DSM_ERROR)))
-		goto out;
-
 	err = rdma_disconnect(cm->id);
 	if (err) {
 		tr_warn(transport, "failed to disconnect, id %p context %p err %d\n",
@@ -2775,6 +2774,17 @@ static void __dtr_disconnect_path(struct dtr_path *path)
 			tr_err(transport, "ib_modify_qp failed %d\n", err);
 	}
 
+	/*
+	 * We are expecting one of RDMA_CM_EVENT_ESTABLISHED, _UNREACHABLE,
+	 * _CONNECT_ERROR, or _REJECTED on this cm. Some RDMA drivers report
+	 * these error events after unexpectedly long timeouts, while others do
+	 * not report it at all. We are no longer interested in these
+	 * events. Destroy the cm and cm_id to avoid leaking it.
+	 * This is racing with the event delivery, which drops a reference.
+	 */
+	if (test_and_clear_bit(DSB_CONNECTING, &cm->state))
+		kref_put(&cm->kref, dtr_destroy_cm);
+
 	kref_put(&cm->kref, dtr_destroy_cm);
 }
 
@@ -2783,12 +2793,13 @@ static void dtr_reclaim_cm(struct rcu_head *rcu_head)
 	struct dtr_cm *cm = container_of(rcu_head, struct dtr_cm, rcu);
 
 	kfree(cm);
+	module_put(THIS_MODULE);
 }
 
+/* dtr_destroy_cm() might run after the transport was destroyed */
 static void __dtr_destroy_cm(struct kref *kref, bool destroy_id)
 {
 	struct dtr_cm *cm = container_of(kref, struct dtr_cm, kref);
-	struct dtr_transport *rdma_transport = cm->rdma_transport;
 
 	if (cm->id) {
 		if (cm->id->qp)
@@ -2825,9 +2836,6 @@ static void __dtr_destroy_cm(struct kref *kref, bool destroy_id)
 	}
 
 	call_rcu(&cm->rcu, dtr_reclaim_cm);
-
-	if (atomic_dec_and_test(&rdma_transport->cm_count))
-		module_put(THIS_MODULE);
 }
 
 static void dtr_destroy_cm(struct kref *kref)
@@ -2922,6 +2930,16 @@ static int dtr_activate_path(struct dtr_path *path)
 	err = drbd_get_listener(&path->path);
 	if (err)
 		goto out_no_put;
+
+	/*
+	 * Check passive_state after drbd_get_listener() completed.
+	 * __dtr_disconnect_path() sets passive_state before calling
+	 * drbd_put_listener(). That drbd_put_listner() might return
+	 * before the drbd_get_listner() here started.
+	 */
+	if (atomic_read(&cs->passive_state) != PCS_CONNECTING ||
+	    atomic_read(&cs->active_state) != PCS_CONNECTING)
+		goto out;
 
 	err = dtr_start_try_connect(cs);
 	if (err)
@@ -3064,6 +3082,9 @@ static void dtr_set_rcvtimeo(struct drbd_transport *transport, enum drbd_stream 
 		container_of(transport, struct dtr_transport, transport);
 
 	rdma_transport->stream[stream].recv_timeout = timeout;
+
+	if (stream == CONTROL_STREAM)
+		mod_timer(&rdma_transport->control_timer, jiffies + timeout);
 }
 
 static long dtr_get_rcvtimeo(struct drbd_transport *transport, enum drbd_stream stream)
@@ -3353,12 +3374,22 @@ static void dtr_debugfs_show_path(struct dtr_path *path, struct seq_file *m)
 	static const char *state_names[] = {
 		[0] = "not connected",
 		[DSM_CONNECT_REQ] = "CONNECT_REQ",
+		[DSM_CONNECTING] = "CONNECTING",
+		[DSM_CONNECTING|DSM_CONNECT_REQ] = "CONNECTING|DSM_CONNECT_REQ",
 		[DSM_CONNECTED] = "CONNECTED",
 		[DSM_CONNECTED|DSM_CONNECT_REQ] = "CONNECTED|CONNECT_REQ",
+		[DSM_CONNECTED|DSM_CONNECTING] = "CONNECTED|CONNECTING",
+		[DSM_CONNECTED|DSM_CONNECTING|DSM_CONNECT_REQ] =
+			"CONNECTED|CONNECTING|DSM_CONNECT_REQ",
 		[DSM_ERROR] = "ERROR",
 		[DSM_ERROR|DSM_CONNECT_REQ] = "ERROR|CONNECT_REQ",
+		[DSM_ERROR|DSM_CONNECTING] = "ERROR|CONNECTING",
+		[DSM_ERROR|DSM_CONNECTING|DSM_CONNECT_REQ] = "ERROR|CONNECTING|CONNECT_REQ",
 		[DSM_ERROR|DSM_CONNECTED] = "ERROR|CONNECTED",
 		[DSM_ERROR|DSM_CONNECTED|DSM_CONNECT_REQ] = "ERROR|CONNECTED|CONNECT_REQ",
+		[DSM_ERROR|DSM_CONNECTED|DSM_CONNECTING] = "ERROR|CONNECTED|CONNECTING|",
+		[DSM_ERROR|DSM_CONNECTED|DSM_CONNECTING|DSM_CONNECT_REQ] =
+			"ERROR|CONNECTED|CONNECTING|CONNECT_REQ",
 	};
 
 	enum drbd_stream i;
@@ -3384,8 +3415,6 @@ static void dtr_debugfs_show_path(struct dtr_path *path, struct seq_file *m)
 
 static void dtr_debugfs_show(struct drbd_transport *transport, struct seq_file *m)
 {
-	struct dtr_transport *rdma_transport =
-		container_of(transport, struct dtr_transport, transport);
 	struct dtr_path *path;
 
 	/* BUMP me if you change the file format/content/presentation */
@@ -3395,8 +3424,6 @@ static void dtr_debugfs_show(struct drbd_transport *transport, struct seq_file *
 	list_for_each_entry_rcu(path, &transport->paths, path.list)
 		dtr_debugfs_show_path(path, m);
 	rcu_read_unlock();
-
-	seq_printf(m, "cm_count: %d\n", atomic_read(&rdma_transport->cm_count));
 }
 
 static int dtr_add_path(struct drbd_path *add_path)

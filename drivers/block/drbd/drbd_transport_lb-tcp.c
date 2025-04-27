@@ -15,6 +15,7 @@
 #include <linux/net.h>
 #include <linux/tcp.h>
 #include <linux/highmem.h>
+#include <linux/bio.h>
 #include <linux/drbd_genl_api.h>
 #include <linux/drbd_config.h>
 #include <net/tcp.h>
@@ -29,12 +30,28 @@ MODULE_DESCRIPTION("Load balancing TCP transport layer for DRBD");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(REL_VERSION);
 
-static unsigned int drbd_keepcnt;
+/* TCP keepalive has proven to be vital in many deployment scenarios.
+ * Without keepalive, after a device has seen a sufficiently long period of
+ * idle time, packets on our "bulk data" socket may be dropped because an
+ * overly "smart" network infrastructure decided that TCP session was stale.
+ * Note that we don't try to use this to detect "broken" tcp sessions here,
+ * these will still be handled by the DRBD effective network timeout via
+ * timeout / ko-count settings.
+ * We use this to try to keep "idle" TCP sessions "alive".
+ * Default to send a probe every 23 seconds.
+ */
+#define DRBD_KEEP_IDLE	(23*HZ)
+#define DRBD_KEEP_INTVL (23*HZ)
+#define DRBD_KEEP_CNT	9
+static unsigned int drbd_keepcnt = DRBD_KEEP_CNT;
 module_param_named(keepcnt, drbd_keepcnt, uint, 0664);
-static unsigned int drbd_keepidle;
+MODULE_PARM_DESC(keepcnt, "see tcp(7) tcp_keepalive_probes; set TCP_KEEPCNT for data sockets; default: 9");
+static unsigned int drbd_keepidle = DRBD_KEEP_IDLE;
 module_param_named(keepidle, drbd_keepidle, uint, 0664);
-static unsigned int drbd_keepintvl;
+MODULE_PARM_DESC(keepidle, "see tcp(7) tcp_keepalive_time; set TCP_KEEPIDLE for data sockets; default: 23s");
+static unsigned int drbd_keepintvl = DRBD_KEEP_INTVL;
 module_param_named(keepintvl, drbd_keepintvl, uint, 0664);
+MODULE_PARM_DESC(keepintvtl, "see tcp(7) tcp_keepalive_intvl; set TCP_KEEPINTVL for data sockets; default: 23s");
 
 #define DTL_CONNECTING 1
 #define DTL_LOAD_BALANCE 2
@@ -490,7 +507,7 @@ dtl_recv_pages(struct drbd_transport *transport, struct drbd_page_chain_head *ch
 		size -= err;
 	}
 	if (unlikely(size)) {
-		tr_warn(transport, "Not enough data received; missing %lu bytes\n", size);
+		tr_warn(transport, "Not enough data received; missing %zu bytes\n", size);
 		err = -ENODATA;
 		goto fail;
 	}
@@ -675,6 +692,7 @@ static int dtl_send_first_packet(struct dtl_transport *dtl_transport,
 
 /**
  * dtl_socket_free() - Free the socket
+ * @transport:	DRBD transport.
  * @socket:	pointer to the pointer to the socket.
  */
 static void dtl_socket_free(struct drbd_transport *transport, struct socket **socket)
@@ -691,6 +709,7 @@ static void dtl_socket_free(struct drbd_transport *transport, struct socket **so
 
 /**
  * dtl_socket_ok_or_free() - Free the socket if its connection is not okay
+ * @transport:	DRBD transport.
  * @socket:	pointer to the pointer to the socket.
  */
 static bool dtl_socket_ok_or_free(struct drbd_transport *transport, struct socket **socket)
@@ -870,17 +889,25 @@ static int dtl_control_tcp_input(read_descriptor_t *rd_desc, struct sk_buff *skb
 		container_of(path->path.transport, struct dtl_transport, transport);
 	struct dtl_stream *stream = &dtl_transport->streams[CONTROL_STREAM];
 	struct drbd_transport *transport = &dtl_transport->transport;
+	int overall_avail, avail, consumed = 0;
 	struct drbd_const_buffer buffer;
 	struct skb_seq_state seq;
-	unsigned int consumed = 0;
-	int avail;
 
 	if (flow->recv_bytes &&
 	    flow->recv_sequence != stream->recv_sequence + 1)
 		return 0;
 
 	skb_prepare_seq_read(skb, offset, skb->len, &seq);
-	while ((avail = skb_seq_read(consumed, &buffer.buffer, &seq))) {
+	do {
+		/*
+		 * skb_seq_read() returns the length of the block assigned to buffer. This might
+		 * be more than is actually ready, so we ensure we only mark as available what
+		 * is ready.
+		 */
+		overall_avail = skb_seq_read(consumed, &buffer.buffer, &seq);
+		if (!overall_avail)
+			break;
+		avail = min_t(int, overall_avail, len - consumed);
 		while (avail) {
 			if (flow->recv_bytes == 0) {
 				const struct dtl_header *hdr = (struct dtl_header *)buffer.buffer;
@@ -906,10 +933,8 @@ static int dtl_control_tcp_input(read_descriptor_t *rd_desc, struct sk_buff *skb
 
 				flow->recv_sequence = be32_to_cpu(hdr->sequence);
 				flow->recv_bytes = be32_to_cpu(hdr->bytes);
-				if (flow->recv_sequence != stream->recv_sequence + 1) {
-					skb_abort_seq_read(&seq);
+				if (flow->recv_sequence != stream->recv_sequence + 1)
 					goto out;
-				}
 			}
 			buffer.avail = min(flow->recv_bytes, avail);
 			if (!buffer.avail)
@@ -922,8 +947,9 @@ static int dtl_control_tcp_input(read_descriptor_t *rd_desc, struct sk_buff *skb
 			if (flow->recv_bytes == 0)
 				stream->recv_sequence++;
 		}
-	}
+	} while (consumed < len);
 out:
+	skb_abort_seq_read(&seq);
 	return consumed;
 }
 
@@ -1092,7 +1118,13 @@ static void dtl_setup_socket(struct dtl_transport *dtl_transport, struct socket 
 	long timeout = HZ;
 
 	socket->sk->sk_reuse = SK_CAN_REUSE; /* SO_REUSEADDR */
-	socket->sk->sk_allocation = GFP_NOIO;
+	/* We are a block device, we are in the write-out path,
+	 * we may need memory to facilitate memory reclaim
+	 */
+	socket->sk->sk_use_task_frag = false;
+	socket->sk->sk_allocation = GFP_ATOMIC;
+	sk_set_memalloc(socket->sk);
+
 	socket->sk->sk_priority = use_for_data ? TC_PRIO_INTERACTIVE_BULK : TC_PRIO_INTERACTIVE;
 	tcp_sock_set_nodelay(socket->sk);
 

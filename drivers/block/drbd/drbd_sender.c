@@ -1201,12 +1201,32 @@ static int make_resync_request(struct drbd_peer_device *peer_device, int cancel)
 	if (number * BM_BLOCK_SIZE < discard_granularity)
 		number = discard_granularity / BM_BLOCK_SIZE;
 
+	spin_lock_bh(&peer_device->resync_next_bit_lock);
+	/*
+	 * Drain resync requests when we jump back to avoid conflicts that are
+	 * resolved in an arbitrary order, leading to an unexpected ordering of
+	 * requests being completed.
+	 */
+	if (peer_device->resync_next_bit <= peer_device->last_resync_next_bit &&
+			peer_device->rs_in_flight > 0) {
+		spin_unlock_bh(&peer_device->resync_next_bit_lock);
+
+		/*
+		 * The rs_in_flight counter does not include discards waiting
+		 * to be merged. Hence we may jump back while there are
+		 * discards waiting to be merged. In this situation, we may
+		 * make a resync request that conflicts with a discard. Allow
+		 * the discard to be merged here so that the conflict is
+		 * resolved.
+		 */
+		drbd_process_rs_discards(peer_device, false);
+		goto skip_request;
+	}
+
 	/* don't let rs_sectors_came_in() re-schedule us "early"
 	 * just because the first reply came "fast", ... */
 	peer_device->rs_in_flight += number * BM_SECT_PER_BIT;
 
-	spin_lock_bh(&peer_device->resync_next_bit_lock);
-	peer_device->last_resync_next_bit = peer_device->resync_next_bit;
 	for (; i < number; i++) {
 		int err;
 
@@ -1260,6 +1280,8 @@ static int make_resync_request(struct drbd_peer_device *peer_device, int cancel)
 			i++;
 		}
 
+		peer_device->last_resync_next_bit = peer_device->resync_next_bit;
+
 		/* set the offset to start the next drbd_bm_find_next from */
 		peer_device->resync_next_bit = bit + 1;
 
@@ -1275,23 +1297,25 @@ static int make_resync_request(struct drbd_peer_device *peer_device, int cancel)
 			err = make_one_resync_request(peer_device, discard_granularity, sector, size);
 
 		switch (err) {
-			case -EIO: /* Disk failure */
-				put_ldev(device);
-				return -EIO;
-			case -EAGAIN: /* allocation failed, or ldev busy */
-				spin_lock_bh(&peer_device->resync_next_bit_lock);
-				/* Set resync_next_bit back, but make sure that
-				 * it really moves backwards. If a negative
-				 * reply has been received in the meantime it
-				 * may already be further back. */
-				peer_device->resync_next_bit = min(peer_device->resync_next_bit, (unsigned long) BM_SECT_TO_BIT(sector));
-				i = rollback_i;
-				goto request_done;
-			case 0:
-				/* everything ok */
-				break;
-			default:
-				BUG();
+		case -EIO: /* Disk failure */
+			put_ldev(device);
+			return -EIO;
+		case -EAGAIN: /* allocation failed, or ldev busy */
+			spin_lock_bh(&peer_device->resync_next_bit_lock);
+			/* Set resync_next_bit back, but make sure that
+			 * it really moves backwards. If a negative
+			 * reply has been received in the meantime it
+			 * may already be further back. */
+			peer_device->resync_next_bit =
+				min(peer_device->resync_next_bit,
+				    (unsigned long)BM_SECT_TO_BIT(sector));
+			i = rollback_i;
+			goto request_done;
+		case 0:
+			/* everything ok */
+			break;
+		default:
+			BUG();
 		}
 
 		spin_lock_bh(&peer_device->resync_next_bit_lock);
@@ -1511,13 +1535,51 @@ static int w_resync_finished(struct drbd_work *w, int cancel)
 	return 0;
 }
 
+static long ping_timeout(struct drbd_connection *connection)
+{
+	struct net_conf *nc;
+	long timeout;
+
+	rcu_read_lock();
+	nc = rcu_dereference(connection->transport.net_conf);
+	timeout = nc->ping_timeo * HZ / 10;
+	rcu_read_unlock();
+
+	return timeout;
+}
+
+static int send_ping_peer(struct drbd_connection *connection)
+{
+	bool was_pending = test_and_set_bit(PING_PENDING, &connection->flags);
+	int err = 0;
+
+	if (!was_pending) {
+		err = drbd_send_ping(connection);
+		if (err)
+			change_cstate(connection, C_NETWORK_FAILURE, CS_HARD);
+	}
+
+	return err;
+}
+
 void drbd_ping_peer(struct drbd_connection *connection)
 {
-	clear_bit(GOT_PING_ACK, &connection->flags);
-	schedule_work(&connection->send_ping_work);
-	wait_event(connection->resource->state_wait,
-		   test_bit(GOT_PING_ACK, &connection->flags) ||
-		   connection->cstate[NOW] < C_CONNECTED);
+	long r, timeout = ping_timeout(connection);
+	int err;
+
+	err = send_ping_peer(connection);
+	if (err)
+		return;
+
+	r = wait_event_timeout(connection->resource->state_wait,
+			       !test_bit(PING_PENDING, &connection->flags) ||
+			       connection->cstate[NOW] < C_CONNECTED,
+			       timeout);
+	if (r > 0)
+		return;
+
+	drbd_warn(connection, "PingAck did not arrive in time\n");
+	change_cstate(connection, C_NETWORK_FAILURE, CS_HARD);
 }
 
 /* caller needs to hold rcu_read_lock, state_rwlock, adm_mutex or conf_update */
@@ -2763,7 +2825,10 @@ static void handle_congestion(struct drbd_peer_device *peer_device)
 
 /**
  * drbd_start_resync() - Start the resync process
- * @side:	Either L_SYNC_SOURCE or L_SYNC_TARGET
+ * @peer_device: The DRBD peer device to start the resync on.
+ * @side: Direction of the resync; which side am I? Either L_SYNC_SOURCE or
+ * 	  L_SYNC_TARGET.
+ * @tag: State change tag to print in status messages.
  *
  * This function might bring you directly into one of the
  * C_PAUSED_SYNC_* states.
@@ -2978,7 +3043,7 @@ void __update_timing_details(
 	++(*cb_nr);
 }
 
-static bool all_peers_responded(struct drbd_resource *resource)
+static bool all_responded(struct drbd_resource *resource)
 {
 	struct drbd_connection *connection;
 	bool all_responded = true;
@@ -2991,9 +3056,11 @@ static bool all_peers_responded(struct drbd_resource *resource)
 			clear_bit(CHECKING_PEER, &connection->flags);
 			continue;
 		}
-		if (!test_bit(GOT_PING_ACK, &connection->flags)) {
+		if (test_bit(PING_PENDING, &connection->flags)) {
 			all_responded = false;
-			break;
+			continue;
+		} else {
+			clear_bit(CHECKING_PEER, &connection->flags);
 		}
 	}
 	rcu_read_unlock();
@@ -3004,6 +3071,8 @@ static bool all_peers_responded(struct drbd_resource *resource)
 void drbd_check_peers(struct drbd_resource *resource)
 {
 	struct drbd_connection *connection;
+	long t, timeo = LONG_MAX;
+	unsigned long start;
 	bool check_ongoing;
 	u64 im;
 
@@ -3014,15 +3083,37 @@ void drbd_check_peers(struct drbd_resource *resource)
 		return;
 	}
 
+	start = jiffies;
 	for_each_connection_ref(connection, im, resource) {
 		if (connection->cstate[NOW] < C_CONNECTED)
 			continue;
-		clear_bit(GOT_PING_ACK, &connection->flags);
 		set_bit(CHECKING_PEER, &connection->flags);
-		schedule_work(&connection->send_ping_work);
+		send_ping_peer(connection);
+		t = ping_timeout(connection);
+		if (t < timeo)
+			timeo = t;
 	}
 
-	wait_event(resource->state_wait, all_peers_responded(resource));
+	while (!wait_event_timeout(resource->state_wait, all_responded(resource), timeo)) {
+		unsigned long waited = jiffies - start;
+
+		timeo = LONG_MAX;
+		rcu_read_lock();
+		for_each_connection_rcu(connection, resource) {
+			if (!test_bit(CHECKING_PEER, &connection->flags))
+				continue;
+			t = ping_timeout(connection);
+			if (waited >= t) {
+				drbd_warn(connection, "peer failed to send PingAck in time\n");
+				change_cstate(connection, C_NETWORK_FAILURE, CS_HARD);
+				clear_bit(CHECKING_PEER, &connection->flags);
+				continue;
+			}
+			if (t - waited < timeo)
+				timeo = t - waited;
+		}
+		rcu_read_unlock();
+	}
 
 	clear_bit(CHECKING_PEERS, &resource->flags);
 	wake_up_all(&resource->state_wait);
@@ -3180,6 +3271,23 @@ static struct drbd_request *tl_next_request_for_connection(struct drbd_connectio
 	/* advancement of todo.req_next happens in advance_conn_req_next(),
 	 * called from mod_rq_state() */
 
+	return connection->todo.req;
+}
+
+static struct drbd_request *tl_next_request_for_cleanup(struct drbd_connection *connection)
+{
+	struct drbd_request *req, *found_req = NULL;
+
+	list_for_each_entry_rcu(req, &connection->resource->transfer_log, tl_requests) {
+		unsigned int s = req->net_rq_state[connection->peer_node_id];
+
+		if (s & RQ_NET_QUEUED) {
+			found_req = req;
+			break;
+		}
+	}
+
+	connection->todo.req = found_req;
 	return connection->todo.req;
 }
 
@@ -3501,8 +3609,7 @@ static int process_sender_todo(struct drbd_connection *connection)
 	if (!connection->todo.req) {
 		update_sender_timing_details(connection, maybe_send_unplug_remote);
 		maybe_send_unplug_remote(connection, false);
-	}
-	else if (list_empty(&connection->todo.work_list)) {
+	} else if (list_empty(&connection->todo.work_list)) {
 		update_sender_timing_details(connection, process_one_request);
 		return process_one_request(connection);
 	}
@@ -3577,7 +3684,7 @@ int drbd_sender(struct drbd_thread *thi)
 	/* cleanup all currently unprocessed requests */
 	if (!connection->todo.req) {
 		rcu_read_lock();
-		tl_next_request_for_connection(connection);
+		tl_next_request_for_cleanup(connection);
 		rcu_read_unlock();
 	}
 	while (connection->todo.req) {
@@ -3593,7 +3700,7 @@ int drbd_sender(struct drbd_thread *thi)
 			complete_master_bio(device, &m);
 
 		rcu_read_lock();
-		tl_next_request_for_connection(connection);
+		tl_next_request_for_cleanup(connection);
 		rcu_read_unlock();
 	}
 

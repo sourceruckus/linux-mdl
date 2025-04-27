@@ -38,12 +38,28 @@ MODULE_DESCRIPTION("TCP (SDP, SSOCKS) transport layer for DRBD");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(REL_VERSION);
 
-static unsigned int drbd_keepcnt;
+/* TCP keepalive has proven to be vital in many deployment scenarios.
+ * Without keepalive, after a device has seen a sufficiently long period of
+ * idle time, packets on our "bulk data" socket may be dropped because an
+ * overly "smart" network infrastructure decided that TCP session was stale.
+ * Note that we don't try to use this to detect "broken" tcp sessions here,
+ * these will still be handled by the DRBD effective network timeout via
+ * timeout / ko-count settings.
+ * We use this to try to keep "idle" TCP sessions "alive".
+ * Default to send a probe every 23 seconds.
+ */
+#define DRBD_KEEP_IDLE	(23*HZ)
+#define DRBD_KEEP_INTVL (23*HZ)
+#define DRBD_KEEP_CNT	9
+static unsigned int drbd_keepcnt = DRBD_KEEP_CNT;
 module_param_named(keepcnt, drbd_keepcnt, uint, 0664);
-static unsigned int drbd_keepidle;
+MODULE_PARM_DESC(keepcnt, "see tcp(7) tcp_keepalive_probes; set TCP_KEEPCNT for data sockets; default: 9");
+static unsigned int drbd_keepidle = DRBD_KEEP_IDLE;
 module_param_named(keepidle, drbd_keepidle, uint, 0664);
-static unsigned int drbd_keepintvl;
+MODULE_PARM_DESC(keepidle, "see tcp(7) tcp_keepalive_time; set TCP_KEEPIDLE for data sockets; default: 23s");
+static unsigned int drbd_keepintvl = DRBD_KEEP_INTVL;
 module_param_named(keepintvl, drbd_keepintvl, uint, 0664);
+MODULE_PARM_DESC(keepintvtl, "see tcp(7) tcp_keepalive_intvl; set TCP_KEEPINTVL for data sockets; default: 23s");
 
 static struct workqueue_struct *dtt_csocket_recv;
 
@@ -370,7 +386,7 @@ static int dtt_recv_pages(struct drbd_transport *transport, struct drbd_page_cha
 		size -= err;
 	}
 	if (unlikely(size)) {
-		tr_warn(transport, "Not enough data received; missing %lu bytes\n", size);
+		tr_warn(transport, "Not enough data received; missing %zu bytes\n", size);
 		err = -ENODATA;
 		goto fail;
 	}
@@ -744,8 +760,10 @@ retry:
 
 		s_estab = NULL;
 		err = kernel_accept(listener->s_listen, &s_estab, O_NONBLOCK);
-		if (err < 0)
+		if (err < 0) {
+			kref_put(&path->path.kref, drbd_destroy_path);
 			return err;
+		}
 
 		/* The established socket inherits the sk_state_change callback
 		   from the listening socket. */
@@ -843,11 +861,11 @@ static int dtt_control_tcp_input(read_descriptor_t *rd_desc, struct sk_buff *skb
 				 unsigned int offset, size_t len)
 {
 	struct drbd_transport *transport = rd_desc->arg.data;
+	unsigned int avail, consumed = 0;
 	struct skb_seq_state seq;
-	unsigned int consumed = 0;
 
 	skb_prepare_seq_read(skb, offset, offset + len, &seq);
-	while (true) {
+	do {
 		struct drbd_const_buffer buffer;
 
 		/*
@@ -855,13 +873,15 @@ static int dtt_control_tcp_input(read_descriptor_t *rd_desc, struct sk_buff *skb
 		 * be more than is actually ready, so we ensure we only mark as available what
 		 * is ready.
 		 */
-		buffer.avail = skb_seq_read(consumed, &buffer.buffer, &seq);
-		buffer.avail = min_t(unsigned int, buffer.avail, len - consumed);
-		if (buffer.avail == 0)
+		avail = skb_seq_read(consumed, &buffer.buffer, &seq);
+		if (!avail)
 			break;
+		buffer.avail = min_t(unsigned int, avail, len - consumed);
 		consumed += buffer.avail;
 		drbd_control_data_ready(transport, &buffer);
-	}
+	} while (consumed < len);
+	skb_abort_seq_read(&seq);
+
 	return consumed;
 }
 
@@ -1291,19 +1311,25 @@ randomize:
 			csocket, peername, tls_keyring, tls_privkey, tls_certificate,
 			csocket_is_server ? tls_server_hello_x509 : tls_client_hello_x509,
 			&csocket_tls_wait);
-		if (err < 0)
+		if (err < 0) {
+			tr_warn(transport, "Error from control socket tls handshake: %d\n", err);
 			goto out_release_sockets;
+		}
 
 		err = tls_init_hello(
 			dsocket, peername, tls_keyring, tls_privkey, tls_certificate,
 			dsocket_is_server ? tls_server_hello_x509 : tls_client_hello_x509,
 			&dsocket_tls_wait);
-		if (err < 0)
+		if (err < 0) {
+			tr_warn(transport, "Error from data socket tls handshake: %d\n", err);
 			goto out_release_sockets;
+		}
 
 		err = tls_wait_hello(&csocket_tls_wait, &dsocket_tls_wait, timeout);
-		if (err < 0)
+		if (err < 0) {
+			tr_warn(transport, "Error from tls handshake: %d\n", err);
 			goto out_release_sockets;
+		}
 
 		INIT_WORK(&tcp_transport->control_data_ready_work, dtt_control_data_ready_work);
 	}
@@ -1315,11 +1341,17 @@ randomize:
 	dsocket->sk->sk_reuse = SK_CAN_REUSE; /* SO_REUSEADDR */
 	csocket->sk->sk_reuse = SK_CAN_REUSE; /* SO_REUSEADDR */
 
-	dsocket->sk->sk_allocation = GFP_NOIO;
-	csocket->sk->sk_allocation = GFP_NOIO;
+	/* We are a block device, we are in the write-out path,
+	 * we may need memory to facilitate memory reclaim
+	 */
+	dsocket->sk->sk_allocation = GFP_ATOMIC;
+	csocket->sk->sk_allocation = GFP_ATOMIC;
 
 	dsocket->sk->sk_use_task_frag = false;
 	csocket->sk->sk_use_task_frag = false;
+
+	sk_set_memalloc(dsocket->sk);
+	sk_set_memalloc(csocket->sk);
 
 	dsocket->sk->sk_priority = TC_PRIO_INTERACTIVE_BULK;
 	csocket->sk->sk_priority = TC_PRIO_INTERACTIVE;

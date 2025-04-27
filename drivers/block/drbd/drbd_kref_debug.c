@@ -22,7 +22,7 @@ static void get_connection_name(const struct kref_debug_info *debug_info, char *
 
 	rcu_read_lock();
 	nc = rcu_dereference(connection->transport.net_conf);
-	sprintf(name, "%s:%s", resource_n , nc ? nc->name : "unnamed");
+	sprintf(name, "%s:%s", resource_n, nc ? nc->name : "unnamed");
 	rcu_read_unlock();
 }
 
@@ -49,6 +49,7 @@ struct kref_debug_class kref_class_resource = {
 		[8] = "free",
 		[9] = "drbd_adm_dump_peer_devices()",
 		[10] = "drbd_adm_dump_paths()",
+		[11] = "drbd_empty_twopc_work_fn()",
 	}
 };
 
