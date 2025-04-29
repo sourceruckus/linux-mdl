@@ -11,6 +11,11 @@
 
 
 * config history 6.12
+Started with Ubuntu Mainline's config-6.12.25-061225-generic Kernel
+Configuration, applied the Ubuntu kernel config annotations for lowlatency
+amd64, then made the following changes:
+
+
 
 
 * config history 6.6
@@ -57,7 +62,6 @@ Then made the following changes:
 - File Systems
   - GFS2: N (was M, but I never use this)
   - OCSF2: N (was M, but I never use this)
-
 
 * config history 6.1
 Started with my mdl/5.19 .config, see history below.  Walked through 'make
