@@ -18,6 +18,7 @@ amd64, then made the following changes:
 
 - General Setup
   - Local version: -mdl
+  - Kernel compression: LZ4 (can't do zstd until we upgrade xen on aragorn)
   - Kernel .config support: Y
     - /proc/config.gz: Y
   - Kernel headers: N (was M)
@@ -261,7 +262,6 @@ amd64, then made the following changes:
 These are the old config notes I did NOT follow when configuring 6.12:
 
 - General Setup
-  - Kernel compression: LZ4 (can't do zstd until we upgrade xen)
   - Include all symbols in kallsyms: N (was Y, had to disable debugging first)
   - Profiling support: N (was Y)
 
