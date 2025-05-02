@@ -1,14 +1,10 @@
 -*- org -*-
 
 * TODO
-- zfs v2.3.1
 - drbd v9.2.13
 - play with CONFIG_FW_LOADER_DEBUG! might not need my fw loading patch anymore!
 - Shrink config down more?
 - revisit networking support after weeding out device drivers (e.g., ceph)
-- CONFIG_MODULE_COMPRESSION - i had this off previously, i beleive because my
-  modules are usually compressed in initramfs and my rootfs is usually on ZFS
-  w/ compression?
 
 
 * config history 6.12
