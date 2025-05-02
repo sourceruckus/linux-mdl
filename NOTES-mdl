@@ -49,6 +49,7 @@ amd64, then made the following changes:
   - Module unloading
     - Forced module unloading: Y (was N)
     - Tainted module unload tracking (MODULE_UNLOAD_TAINT_TRACKING): Y (default was N)
+    - Automatically compress all modules: N (was Y)
 
 - Block Layer
   - Partition Types: Only the following
