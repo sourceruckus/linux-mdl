@@ -200,6 +200,7 @@ amd64, then made the following changes:
   - JFS: N
   - GFS2: N (was M, but I never use this)
   - OCSF2: N (was M, but I never use this)
+  - Btrfs: N (was M, but I never use this)
   - NILFS2: N    
   - F2FS: N
   - bcachefs: N (was M, EXPERIMENTAL)
