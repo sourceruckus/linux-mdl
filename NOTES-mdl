@@ -54,6 +54,23 @@ amd64, then made the following changes:
     - EFI GUID
 
 - Networking support
+  - Networking options
+    - MPTCP: Multipath TCP: N (was Y)
+    - The TIPC Protocol: N (was M)
+    - ATM: N (was M)
+    - L2TP: N (was M) (hold up, does wireguard require this?)
+    - Distributed Switch Architecture: N (was M)
+    - 802.2 LLC type 2 support: N (was M)
+    - Appletalk: N (was M)
+    - CCITT X.25 Packet Layer: N (was M)
+    - LAPB Data Link Driver: N (was M)
+    - Phonet protocols: N (was M)
+    - 6LoWPAN: N (was M)
+    - 802.15.4 Low-rate Wireless PAN: N (was M)
+    - Data Center Bridging: N (was M)
+    - BATMAN: N (was M)
+    - NCSI interface support: N (was Y)
+
   - Amateur Radio: N (was Y)
   - CAN bus: N (was M)
   - RxRPC session sockets: N (was M)
@@ -62,59 +79,6 @@ amd64, then made the following changes:
   - Plan9 Resource Sharing: N (was M)
   - CAIF support: N (was M)
   - NFC support: N (was M)
-
-- File Systems
-  - ZFS: Y (after merging code in from OpenZFS)
-  - Reiserfs: N (was M)
-  - JFS: N
-  - GFS2: N (was M, but I never use this)
-  - OCSF2: N (was M, but I never use this)
-  - NILFS2: N    
-  - F2FS: N
-  - bcachefs: N (was M, EXPERIMENTAL)
-  - zonefs: N (was M)
-  - Old quota: N
-  - Kernel automounter: Y (was M)
-  - Overlay: Y (was M)
-  - DOS/FAT
-    - NTFS: N (the old read-only one)
-  - Caches
-    - Support for on-demand read: Y (default was N)
-  - Misc: Only the following
-    - eCrypt: Y (was Y)
-      - notifications: Y (was Y)
-    - Squashfs: Y
-      - decompress directly to page cache (was the default)
-      - Select the parallel decompression mode during mount: Y (was Y)
-      - threads=: Y (was Y)
-      - XATTR: Y (was Y)
-      - ZLIB: Y (was Y)
-      - LZ4: Y (was Y)
-      - LZ0: Y (was Y)
-      - XZ: Y (was Y)
-      - ZSTD: Y (was Y)
-    - Persistent store: Y (was Y)
-      - 10240 (default)
-      - Pstore compression: Y (was Y)
-      - log panic/oops to RAM: Y (was M)
-      - log panic/oops to disk: Y (was M)
-    - VirtualBox shared folder: M (was M)
-  - Network File Systems:
-    - CEPH: N
-    - SMB direct: Y
-    - Coda: N
-    - AFS: N
-    - Plan9: N
-  - Native Language Support (just the following)
-    - default: utf8
-    - Codepage 437: Y
-    - Codepage 850: Y
-    - Codepage 863: Y
-    - ASCII: Y
-    - NLS ISO 8859-1: Y
-    - NLS ISO 8859-15: Y
-    - Codepage macroman: Y
-    - NLS UTF-8: Y
 
 - Device Drivers
   - PCCard (PCMCIA/CardBus) support: N
@@ -229,6 +193,59 @@ amd64, then made the following changes:
   - On-Chip Interconnect: N (was Y)
   - Counter: N (was M)
   - MOST: N (was M)
+
+- File Systems
+  - ZFS: Y (after merging code in from OpenZFS)
+  - Reiserfs: N (was M)
+  - JFS: N
+  - GFS2: N (was M, but I never use this)
+  - OCSF2: N (was M, but I never use this)
+  - NILFS2: N    
+  - F2FS: N
+  - bcachefs: N (was M, EXPERIMENTAL)
+  - zonefs: N (was M)
+  - Old quota: N
+  - Kernel automounter: Y (was M)
+  - Overlay: Y (was M)
+  - DOS/FAT
+    - NTFS: N (the old read-only one)
+  - Caches
+    - Support for on-demand read: Y (default was N)
+  - Misc: Only the following
+    - eCrypt: Y (was Y)
+      - notifications: Y (was Y)
+    - Squashfs: Y
+      - decompress directly to page cache (was the default)
+      - Select the parallel decompression mode during mount: Y (was Y)
+      - threads=: Y (was Y)
+      - XATTR: Y (was Y)
+      - ZLIB: Y (was Y)
+      - LZ4: Y (was Y)
+      - LZ0: Y (was Y)
+      - XZ: Y (was Y)
+      - ZSTD: Y (was Y)
+    - Persistent store: Y (was Y)
+      - 10240 (default)
+      - Pstore compression: Y (was Y)
+      - log panic/oops to RAM: Y (was M)
+      - log panic/oops to disk: Y (was M)
+    - VirtualBox shared folder: M (was M)
+  - Network File Systems:
+    - CEPH: N
+    - SMB direct: Y
+    - Coda: N
+    - AFS: N
+    - Plan9: N
+  - Native Language Support (just the following)
+    - default: utf8
+    - Codepage 437: Y
+    - Codepage 850: Y
+    - Codepage 863: Y
+    - ASCII: Y
+    - NLS ISO 8859-1: Y
+    - NLS ISO 8859-15: Y
+    - Codepage macroman: Y
+    - NLS UTF-8: Y
 
 - Security options
   - Infiniband security hooks: Y
