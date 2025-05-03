@@ -136,7 +136,6 @@ amd64, then made the following changes:
     - NVMe over Fabrics RDMA target support : M
   - Multiple Device support (RAID and LVM)
     - RAID-1: Y (was M)
-  - Generic Target Core Mod (TCM) and ConfigFS: N (was M)
   - Fusion MPT: N (was Y)
   - FireWare: N (was all M)
   - Mac drivers: N (was Y)
@@ -209,7 +208,8 @@ amd64, then made the following changes:
     - Xen filesystem: Y (was M)
     - userspace grant access device driver: Y (was M)
     - User-space grant reference allocator driver: Y (was M)
-    - XEN PV Calls backend: M (was N)
+    - Xen PV Calls backend: M (was N)
+    - Xen SCSI backend: M (was N)
     - Xen virtio: Y
       - Require Xen virtio support to use grants: Y (default was N)
   - Greybus: N (was M)
