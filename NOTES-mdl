@@ -1,7 +1,6 @@
 -*- org -*-
 
 * TODO
-- drbd v9.2.13
 - play with CONFIG_FW_LOADER_DEBUG! might not need my fw loading patch anymore!
 - Shrink config down more?
 - revisit networking support after weeding out device drivers (e.g., ceph)
@@ -125,9 +124,13 @@ amd64, then made the following changes:
   - MTD support: N (was M)
   - Parallel Port: N (was M)
   - Block devices
+    - Null test block driver: N (was M)
+    - Normal floppy disk: N (was M)
     - DRBD: Y (after removing DRBD8 and merging DRBD9 code in)
-    - RDMA Network Block Device driver client: M
-    - RDMA Network Block Device driver server: M
+    - ATA over Ethernet: N (was M)
+    - Network Block Device: N (was M)
+    - Rados Block Driver: N (was M)
+    - Userspace Block Driver: N (was M, EXPERIMENTAL)
   - NVME Support
     - NVM Express over Fabrics RDMA host driver: M
     - NVMe over Fabrics RDMA target support : M
