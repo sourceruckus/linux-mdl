@@ -2,8 +2,10 @@
 
 * TODO
 - play with CONFIG_FW_LOADER_DEBUG! might not need my fw loading patch anymore!
-- Shrink config down more?
-- revisit networking support after weeding out device drivers (e.g., ceph)
+- Shrink config down more?  My last attempt was disheartening, I cut out all
+  kinds of hopefully unneeded networking and filesystems, and it only cut the
+  installer size down by 2M.  Going to zstd for kernel compression would buy us
+  another 3M, but I still haven't uprdaded Xen on my build box...
 
 
 * config history 6.12
