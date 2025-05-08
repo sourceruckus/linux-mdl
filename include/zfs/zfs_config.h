@@ -680,6 +680,9 @@
 /* generic_copy_file_range() is available */
 /* #undef HAVE_VFS_GENERIC_COPY_FILE_RANGE */
 
+/* migratepage exists */
+/* #undef HAVE_VFS_MIGRATEPAGE */
+
 /* migrate_folio exists */
 #define HAVE_VFS_MIGRATE_FOLIO 1
 
@@ -780,7 +783,7 @@
 #define ZFS_DEVICE_MINOR 249
 
 /* Define the project alias string. */
-#define ZFS_META_ALIAS "zfs-2.3.1-1"
+#define ZFS_META_ALIAS "zfs-2.3.2-5_g858c42d1b"
 
 /* Define the project author. */
 #define ZFS_META_AUTHOR "OpenZFS"
@@ -789,7 +792,7 @@
 /* #undef ZFS_META_DATA */
 
 /* Define the maximum compatible kernel version. */
-#define ZFS_META_KVER_MAX "6.13"
+#define ZFS_META_KVER_MAX "6.14"
 
 /* Define the minimum compatible kernel version. */
 #define ZFS_META_KVER_MIN "4.18"
@@ -810,10 +813,10 @@
 #define ZFS_META_NAME "zfs"
 
 /* Define the project release. */
-#define ZFS_META_RELEASE "1"
+#define ZFS_META_RELEASE "5_g858c42d1b"
 
 /* Define the project version. */
-#define ZFS_META_VERSION "2.3.1"
+#define ZFS_META_VERSION "2.3.2"
 
 /* count is located in percpu_ref.data */
 #define ZFS_PERCPU_REF_COUNT_IN_DATA 1

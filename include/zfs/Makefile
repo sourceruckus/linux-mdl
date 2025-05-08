@@ -172,6 +172,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-register_sysctl_table.m4 \
 	$(top_srcdir)/config/kernel-rename.m4 \
 	$(top_srcdir)/config/kernel-revalidate-disk-size.m4 \
+	$(top_srcdir)/config/kernel-sb-dying.m4 \
 	$(top_srcdir)/config/kernel-sched.m4 \
 	$(top_srcdir)/config/kernel-security-inode-init.m4 \
 	$(top_srcdir)/config/kernel-set-nlink.m4 \
@@ -195,6 +196,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-vfs-fsync.m4 \
 	$(top_srcdir)/config/kernel-vfs-iov_iter.m4 \
 	$(top_srcdir)/config/kernel-vfs-migrate_folio.m4 \
+	$(top_srcdir)/config/kernel-vfs-migratepage.m4 \
 	$(top_srcdir)/config/kernel-vfs-read_folio.m4 \
 	$(top_srcdir)/config/kernel-vfs-set_page_dirty.m4 \
 	$(top_srcdir)/config/kernel-writepage_t.m4 \
@@ -677,7 +679,7 @@ LIBUUID_PC = uuid
 LINUX = /scrap/linux-mdl-6.12
 LINUX_OBJ = /scrap/linux-mdl-6.12
 LINUX_SYMBOLS = NONE
-LINUX_VERSION = 6.12.25-mdl+
+LINUX_VERSION = 6.12.27-mdl+
 LIPO = 
 LN_S = ln -s
 LTLIBICONV = -liconv
@@ -706,10 +708,10 @@ OTOOL64 =
 PACKAGE = zfs
 PACKAGE_BUGREPORT = 
 PACKAGE_NAME = zfs
-PACKAGE_STRING = zfs 2.3.1
+PACKAGE_STRING = zfs 2.3.2
 PACKAGE_TARNAME = zfs
 PACKAGE_URL = 
-PACKAGE_VERSION = 2.3.1
+PACKAGE_VERSION = 2.3.2
 PARALLEL = 
 PATH_SEPARATOR = :
 PKG_CONFIG = /usr/bin/pkg-config
@@ -733,7 +735,7 @@ QAT_OBJ =
 QAT_SRC = 
 QAT_SYMBOLS = 
 RANLIB = ranlib
-RELEASE = 1
+RELEASE = 5_g858c42d1b
 RM = rm -f
 RPM = rpm
 RPMBUILD = rpmbuild
@@ -761,25 +763,25 @@ UBSAN_LDFLAGS =
 UBSAN_ZFS = _without_ubsan
 USE_NLS = yes
 VENDOR = ubuntu
-VERSION = 2.3.1
+VERSION = 2.3.2
 WITH_DEBUG = 
 WITH_INVARIANTS = 
 XGETTEXT = /usr/bin/xgettext
 XGETTEXT_015 = /usr/bin/xgettext
 XGETTEXT_EXTRA_OPTIONS = 
 ZFS_CONFIG = all
-ZFS_META_ALIAS = zfs-2.3.1-1
+ZFS_META_ALIAS = zfs-2.3.2-5_g858c42d1b
 ZFS_META_AUTHOR = OpenZFS
 ZFS_META_DATA = 
-ZFS_META_KVER_MAX = 6.13
+ZFS_META_KVER_MAX = 6.14
 ZFS_META_KVER_MIN = 4.18
 ZFS_META_LICENSE = CDDL
 ZFS_META_LT_AGE = 
 ZFS_META_LT_CURRENT = 
 ZFS_META_LT_REVISION = 
 ZFS_META_NAME = zfs
-ZFS_META_RELEASE = 1
-ZFS_META_VERSION = 2.3.1
+ZFS_META_RELEASE = 5_g858c42d1b
+ZFS_META_VERSION = 2.3.2
 ZLIB_CFLAGS = 
 ZLIB_LIBS = -lz
 ZLIB_PC = zlib
