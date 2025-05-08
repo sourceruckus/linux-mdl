@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -144,12 +145,14 @@ struct vfsops zfs_vfsops = {
 	.vfs_quotactl =		zfs_quotactl,
 };
 
+VFS_SET(zfs_vfsops, zfs, VFCF_DELEGADMIN | VFCF_JAIL
 #ifdef VFCF_CROSS_COPY_FILE_RANGE
-VFS_SET(zfs_vfsops, zfs,
-    VFCF_DELEGADMIN | VFCF_JAIL | VFCF_CROSS_COPY_FILE_RANGE);
-#else
-VFS_SET(zfs_vfsops, zfs, VFCF_DELEGADMIN | VFCF_JAIL);
+	| VFCF_CROSS_COPY_FILE_RANGE
 #endif
+#ifdef VFCF_FILEREVINC
+	| VFCF_FILEREVINC
+#endif
+);
 
 /*
  * We need to keep a count of active fs's.
@@ -614,6 +617,14 @@ acl_type_changed_cb(void *arg, uint64_t newval)
 	zfsvfs->z_acl_type = newval;
 }
 
+static void
+longname_changed_cb(void *arg, uint64_t newval)
+{
+	zfsvfs_t *zfsvfs = arg;
+
+	zfsvfs->z_longname = newval;
+}
+
 static int
 zfs_register_callbacks(vfs_t *vfsp)
 {
@@ -751,6 +762,8 @@ zfs_register_callbacks(vfs_t *vfsp)
 	error = error ? error : dsl_prop_register(ds,
 	    zfs_prop_to_name(ZFS_PROP_ACLINHERIT), acl_inherit_changed_cb,
 	    zfsvfs);
+	error = error ? error : dsl_prop_register(ds,
+	    zfs_prop_to_name(ZFS_PROP_LONGNAME), longname_changed_cb, zfsvfs);
 	dsl_pool_config_exit(dmu_objset_pool(os), FTAG);
 	if (error)
 		goto unregister;
@@ -1489,7 +1502,8 @@ zfs_statfs(vfs_t *vfsp, struct statfs *statp)
 	strlcpy(statp->f_mntonname, vfsp->mnt_stat.f_mntonname,
 	    sizeof (statp->f_mntonname));
 
-	statp->f_namemax = MAXNAMELEN - 1;
+	statp->f_namemax =
+	    zfsvfs->z_longname ? (ZAP_MAXNAMELEN_NEW - 1) : (MAXNAMELEN - 1);
 
 	zfs_exit(zfsvfs, FTAG);
 	return (0);
@@ -1636,9 +1650,18 @@ zfsvfs_teardown(zfsvfs_t *zfsvfs, boolean_t unmounting)
 	zfs_unregister_callbacks(zfsvfs);
 
 	/*
-	 * Evict cached data
+	 * Evict cached data. We must write out any dirty data before
+	 * disowning the dataset.
 	 */
-	if (!zfs_is_readonly(zfsvfs))
+	objset_t *os = zfsvfs->z_os;
+	boolean_t os_dirty = B_FALSE;
+	for (int t = 0; t < TXG_SIZE; t++) {
+		if (dmu_objset_is_dirty(os, t)) {
+			os_dirty = B_TRUE;
+			break;
+		}
+	}
+	if (!zfs_is_readonly(zfsvfs) && os_dirty)
 		txg_wait_synced(dmu_objset_pool(zfsvfs->z_os), 0);
 	dmu_objset_evict_dbufs(zfsvfs->z_os);
 	dd = zfsvfs->z_os->os_dsl_dataset->ds_dir;
@@ -2175,7 +2198,7 @@ zfs_set_version(zfsvfs_t *zfsvfs, uint64_t newvers)
 		    ZFS_SA_ATTRS);
 		dmu_tx_hold_zap(tx, DMU_NEW_OBJECT, FALSE, NULL);
 	}
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
 		return (error);

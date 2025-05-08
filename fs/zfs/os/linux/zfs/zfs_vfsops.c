@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -57,8 +58,10 @@
 #include <sys/dmu_objset.h>
 #include <sys/dsl_dir.h>
 #include <sys/objlist.h>
+#include <sys/zfeature.h>
 #include <sys/zpl.h>
 #include <linux/vfs_compat.h>
+#include <linux/fs.h>
 #include "zfs_comutil.h"
 
 enum {
@@ -163,7 +166,7 @@ zfsvfs_parse_option(char *option, int token, substring_t *args, vfs_t *vfsp)
 		vfsp->vfs_do_xattr = B_TRUE;
 		break;
 	case TOKEN_XATTR:
-		vfsp->vfs_xattr = ZFS_XATTR_DIR;
+		vfsp->vfs_xattr = ZFS_XATTR_SA;
 		vfsp->vfs_do_xattr = B_TRUE;
 		break;
 	case TOKEN_NOXATTR:
@@ -450,6 +453,12 @@ acl_inherit_changed_cb(void *arg, uint64_t newval)
 	((zfsvfs_t *)arg)->z_acl_inherit = newval;
 }
 
+static void
+longname_changed_cb(void *arg, uint64_t newval)
+{
+	((zfsvfs_t *)arg)->z_longname = newval;
+}
+
 static int
 zfs_register_callbacks(vfs_t *vfsp)
 {
@@ -510,6 +519,8 @@ zfs_register_callbacks(vfs_t *vfsp)
 	    zfsvfs);
 	error = error ? error : dsl_prop_register(ds,
 	    zfs_prop_to_name(ZFS_PROP_NBMAND), nbmand_changed_cb, zfsvfs);
+	error = error ? error : dsl_prop_register(ds,
+	    zfs_prop_to_name(ZFS_PROP_LONGNAME), longname_changed_cb, zfsvfs);
 	dsl_pool_config_exit(dmu_objset_pool(os), FTAG);
 	if (error)
 		goto unregister;
@@ -1141,7 +1152,8 @@ zfs_statvfs(struct inode *ip, struct kstatfs *statp)
 	statp->f_fsid.val[0] = (uint32_t)fsid;
 	statp->f_fsid.val[1] = (uint32_t)(fsid >> 32);
 	statp->f_type = ZFS_SUPER_MAGIC;
-	statp->f_namelen = MAXNAMELEN - 1;
+	statp->f_namelen =
+	    zfsvfs->z_longname ? (ZAP_MAXNAMELEN_NEW - 1) : (MAXNAMELEN - 1);
 
 	/*
 	 * We have all of 40 characters to stuff a string here.
@@ -1206,14 +1218,22 @@ zfs_prune(struct super_block *sb, unsigned long nr_to_scan, int *objects)
 
 #ifdef SHRINKER_NUMA_AWARE
 	if (shrinker->flags & SHRINKER_NUMA_AWARE) {
+		long tc = 1;
+		for_each_online_node(sc.nid) {
+			long c = shrinker->count_objects(shrinker, &sc);
+			if (c  == 0 || c == SHRINK_EMPTY)
+				continue;
+			tc += c;
+		}
 		*objects = 0;
 		for_each_online_node(sc.nid) {
+			long c = shrinker->count_objects(shrinker, &sc);
+			if (c  == 0 || c == SHRINK_EMPTY)
+				continue;
+			if (c > tc)
+				tc = c;
+			sc.nr_to_scan = mult_frac(nr_to_scan, c, tc) + 1;
 			*objects += (*shrinker->scan_objects)(shrinker, &sc);
-			/*
-			 * reset sc.nr_to_scan, modified by
-			 * scan_objects == super_cache_scan
-			 */
-			sc.nr_to_scan = nr_to_scan;
 		}
 	} else {
 			*objects = (*shrinker->scan_objects)(shrinker, &sc);
@@ -1683,8 +1703,14 @@ zfs_vget(struct super_block *sb, struct inode **ipp, fid_t *fidp)
 	/* A zero fid_gen means we are in the .zfs control directories */
 	if (fid_gen == 0 &&
 	    (object == ZFSCTL_INO_ROOT || object == ZFSCTL_INO_SNAPDIR)) {
+		if (zfsvfs->z_show_ctldir == ZFS_SNAPDIR_DISABLED) {
+			zfs_exit(zfsvfs, FTAG);
+			return (SET_ERROR(ENOENT));
+		}
+
 		*ipp = zfsvfs->z_ctldir;
 		ASSERT(*ipp != NULL);
+
 		if (object == ZFSCTL_INO_SNAPDIR) {
 			VERIFY(zfsctl_root_lookup(*ipp, "snapshot", ipp,
 			    0, kcred, NULL, NULL) == 0);
@@ -1936,7 +1962,7 @@ zfs_set_version(zfsvfs_t *zfsvfs, uint64_t newvers)
 		    ZFS_SA_ATTRS);
 		dmu_tx_hold_zap(tx, DMU_NEW_OBJECT, FALSE, NULL);
 	}
-	error = dmu_tx_assign(tx, TXG_WAIT);
+	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error) {
 		dmu_tx_abort(tx);
 		return (error);

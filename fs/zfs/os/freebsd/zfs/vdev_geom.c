@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -1014,21 +1015,6 @@ vdev_geom_io_intr(struct bio *bp)
 		zio->io_error = SET_ERROR(EIO);
 
 	switch (zio->io_error) {
-	case ENOTSUP:
-		/*
-		 * If we get ENOTSUP for BIO_FLUSH or BIO_DELETE we know
-		 * that future attempts will never succeed. In this case
-		 * we set a persistent flag so that we don't bother with
-		 * requests in the future.
-		 */
-		switch (bp->bio_cmd) {
-		case BIO_FLUSH:
-			vd->vdev_nowritecache = B_TRUE;
-			break;
-		case BIO_DELETE:
-			break;
-		}
-		break;
 	case ENXIO:
 		if (!vd->vdev_remove_wanted) {
 			/*
@@ -1049,7 +1035,7 @@ vdev_geom_io_intr(struct bio *bp)
 	/*
 	 * We have to split bio freeing into two parts, because the ABD code
 	 * cannot be called in this context and vdev_op_io_done is not called
-	 * for ZIO_TYPE_IOCTL zio-s.
+	 * for ZIO_TYPE_FLUSH zio-s.
 	 */
 	if (zio->io_type != ZIO_TYPE_READ && zio->io_type != ZIO_TYPE_WRITE) {
 		g_destroy_bio(bp);
@@ -1149,46 +1135,35 @@ vdev_geom_io_start(zio_t *zio)
 
 	vd = zio->io_vd;
 
-	switch (zio->io_type) {
-	case ZIO_TYPE_IOCTL:
+	if (zio->io_type == ZIO_TYPE_FLUSH) {
 		/* XXPOLICY */
 		if (!vdev_readable(vd)) {
 			zio->io_error = SET_ERROR(ENXIO);
 			zio_interrupt(zio);
 			return;
-		} else {
-			switch (zio->io_cmd) {
-			case DKIOCFLUSHWRITECACHE:
-				if (zfs_nocacheflush ||
-				    vdev_geom_bio_flush_disable)
-					break;
-				if (vd->vdev_nowritecache) {
-					zio->io_error = SET_ERROR(ENOTSUP);
-					break;
-				}
-				goto sendreq;
-			default:
-				zio->io_error = SET_ERROR(ENOTSUP);
-			}
 		}
 
-		zio_execute(zio);
-		return;
-	case ZIO_TYPE_TRIM:
-		if (!vdev_geom_bio_delete_disable) {
-			goto sendreq;
+		if (zfs_nocacheflush || vdev_geom_bio_flush_disable) {
+			zio_execute(zio);
+			return;
 		}
-		zio_execute(zio);
-		return;
-	default:
-			;
-		/* PASSTHROUGH --- placate compiler */
+
+		if (vd->vdev_nowritecache) {
+			zio->io_error = SET_ERROR(ENOTSUP);
+			zio_execute(zio);
+			return;
+		}
+	} else if (zio->io_type == ZIO_TYPE_TRIM) {
+		if (vdev_geom_bio_delete_disable) {
+			zio_execute(zio);
+			return;
+		}
 	}
-sendreq:
+
 	ASSERT(zio->io_type == ZIO_TYPE_READ ||
 	    zio->io_type == ZIO_TYPE_WRITE ||
 	    zio->io_type == ZIO_TYPE_TRIM ||
-	    zio->io_type == ZIO_TYPE_IOCTL);
+	    zio->io_type == ZIO_TYPE_FLUSH);
 
 	cp = vd->vdev_tsd;
 	if (cp == NULL) {
@@ -1240,7 +1215,7 @@ sendreq:
 		bp->bio_offset = zio->io_offset;
 		bp->bio_length = zio->io_size;
 		break;
-	case ZIO_TYPE_IOCTL:
+	case ZIO_TYPE_FLUSH:
 		bp->bio_cmd = BIO_FLUSH;
 		bp->bio_data = NULL;
 		bp->bio_offset = cp->provider->mediasize;

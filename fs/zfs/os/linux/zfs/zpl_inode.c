@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -21,6 +22,7 @@
 /*
  * Copyright (c) 2011, Lawrence Livermore National Security, LLC.
  * Copyright (c) 2015 by Chunwei Chen. All rights reserved.
+ * Copyright (c) 2025, Rob Norris <robn@despairlabs.com>
  */
 
 
@@ -30,6 +32,7 @@
 #include <sys/zfs_vnops.h>
 #include <sys/zfs_znode.h>
 #include <sys/dmu_objset.h>
+#include <sys/spa_impl.h>
 #include <sys/vfs.h>
 #include <sys/zpl.h>
 #include <sys/file.h>
@@ -46,9 +49,29 @@ zpl_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 	pathname_t pn;
 	int zfs_flags = 0;
 	zfsvfs_t *zfsvfs = dentry->d_sb->s_fs_info;
+	dsl_dataset_t *ds = dmu_objset_ds(zfsvfs->z_os);
+	size_t dlen = dlen(dentry);
 
-	if (dlen(dentry) >= ZAP_MAXNAMELEN)
+	/*
+	 * If z_longname is disabled, disallow create or rename of names
+	 * longer than ZAP_MAXNAMELEN.
+	 *
+	 * This is needed in cases where longname was enabled first and some
+	 * files/dirs with names > ZAP_MAXNAMELEN were created. And later
+	 * longname was disabled. In such a case allow access to existing
+	 * longnames. But disallow creation newer longnamed entities.
+	 */
+	if (!zfsvfs->z_longname && (dlen >= ZAP_MAXNAMELEN)) {
+		/*
+		 * If this is for create or rename fail it.
+		 */
+		if (!dsl_dataset_feature_is_active(ds, SPA_FEATURE_LONGNAME) ||
+		    (flags & (LOOKUP_CREATE | LOOKUP_RENAME_TARGET)))
+			return (ERR_PTR(-ENAMETOOLONG));
+	}
+	if (dlen >= ZAP_MAXNAMELEN_NEW) {
 		return (ERR_PTR(-ENAMETOOLONG));
+	}
 
 	crhold(cr);
 	cookie = spl_fstrans_mark();
@@ -131,6 +154,16 @@ zpl_vap_init(vattr_t *vap, struct inode *dir, umode_t mode, cred_t *cr,
 	}
 }
 
+static inline bool
+is_nametoolong(struct dentry *dentry)
+{
+	zfsvfs_t *zfsvfs = dentry->d_sb->s_fs_info;
+	size_t dlen = dlen(dentry);
+
+	return ((!zfsvfs->z_longname && dlen >= ZAP_MAXNAMELEN) ||
+	    dlen >= ZAP_MAXNAMELEN_NEW);
+}
+
 static int
 #ifdef HAVE_IOPS_CREATE_USERNS
 zpl_create(struct user_namespace *user_ns, struct inode *dir,
@@ -150,6 +183,10 @@ zpl_create(struct inode *dir, struct dentry *dentry, umode_t mode, bool flag)
 #if !(defined(HAVE_IOPS_CREATE_USERNS) || defined(HAVE_IOPS_CREATE_IDMAP))
 	zidmap_t *user_ns = kcred->user_ns;
 #endif
+
+	if (is_nametoolong(dentry)) {
+		return (-ENAMETOOLONG);
+	}
 
 	crhold(cr);
 	vap = kmem_zalloc(sizeof (vattr_t), KM_SLEEP);
@@ -200,6 +237,10 @@ zpl_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 #if !(defined(HAVE_IOPS_MKNOD_USERNS) || defined(HAVE_IOPS_MKNOD_IDMAP))
 	zidmap_t *user_ns = kcred->user_ns;
 #endif
+
+	if (is_nametoolong(dentry)) {
+		return (-ENAMETOOLONG);
+	}
 
 	/*
 	 * We currently expect Linux to supply rdev=0 for all sockets
@@ -353,6 +394,10 @@ zpl_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	zidmap_t *user_ns = kcred->user_ns;
 #endif
 
+	if (is_nametoolong(dentry)) {
+		return (-ENAMETOOLONG);
+	}
+
 	crhold(cr);
 	vap = kmem_zalloc(sizeof (vattr_t), KM_SLEEP);
 	zpl_vap_init(vap, dir, mode | S_IFDIR, cr, user_ns);
@@ -445,6 +490,17 @@ zpl_getattr_impl(const struct path *path, struct kstat *stat, u32 request_mask,
 	if (request_mask & STATX_BTIME) {
 		stat->btime = zp->z_btime;
 		stat->result_mask |= STATX_BTIME;
+	}
+#endif
+
+#ifdef STATX_DIOALIGN
+	if (request_mask & STATX_DIOALIGN) {
+		uint64_t align;
+		if (zfs_get_direct_alignment(zp, &align) == 0) {
+			stat->dio_mem_align = PAGE_SIZE;
+			stat->dio_offset_align = align;
+			stat->result_mask |= STATX_DIOALIGN;
+		}
 	}
 #endif
 
@@ -568,6 +624,10 @@ zpl_rename2(struct inode *sdip, struct dentry *sdentry,
 	zidmap_t *user_ns = kcred->user_ns;
 #endif
 
+	if (is_nametoolong(tdentry)) {
+		return (-ENAMETOOLONG);
+	}
+
 	crhold(cr);
 	if (rflags & RENAME_WHITEOUT) {
 		wo_vap = kmem_zalloc(sizeof (vattr_t), KM_SLEEP);
@@ -617,6 +677,10 @@ zpl_symlink(struct inode *dir, struct dentry *dentry, const char *name)
 #if !(defined(HAVE_IOPS_SYMLINK_USERNS) || defined(HAVE_IOPS_SYMLINK_IDMAP))
 	zidmap_t *user_ns = kcred->user_ns;
 #endif
+
+	if (is_nametoolong(dentry)) {
+		return (-ENAMETOOLONG);
+	}
 
 	crhold(cr);
 	vap = kmem_zalloc(sizeof (vattr_t), KM_SLEEP);
@@ -706,6 +770,10 @@ zpl_link(struct dentry *old_dentry, struct inode *dir, struct dentry *dentry)
 	struct inode *ip = old_dentry->d_inode;
 	int error;
 	fstrans_cookie_t cookie;
+
+	if (is_nametoolong(dentry)) {
+		return (-ENAMETOOLONG);
+	}
 
 	if (ip->i_nlink >= ZFS_LINK_MAX)
 		return (-EMLINK);

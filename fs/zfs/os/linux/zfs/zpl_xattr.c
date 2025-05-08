@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -153,19 +154,20 @@ static int
 zpl_xattr_readdir(struct inode *dxip, xattr_filldir_t *xf)
 {
 	zap_cursor_t zc;
-	zap_attribute_t	zap;
+	zap_attribute_t	*zap = zap_attribute_alloc();
 	int error;
 
 	zap_cursor_init(&zc, ITOZSB(dxip)->z_os, ITOZ(dxip)->z_id);
 
-	while ((error = -zap_cursor_retrieve(&zc, &zap)) == 0) {
+	while ((error = -zap_cursor_retrieve(&zc, zap)) == 0) {
 
-		if (zap.za_integer_length != 8 || zap.za_num_integers != 1) {
+		if (zap->za_integer_length != 8 || zap->za_num_integers != 1) {
 			error = -ENXIO;
 			break;
 		}
 
-		error = zpl_xattr_filldir(xf, zap.za_name, strlen(zap.za_name));
+		error = zpl_xattr_filldir(xf, zap->za_name,
+		    strlen(zap->za_name));
 		if (error)
 			break;
 
@@ -173,6 +175,7 @@ zpl_xattr_readdir(struct inode *dxip, xattr_filldir_t *xf)
 	}
 
 	zap_cursor_fini(&zc);
+	zap_attribute_free(zap);
 
 	if (error == -ENOENT)
 		error = 0;

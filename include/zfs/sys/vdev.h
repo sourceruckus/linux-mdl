@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -99,6 +100,7 @@ extern boolean_t vdev_replace_in_progress(vdev_t *vdev);
 extern void vdev_hold(vdev_t *);
 extern void vdev_rele(vdev_t *);
 
+void vdev_update_nonallocating_space(vdev_t *vd, boolean_t add);
 extern int vdev_metaslab_init(vdev_t *vd, uint64_t txg);
 extern void vdev_metaslab_fini(vdev_t *vd);
 extern void vdev_metaslab_set_size(vdev_t *);
@@ -106,12 +108,12 @@ extern void vdev_expand(vdev_t *vd, uint64_t txg);
 extern void vdev_split(vdev_t *vd);
 extern void vdev_deadman(vdev_t *vd, const char *tag);
 
-typedef void vdev_xlate_func_t(void *arg, range_seg64_t *physical_rs);
+typedef void vdev_xlate_func_t(void *arg, zfs_range_seg64_t *physical_rs);
 
-extern boolean_t vdev_xlate_is_empty(range_seg64_t *rs);
-extern void vdev_xlate(vdev_t *vd, const range_seg64_t *logical_rs,
-    range_seg64_t *physical_rs, range_seg64_t *remain_rs);
-extern void vdev_xlate_walk(vdev_t *vd, const range_seg64_t *logical_rs,
+extern boolean_t vdev_xlate_is_empty(zfs_range_seg64_t *rs);
+extern void vdev_xlate(vdev_t *vd, const zfs_range_seg64_t *logical_rs,
+    zfs_range_seg64_t *physical_rs, zfs_range_seg64_t *remain_rs);
+extern void vdev_xlate_walk(vdev_t *vd, const zfs_range_seg64_t *logical_rs,
     vdev_xlate_func_t *func, void *arg);
 
 extern void vdev_get_stats_ex(vdev_t *vd, vdev_stat_t *vs, vdev_stat_ex_t *vsx);
@@ -132,15 +134,19 @@ extern void vdev_space_update(vdev_t *vd,
 
 extern int64_t vdev_deflated_space(vdev_t *vd, int64_t space);
 
+extern uint64_t vdev_psize_to_asize_txg(vdev_t *vd, uint64_t psize,
+    uint64_t txg);
 extern uint64_t vdev_psize_to_asize(vdev_t *vd, uint64_t psize);
 
 /*
- * Return the amount of space allocated for a gang block header.
+ * Return the amount of space allocated for a gang block header.  Note that
+ * since the physical birth txg is not provided, this must be constant for
+ * a given vdev.  (e.g. raidz expansion can't change this)
  */
 static inline uint64_t
 vdev_gang_header_asize(vdev_t *vd)
 {
-	return (vdev_psize_to_asize(vd, SPA_GANGBLOCKSIZE));
+	return (vdev_psize_to_asize_txg(vd, SPA_GANGBLOCKSIZE, 0));
 }
 
 extern int vdev_fault(spa_t *spa, uint64_t guid, vdev_aux_t aux);
@@ -204,6 +210,7 @@ extern void vdev_label_write(zio_t *zio, vdev_t *vd, int l, abd_t *buf, uint64_t
     offset, uint64_t size, zio_done_func_t *done, void *priv, int flags);
 extern int vdev_label_read_bootenv(vdev_t *, nvlist_t *);
 extern int vdev_label_write_bootenv(vdev_t *, nvlist_t *);
+extern int vdev_uberblock_sync_list(vdev_t **, int, struct uberblock *, int);
 extern int vdev_check_boot_reserve(spa_t *, vdev_t *);
 
 typedef enum {

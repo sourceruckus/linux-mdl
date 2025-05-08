@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -1921,8 +1922,8 @@ zfs_acl_ids_create(znode_t *dzp, int flag, vattr_t *vap, cred_t *cr,
 			    zfsvfs->z_acl_inherit != ZFS_ACL_PASSTHROUGH &&
 			    zfsvfs->z_acl_inherit != ZFS_ACL_PASSTHROUGH_X)
 				trim = B_TRUE;
-			zfs_acl_chmod(vap->va_mode, acl_ids->z_mode, B_FALSE,
-			    trim, acl_ids->z_aclp);
+			zfs_acl_chmod(S_ISDIR(vap->va_mode), acl_ids->z_mode,
+			    B_FALSE, trim, acl_ids->z_aclp);
 		}
 	}
 
@@ -2187,7 +2188,7 @@ top:
 	}
 
 	zfs_sa_upgrade_txholds(tx, zp);
-	error = dmu_tx_assign(tx, TXG_NOWAIT);
+	error = dmu_tx_assign(tx, DMU_TX_NOWAIT);
 	if (error) {
 		mutex_exit(&zp->z_acl_lock);
 		mutex_exit(&zp->z_lock);

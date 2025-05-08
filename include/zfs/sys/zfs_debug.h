@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -58,6 +59,7 @@ extern int zfs_dbgmsg_enable;
 #define	ZFS_DEBUG_LOG_SPACEMAP		(1 << 12)
 #define	ZFS_DEBUG_METASLAB_ALLOC	(1 << 13)
 #define	ZFS_DEBUG_BRT			(1 << 14)
+#define	ZFS_DEBUG_RAIDZ_RECONSTRUCT	(1 << 15)
 
 extern void __set_error(const char *file, const char *func, int line, int err);
 extern void __zfs_dbgmsg(char *buf);

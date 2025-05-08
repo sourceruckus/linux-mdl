@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -335,7 +336,7 @@ struct dnode {
 	/* protected by dn_mtx: */
 	kmutex_t dn_mtx;
 	list_t dn_dirty_records[TXG_SIZE];
-	struct range_tree *dn_free_ranges[TXG_SIZE];
+	struct zfs_range_tree *dn_free_ranges[TXG_SIZE];
 	uint64_t dn_allocated_txg;
 	uint64_t dn_free_txg;
 	uint64_t dn_assigned_txg;
@@ -380,6 +381,9 @@ struct dnode {
 
 	/* holds prefetch structure */
 	struct zfetch	dn_zfetch;
+
+	/* Not in dn_phys, but should be. set it after taking a hold */
+	dmu_object_type_t dn_storage_type;	/* type for storage class */
 };
 
 /*
@@ -461,6 +465,8 @@ int dnode_next_offset(dnode_t *dn, int flags, uint64_t *off,
 void dnode_evict_dbufs(dnode_t *dn);
 void dnode_evict_bonus(dnode_t *dn);
 void dnode_free_interior_slots(dnode_t *dn);
+
+void dnode_set_storage_type(dnode_t *dn, dmu_object_type_t type);
 
 #define	DNODE_IS_DIRTY(_dn)						\
 	((_dn)->dn_dirty_txg >= spa_syncing_txg((_dn)->dn_objset->os_spa))
