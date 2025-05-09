@@ -227,8 +227,8 @@
 /* DECLARE_EVENT_CLASS() is available */
 #define HAVE_DECLARE_EVENT_CLASS 1
 
-/* dequeue_signal() takes a task argument */
-/* #undef HAVE_DEQUEUE_SIGNAL_3ARG_TASK */
+/* 3-arg dequeue_signal() takes a type argument */
+/* #undef HAVE_DEQUEUE_SIGNAL_3ARG_TYPE */
 
 /* dequeue_signal() takes 4 arguments */
 #define HAVE_DEQUEUE_SIGNAL_4ARG 1
@@ -247,6 +247,9 @@
 
 /* Define to 1 if you have the <dlfcn.h> header file. */
 #define HAVE_DLFCN_H 1
+
+/* dops->d_revalidate() takes 4 args */
+/* #undef HAVE_D_REVALIDATE_4ARGS */
 
 /* Define to 1 if you have the `execvpe' function. */
 #define HAVE_EXECVPE 1
@@ -395,9 +398,6 @@
 /* iops->symlink() takes struct user_namespace* */
 /* #undef HAVE_IOPS_SYMLINK_USERNS */
 
-/* iov_iter_get_pages() is available */
-/* #undef HAVE_IOV_ITER_GET_PAGES */
-
 /* iov_iter_get_pages2() is available */
 #define HAVE_IOV_ITER_GET_PAGES2 1
 
@@ -409,6 +409,9 @@
 
 /* iter_iov() is available */
 #define HAVE_ITER_IOV 1
+
+/* iter_is_ubuf() is available */
+#define HAVE_ITER_IS_UBUF 1
 
 /* kernel has kernel_fpu_* functions */
 #define HAVE_KERNEL_FPU 1
@@ -459,13 +462,16 @@
 #define HAVE_LIBUDEV 1
 
 /* Define if you have [unwind] */
-/* #undef HAVE_LIBUNWIND */
+#define HAVE_LIBUNWIND 1
 
 /* libunwind has unw_get_elf_filename */
 /* #undef HAVE_LIBUNWIND_ELF */
 
 /* Define if you have [uuid] */
 #define HAVE_LIBUUID 1
+
+/* building against unsupported kernel version */
+/* #undef HAVE_LINUX_EXPERIMENTAL */
 
 /* makedev() is declared in sys/mkdev.h */
 /* #undef HAVE_MAKEDEV_IN_MKDEV */
@@ -505,6 +511,9 @@
 
 /* Define if host toolchain supports PCLMULQDQ */
 #define HAVE_PCLMULQDQ 1
+
+/* pin_user_pages_unlocked() is available */
+#define HAVE_PIN_USER_PAGES_UNLOCKED 1
 
 /* proc_handler ctl_table arg is const */
 /* #undef HAVE_PROC_HANDLER_CTL_TABLE_CONST */
@@ -596,9 +605,6 @@
 /* Define to 1 if you have the <stdlib.h> header file. */
 #define HAVE_STDLIB_H 1
 
-/* Define to 1 if you have the `strerror_l' function. */
-#define HAVE_STRERROR_L 1
-
 /* Define to 1 if you have the <strings.h> header file. */
 #define HAVE_STRINGS_H 1
 
@@ -668,20 +674,17 @@
 /* fops->dedupe_file_range() is available */
 /* #undef HAVE_VFS_DEDUPE_FILE_RANGE */
 
-/* aops->direct_IO() uses iov_iter without rw */
-#define HAVE_VFS_DIRECT_IO_ITER 1
-
-/* aops->direct_IO() uses iov_iter with offset */
-/* #undef HAVE_VFS_DIRECT_IO_ITER_OFFSET */
-
 /* filemap_dirty_folio exists */
 #define HAVE_VFS_FILEMAP_DIRTY_FOLIO 1
 
 /* generic_copy_file_range() is available */
 #define HAVE_VFS_GENERIC_COPY_FILE_RANGE 1
 
-/* All required iov_iter interfaces are available */
-#define HAVE_VFS_IOV_ITER 1
+/* migratepage exists */
+/* #undef HAVE_VFS_MIGRATEPAGE */
+
+/* migrate_folio exists */
+#define HAVE_VFS_MIGRATE_FOLIO 1
 
 /* address_space_operations->readpages exists */
 /* #undef HAVE_VFS_READPAGES */
@@ -780,7 +783,7 @@
 #define ZFS_DEVICE_MINOR 249
 
 /* Define the project alias string. */
-#define ZFS_META_ALIAS "zfs-2.2.7-1"
+#define ZFS_META_ALIAS "zfs-2.3.2-5_g858c42d1b"
 
 /* Define the project author. */
 #define ZFS_META_AUTHOR "OpenZFS"
@@ -789,7 +792,7 @@
 /* #undef ZFS_META_DATA */
 
 /* Define the maximum compatible kernel version. */
-#define ZFS_META_KVER_MAX "6.12"
+#define ZFS_META_KVER_MAX "6.14"
 
 /* Define the minimum compatible kernel version. */
 #define ZFS_META_KVER_MIN "4.18"
@@ -810,10 +813,10 @@
 #define ZFS_META_NAME "zfs"
 
 /* Define the project release. */
-#define ZFS_META_RELEASE "1"
+#define ZFS_META_RELEASE "5_g858c42d1b"
 
 /* Define the project version. */
-#define ZFS_META_VERSION "2.2.7"
+#define ZFS_META_VERSION "2.3.2"
 
 /* count is located in percpu_ref.data */
 #define ZFS_PERCPU_REF_COUNT_IN_DATA 1

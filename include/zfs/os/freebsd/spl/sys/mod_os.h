@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2020 iXsystems, Inc.
  * All rights reserved.
@@ -73,6 +74,9 @@
 #define	param_set_deadman_failmode_args(var) \
     CTLTYPE_STRING, NULL, 0, param_set_deadman_failmode, "A"
 
+#define	param_set_active_allocator_args(var) \
+    CTLTYPE_STRING, NULL, 0, param_set_active_allocator, "A"
+
 #define	param_set_deadman_synctime_args(var) \
     CTLTYPE_U64, NULL, 0, param_set_deadman_synctime, "QU"
 
@@ -90,6 +94,9 @@
 
 #define	param_set_max_auto_ashift_args(var) \
     CTLTYPE_UINT, NULL, 0, param_set_max_auto_ashift, "IU"
+
+#define	param_set_raidz_impl_args(var) \
+    CTLTYPE_STRING, NULL, 0, param_set_raidz_impl, "A"
 
 #define	spa_taskq_read_param_set_args(var) \
     CTLTYPE_STRING, NULL, 0, spa_taskq_read_param, "A"

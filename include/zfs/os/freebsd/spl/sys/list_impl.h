@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -39,7 +40,6 @@ struct list_node {
 };
 
 struct list {
-	size_t	list_size;
 	size_t	list_offset;
 	struct list_node list_head;
 };

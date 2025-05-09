@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -32,7 +33,6 @@
 #include <linux/exportfs.h>
 #include <linux/falloc.h>
 #include <linux/parser.h>
-#include <linux/task_io_accounting_ops.h>
 #include <linux/vfs_compat.h>
 #include <linux/writeback.h>
 #include <linux/xattr_compat.h>

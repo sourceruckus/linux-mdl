@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CDDL-1.0
 /*
  * CDDL HEADER START
  *
@@ -160,6 +161,12 @@ abd_fletcher_4_byteswap(abd_t *abd, uint64_t size,
 	abd_fletcher_4_impl(abd, size, &acd);
 }
 
+/*
+ * Checksum vectors.
+ *
+ * Note: you cannot change the name string for these functions, as they are
+ * embedded in on-disk data in some places (eg dedup table names).
+ */
 zio_checksum_info_t zio_checksum_table[ZIO_CHECKSUM_FUNCTIONS] = {
 	{{NULL, NULL}, NULL, NULL, 0, "inherit"},
 	{{NULL, NULL}, NULL, NULL, 0, "on"},
@@ -272,7 +279,7 @@ static void
 zio_checksum_gang_verifier(zio_cksum_t *zcp, const blkptr_t *bp)
 {
 	const dva_t *dva = BP_IDENTITY(bp);
-	uint64_t txg = BP_PHYSICAL_BIRTH(bp);
+	uint64_t txg = BP_GET_BIRTH(bp);
 
 	ASSERT(BP_IS_GANG(bp));
 
