@@ -276,22 +276,46 @@ amd64, then made the following changes:
     - Fault-injections of functions: N (was Y)
     - Runtime Testing: N (was Y)
 
+* maybe
+- General Setup
+  - Configure standard kernel features (EXPERT): Y (was Y, set N to disable DEBUG, then back to Y so we can disable KALLSYMS)
+  - Include all symbols in kallsyms: N (was Y, had to disable KPROBES, EXPERT off/on, DEBUG, FTRACE first)
+  - Profiling support: N (was Y)
+
+- General architecture-dependent options
+  - Kprobes: N (was Y)
+
+- Kernel Hacking
+  - Kernel debugging: Y (was Y, disabled temporarily via EXPERT=n, then back to Y)
+    - Misc debug: N (was Y)
+  - Memory Debugging:
+    - Enable SLUB debug: N (was Y)
+    - Poison pages after freeing: N (was Y)
+    - KFENCE: N (was Y)
+  - Scheduler debugging:
+    - Collect scheduler debug info: N (was Y)
+    - Collect scheduler statistics: N (was Y)
+  - Stack backtrace: N (was Y)
+  - RCU Debugging:
+    - Provide additional RCU stall debug: N (was Y)
+    - Enable tracing for RCU: N (was Y)
+  - Tracers: N (was Y)
+  - x86 debugging:
+    - Debug the x86 FPU code: N (was Y)
+    - ATOM Punit debug driver: N (was M)
+    - Choose kernel unwinder: ORC (was Frame Pointer)
+  - Kernel Testing and Coverage
+    - Memtest: N (was Y)
+
 * config differences from 6.6
 
 These are the old config notes I did NOT follow when configuring 6.12:
-
-- General Setup
-  - Include all symbols in kallsyms: N (was Y, had to disable debugging first)
-  - Profiling support: N (was Y)
 
 - Processor type and features
   - Linux Guest Support
     - Intel TDX: Y (default was N)
   - Performance Monitoring
     - AMD Processor Power Reporting Mechanism: M
-
-- General architecture-dependent options
-  - Kprobes: N (was Y)
 
 - Enable loadable module support
   - Module versioning: N (was Y)
@@ -304,20 +328,6 @@ These are the old config notes I did NOT follow when configuring 6.12:
     - Delay each boot printk: N (was Y)
   - Compile-time checks
     - vmlinux.map: N (was Y)
-  - Memory Debugging:
-    - Poison pages after freeing: N (was Y)
-    - KFENCE: N (was Y)
-  - Scheduler debugging:
-    - Collect scheduler debug info: N (was Y)
-    - Collect scheduler statistics: N (was Y)
-  - Stack backtrace: N (was Y)
   - Latency measuring infrastructure: N (was Y)
-  - Tracers: N (was Y)
   - x86 debugging:
     - IO delay type: port 0x80 [recommended] (was 0xed)
-    - Debug the x86 FPU code: N (was Y)
-    - ATOM Punit debug driver: N (was M)
-    - Choose kernel unwinder: ORC (was Frame Pointer)
-  - Kernel Testing and Coverage
-    - Memtest: N (was Y)
-
