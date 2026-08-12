@@ -1,13 +1,8 @@
 -*- org -*-
 
 * TODO
-- OpenZFS 2.3.4 (supports up to 6.16, 6.17 support in 2.4.0-rc, 6.18 should be next LTS)
-- DRBD 9.2.15 (supports up to 6.16, 6.17-rc5 verified so maybe 6.17)
-- play with CONFIG_FW_LOADER_DEBUG! might not need my fw loading patch anymore!
-- Shrink config down more?  My last attempt was disheartening, I cut out all
-  kinds of hopefully unneeded networking and filesystems, and it only cut the
-  installer size down by 2M.  Going to zstd for kernel compression would buy us
-  another 3M, but I still haven't uprdaded Xen on my build box...
+- OpenZFS 2.4.3 (once I've fully tested via my 6.18 kernel)
+- DRBD 9.3.3 (once I've fully tested via my 6.18 kernel)
 
 
 * config history 6.12
