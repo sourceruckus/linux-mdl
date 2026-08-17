@@ -47,6 +47,7 @@ cp -v $DRBDDIR/drbd/Kconfig .
 cp -v $DRBDDIR/drbd/build-current/Kbuild Makefile
 cp -v $DRBDDIR/drbd/build-current/linux/drbd*.h ../../../include/linux/
 cp -v $DRBDDIR/drbd/build-current/drbd-headers/drbd*.[ch] .
+mv -v drbd_protocol.h ../../../include/linux/
 cp -v $DRBDDIR/drbd/build-current/drbd-headers/linux/*.h ../../../include/linux/
 cp -v $DRBDDIR/drbd/build-current/drbd-kernel-compat/drbd_wrappers.[ch] .
 cp -v $DRBDDIR/drbd/build-current/compat.h ../../../include/linux/drbd_compat.h
@@ -61,6 +62,12 @@ cp -v $DRBDDIR/drbd/build-current/compat.h ../../../include/linux/drbd_compat.h
 sed -i 's|#include "compat.h"|#include <linux/drbd_compat.h>|' \
     ../../../include/linux/genl_magic_struct.h \
     drbd_wrappers.h
+
+# same with drbd_protocol.h
+sed -i 's|#include <drbd_protocol.h>|#include <linux/drbd_protocol.h>|' \
+    ../../../include/linux/drbd*.h
+sed -i 's|#include "drbd_protocol.h"|#include <linux/drbd_protocol.h>|' \
+    *.h *.c
 
 # And finally, we have to tweak a couple of include statements to work nicely
 # now that we've actually split headers out into their propper locations:
