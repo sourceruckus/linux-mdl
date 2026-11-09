@@ -282,6 +282,15 @@
 /* flush_dcache_page() is GPL-only */
 /* #undef HAVE_FLUSH_DCACHE_PAGE_GPL_ONLY */
 
+/* use __flush_workqueue() to flush delay workqueue */
+#define HAVE_FLUSH_DELAY_WORKQUEUE_INTERNAL 1
+
+/* use system_delay_wq for delay workqueue */
+#define HAVE_FLUSH_DELAY_WORKQUEUE_PERCPU 1
+
+/* follow_down() takes a flags parameter */
+#define HAVE_FOLLOW_DOWN_FLAGS 1
+
 /* Define if compiler supports -Wformat-overflow */
 #define HAVE_FORMAT_OVERFLOW 1
 
@@ -342,11 +351,17 @@
 /* iops->setattr() takes struct mnt_idmap* */
 #define HAVE_IDMAP_IOPS_SETATTR 1
 
+/* id mapping mechanism is mnt_idmap */
+#define HAVE_IDMAP_MNTIDMAP 1
+
 /* APIs for idmapped mount are present */
 #define HAVE_IDMAP_MNT_API 1
 
 /* mnt_idmap does not have user_namespace */
 #define HAVE_IDMAP_NO_USERNS 1
+
+/* id mapping mechanism is user_namespace */
+/* #undef HAVE_IDMAP_USERNS */
 
 /* Define if compiler supports -Wimplicit-fallthrough */
 #define HAVE_IMPLICIT_FALLTHROUGH 1
@@ -588,9 +603,6 @@
 /* register_sysctl_table exists */
 /* #undef HAVE_REGISTER_SYSCTL_TABLE */
 
-/* iops->rename() wants flags */
-/* #undef HAVE_RENAME_WANTS_FLAGS */
-
 /* revalidate_disk() is available */
 /* #undef HAVE_REVALIDATE_DISK */
 
@@ -762,6 +774,12 @@
 /* migrate_folio exists */
 #define HAVE_VFS_MIGRATE_FOLIO 1
 
+/* vfs_parse_fs_string() takes 3 args */
+#define HAVE_VFS_PARSE_FS_STRING_3ARGS 1
+
+/* vfs_path_lookup() is exported */
+/* #undef HAVE_VFS_PATH_LOOKUP_EXPORTED */
+
 /* address_space_operations->readpages exists */
 /* #undef HAVE_VFS_READPAGES */
 
@@ -873,7 +891,7 @@
 #define ZFS_DEVICE_MINOR 249
 
 /* Define the project alias string. */
-#define ZFS_META_ALIAS "zfs-2.4.3-4_g341637e9e"
+#define ZFS_META_ALIAS "zfs-2.4.4-5_gfd50ac6e5"
 
 /* Define the project author. */
 #define ZFS_META_AUTHOR "OpenZFS"
@@ -882,7 +900,7 @@
 /* #undef ZFS_META_DATA */
 
 /* Define the maximum compatible kernel version. */
-#define ZFS_META_KVER_MAX "7.0"
+#define ZFS_META_KVER_MAX "7.2"
 
 /* Define the minimum compatible kernel version. */
 #define ZFS_META_KVER_MIN "4.18"
@@ -903,10 +921,10 @@
 #define ZFS_META_NAME "zfs"
 
 /* Define the project release. */
-#define ZFS_META_RELEASE "4_g341637e9e"
+#define ZFS_META_RELEASE "5_gfd50ac6e5"
 
 /* Define the project version. */
-#define ZFS_META_VERSION "2.4.3"
+#define ZFS_META_VERSION "2.4.4"
 
 /* count is located in percpu_ref.data */
 #define ZFS_PERCPU_REF_COUNT_IN_DATA 1

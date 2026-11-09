@@ -86,14 +86,14 @@ clean: clean-Linux
 modules_uninstall-Linux-legacy:
 	$(RM) -r $(addprefix $(KMODDIR)/$(INSTALL_MOD_DIR)/,spl/ avl/ icp/ lua/ nvpair/ unicode/ zcommon/ zfs/ zstd/)
 
-KMODDIR := $(INSTALL_MOD_PATH)/lib/modules/6.18.44-mdl+
+KMODDIR := $(INSTALL_MOD_PATH)/lib/modules/6.18.54-mdl+
 modules_install-Linux: modules_uninstall-Linux-legacy
 	@# Install the kernel modules
 	$(MAKE) -C /scrap/linux-mdl-6.18 M="$$PWD" modules_install \
 		INSTALL_MOD_PATH=$(INSTALL_MOD_PATH) \
 		INSTALL_MOD_DIR=$(INSTALL_MOD_DIR) \
 		$(if ,ARCH=) \
-		KERNELRELEASE=6.18.44-mdl+
+		KERNELRELEASE=6.18.54-mdl+
 	@# Remove extraneous build products when packaging
 	if [ -n "$(DESTDIR)" ] && [ "$(DONT_DELETE_MODULES_FILES)" != "1" ]; then \
 		find $(KMODDIR) -name 'modules.*' -delete; \
@@ -104,11 +104,11 @@ modules_install-Linux: modules_uninstall-Linux-legacy
 	@# Naturally, depmod is less than amused by this.
 	@# So if we find it missing or with one of these present,
 	@# we check for the alternate path for the System.map
-	sysmap=$(INSTALL_MOD_PATH)/boot/System.map-6.18.44-mdl+; \
+	sysmap=$(INSTALL_MOD_PATH)/boot/System.map-6.18.54-mdl+; \
 	{ [ -f "$$sysmap" ] && [ $$(wc -l < "$$sysmap") -ge 100 ]; } || \
-		sysmap=$(INSTALL_MOD_PATH)/usr/lib/debug/boot/System.map-6.18.44-mdl+; \
+		sysmap=$(INSTALL_MOD_PATH)/usr/lib/debug/boot/System.map-6.18.54-mdl+; \
 	if [ -f $$sysmap ]; then \
-		depmod -ae -F $$sysmap 6.18.44-mdl+ -b $(INSTALL_MOD_PATH)/; \
+		depmod -ae -F $$sysmap 6.18.54-mdl+ -b $(INSTALL_MOD_PATH)/; \
 	fi
 
 modules_install-FreeBSD:
@@ -118,8 +118,8 @@ modules_install-FreeBSD:
 modules_install: modules_install-Linux
 
 data_install-Linux:
-	@mkdir -p $(DESTDIR)//usr/src/zfs-2.4.3/6.18.44-mdl+
-	cp ../zfs.release ../zfs_config.h NONE $(DESTDIR)//usr/src/zfs-2.4.3/6.18.44-mdl+
+	@mkdir -p $(DESTDIR)//usr/src/zfs-2.4.4/6.18.54-mdl+
+	cp ../zfs.release ../zfs_config.h NONE $(DESTDIR)//usr/src/zfs-2.4.4/6.18.54-mdl+
 
 data_install-FreeBSD:
 	@
@@ -136,7 +136,7 @@ modules_uninstall-FreeBSD:
 modules_uninstall: modules_uninstall-Linux
 
 data_uninstall-Linux:
-	$(RM) $(addprefix $(DESTDIR)//usr/src/zfs-2.4.3/6.18.44-mdl+/,zfs.release zfs_config.h NONE)
+	$(RM) $(addprefix $(DESTDIR)//usr/src/zfs-2.4.4/6.18.54-mdl+/,zfs.release zfs_config.h NONE)
 
 data_uninstall-FreeBSD:
 	@
@@ -166,7 +166,8 @@ cppcheck-FreeBSD:
 cppcheck: cppcheck-Linux
 
 distdir:
-	cd . && find . -name '*.[chS]' -exec sh -c 'for f; do mkdir -p $$distdir/$${f%/*}; cp ./$$f $$distdir/$$f; done' _ {} +
+	( cd . && find . -name '*.[chS]' ) | \
+	  while read f; do mkdir -p $$distdir/$${f%/*}; cp ./$$f $$distdir/$$f; done
 	cp ./Makefile.bsd $$distdir/Makefile.bsd
 
 gen-zstd-symbols:
