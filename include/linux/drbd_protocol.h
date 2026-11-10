@@ -70,7 +70,10 @@ enum drbd_packet {
 	P_RS_CANCEL           = 0x29, /* meta: Used to cancel RS_DATA_REQUEST packet by SyncSource */
 	P_CONN_ST_CHG_REQ     = 0x2a, /* data sock: state change request */
 	P_CONN_ST_CHG_REPLY   = 0x2b, /* meta sock: state change reply */
-	P_RETRY_WRITE	      = 0x2c, /* Protocol C: retry conflicting write request */
+	P_RETRY_WRITE	      = 0x2c, /* meta sock: Protocol C: peer did not process this write, retry it.
+				       * Was the 8.4 two-primaries conflict retry; reused, gated by
+				       * DRBD_FF_WRITE_POSTPONE, as the answer to a write a sync
+				       * target can not secure toward its sync source. */
 	P_PROTOCOL_UPDATE     = 0x2d, /* data sock: is used in established connections */
 	P_TWOPC_PREPARE       = 0x2e, /* data sock: prepare state change */
 	P_TWOPC_ABORT         = 0x2f, /* data sock: abort state change */
@@ -129,6 +132,10 @@ enum drbd_packet {
 	P_FLUSH_REQUESTS_ACK  = 0x57, /* data sock: Response to initiator of P_FLUSH_REQUESTS */
 	P_ENABLE_REPLICATION_NEXT = 0x58, /* data sock: whether to start replication on next resync start */
 	P_ENABLE_REPLICATION  = 0x59, /* data sock: enable or disable replication during resync */
+
+	P_RS_DAGTAG_WAIT_REQ  = 0x5a, /* data sock: Wait for the dagtag dependency only, answer without data */
+	P_RS_DAGTAG_REACHED   = 0x5b, /* meta sock: The dagtag dependency of this request is reached. */
+	P_RS_DAGTAG_UNREACHABLE = 0x5c, /* meta sock: Can not reach the dagtag this request depends on. */
 
 	P_MAY_IGNORE	      = 0x100, /* Flag to test if (cmd > P_MAY_IGNORE) ... */
 
@@ -229,6 +236,8 @@ struct p_wsame {
  *   P_RS_CANCEL
  *   P_RS_DEALLOCATED_ID
  *   P_RS_CANCEL_AHEAD
+ *   P_RS_DAGTAG_REACHED
+ *   P_RS_DAGTAG_UNREACHABLE
  */
 struct p_block_ack {
 	uint64_t sector;
@@ -288,6 +297,7 @@ struct p_block_req {
  *   P_RS_THIN_DAGTAG_REQ
  *   P_OV_DAGTAG_REQ
  *   P_OV_DAGTAG_REPLY
+ *   P_RS_DAGTAG_WAIT_REQ
  */
 struct p_rs_req {
 	struct p_block_req_common req_common;
@@ -390,6 +400,21 @@ struct p_rs_req {
  */
 #define DRBD_FF_RECONCILE_RECONNECT 512
 
+/* A sync target that received a write in a range the sync source is still to
+ * resync does not acknowledge it before the source holds that write too: it
+ * asks with P_RS_DAGTAG_WAIT_REQ, naming the write's position in the writer's
+ * stream, and the source answers P_RS_DAGTAG_REACHED once its copy of that
+ * stream has reached the position, or P_RS_DAGTAG_UNREACHABLE when it has
+ * lost the writer. In the unreachable case the target answers the writer
+ * P_RETRY_WRITE: the write counts as not processed, and the writer retries
+ * it once the cluster can order it again.
+ *
+ * Advertised by every node that answers dagtag wait requests, serves a resync
+ * to a target that secures its writes, sends the postpone answer, and retries
+ * a postponed write.
+ */
+#define DRBD_FF_WRITE_POSTPONE 1024
+
 struct p_connection_features {
 	uint32_t protocol_min;
 	uint32_t feature_flags;
@@ -484,6 +509,7 @@ struct p_protocol {
 #define UUID_FLAG_PRIMARY_LOST_QUORUM ((u64)1 << 10)
 #define UUID_FLAG_SYNC_TARGET         ((u64)1 << 11) /* currently L_SYNC_TARGET to some peer */
 #define UUID_FLAG_HAS_UNALLOC         ((u64)1 << 12) /* highest byte contains index of not allocated bitmap uuid */
+#define UUID_FLAG_BITMAP_AUTHORITATIVE ((u64)1 << 13) /* my out-of-sync bits toward you were set for blocks you lack, not by a resync or an invalidate; protocol 125 */
 
 #define UUID_FLAG_UNALLOC_SHIFT       56
 #define UUID_FLAG_UNALLOC_MASK        ((u64)0xff << UUID_FLAG_UNALLOC_SHIFT)

@@ -58,7 +58,7 @@ void drbd_md_endio(struct bio *bio)
 	device = bio->bi_private;
 	device->md_io.error = blk_status_to_errno(status);
 
-	/* special case: drbd_md_read() during drbd_adm_attach() */
+	/* special case: drbd_md_read() during drbd_nl_attach_doit() */
 	if (device->ldev)
 		put_ldev(device);
 	bio_put(bio);
@@ -681,7 +681,6 @@ static int make_one_resync_request(struct drbd_peer_device *peer_device, int dis
 				       size, REQ_OP_WRITE);
 	if (!peer_req) {
 		drbd_err(device, "Could not allocate resync request\n");
-		put_ldev(device);
 		return -EAGAIN;
 	}
 
@@ -2587,7 +2586,7 @@ int w_e_end_ov_reply(struct drbd_work *w, int cancel)
 /* FIXME
  * We need to track the number of pending barrier acks,
  * and to be able to wait for them.
- * See also comment in drbd_adm_attach before drbd_suspend_io.
+ * See also comment in drbd_nl_attach_doit before drbd_suspend_io.
  */
 static int drbd_send_barrier(struct drbd_connection *connection)
 {
@@ -2616,6 +2615,11 @@ static int drbd_send_barrier(struct drbd_connection *connection)
 static bool need_unplug(struct drbd_connection *connection)
 {
 	unsigned i = connection->todo.unplug_slot;
+
+	/* Nobody to hint to below C_CONNECTED. */
+	if (connection->cstate[NOW] < C_CONNECTED)
+		return false;
+
 	return dagtag_newer_eq(connection->send.current_dagtag_sector,
 			connection->todo.unplug_dagtag_sector[i]);
 }
@@ -3322,7 +3326,7 @@ static void go_diskless(struct drbd_device *device)
 
 				rcu_read_lock();
 				for_each_peer_device_rcu(peer_device, device)
-					drbd_md_set_peer_flag(peer_device, MDF_PEER_FULL_SYNC);
+					drbd_md_set_peer_flag(peer_device, __MDF_PEER_FULL_SYNC);
 				rcu_read_unlock();
 			}
 		}
@@ -3438,22 +3442,37 @@ void drbd_check_peers(struct drbd_resource *resource)
 	wake_up_all(&resource->state_wait);
 }
 
-void drbd_check_peers_new_current_uuid(struct drbd_device *device)
+enum drbd_mint_outcome drbd_check_peers_new_current_uuid(struct drbd_device *device)
 {
 	struct drbd_resource *resource = device->resource;
 
 	drbd_check_peers(resource);
 
 	/* gen-rotate reason: DEGRADE (peer disconnected; create deferred bump once quorate) */
-	if (device->have_quorum[NOW] && drbd_data_accessible(device, NOW))
-		drbd_uuid_new_current(device, false);
+	if (!device->have_quorum[NOW] || !drbd_data_accessible(device, NOW))
+		return MINT_NOT_EVALUATED;
+
+	return drbd_uuid_new_current(device, false);
 }
 
-static void make_new_current_uuid(struct drbd_device *device)
+/* The mint executor.  A materialized obligation is about writes this node
+ * decided to complete without a lost replica: the settle round must not delay
+ * that generation, and the quorum and data gate must not decline it.
+ *
+ * Runs in the worker for a dispatched mint, and in the caller's thread where
+ * one waits for the outcome; both enter it through drbd_gen_obligation_mint_start().
+ * It sleeps.
+ */
+void drbd_gen_obligation_mint_run(struct drbd_device *device)
 {
-	drbd_check_peers_new_current_uuid(device);
+	enum drbd_mint_outcome outcome;
 
-	get_work_bits(1UL << NEW_CUR_UUID | 1UL << WRITING_NEW_CUR_UUID, &device->flags);
+	if (drbd_gen_obligation_materialized(device))
+		outcome = drbd_uuid_new_current(device, false);
+	else
+		outcome = drbd_check_peers_new_current_uuid(device);
+
+	drbd_gen_obligation_mint_done(device, outcome);
 	wake_up(&device->misc_wait);
 }
 
@@ -3464,7 +3483,9 @@ static void do_device_work(struct drbd_device *device, const unsigned long todo)
 	if (test_bit(GO_DISKLESS, &todo))
 		go_diskless(device);
 	if (test_bit(MAKE_NEW_CUR_UUID, &todo))
-		make_new_current_uuid(device);
+		drbd_gen_obligation_mint_run(device);
+	if (test_bit(AUTO_GROW, &todo))
+		drbd_auto_grow(device);
 }
 
 static void do_peer_device_work(struct drbd_peer_device *peer_device, const unsigned long todo)
@@ -3486,6 +3507,7 @@ static void do_peer_device_work(struct drbd_peer_device *peer_device, const unsi
 	((1UL << GO_DISKLESS)	\
 	|(1UL << MD_SYNC)	\
 	|(1UL << MAKE_NEW_CUR_UUID)\
+	|(1UL << AUTO_GROW)	\
 	)
 
 #define DRBD_PEER_DEVICE_WORK_MASK	\
@@ -3572,29 +3594,44 @@ static struct drbd_request *__next_request_for_connection(
 static struct drbd_request *tl_next_request_for_connection(
 		struct drbd_connection *connection, bool wait_ready)
 {
+	struct drbd_request *req;
+
+	/*
+	 * No cstate check here, unlike drbd-9.2: a request that is
+	 * RQ_NET_QUEUED holds an oos_send_ref and stays on the transfer log
+	 * until process_one_request() retires it, and tl_walk(CONNECTION_LOST)
+	 * skips a request that is already RQ_NET_DONE. The sender therefore
+	 * still has to hand out queued requests below C_CONNECTED, even though
+	 * every send in process_one_request() fails there.
+	 */
 	if (connection->todo.req_next == NULL)
 		connection->todo.req_next = __next_request_for_connection(connection);
 
-	if (connection->todo.req_next == NULL) {
-		connection->todo.req = NULL;
-	} else {
-		unsigned int s = connection->todo.req_next->net_rq_state[connection->peer_node_id];
-
-		if (likely((s & RQ_NET_READY) || !wait_ready)) {
-			connection->todo.req = connection->todo.req_next;
-			connection->send.seen_dagtag_sector = connection->todo.req->dagtag_sector;
-		} else {
-			/* Leave the request in "req_next" until it is ready */
-			connection->todo.req = NULL;
-		}
+	req = connection->todo.req_next;
+	if (req && wait_ready &&
+	    !(req->net_rq_state[connection->peer_node_id] & RQ_NET_READY)) {
+		/*
+		 * The oldest queued request only announces out-of-sync blocks
+		 * and becomes ready once it is done. That may take a while,
+		 * and it may even depend on the barrier ack for the epoch of
+		 * a preceding write. Do not hold back the requests behind it;
+		 * process the oldest ready one instead. Leave the request in
+		 * "req_next" until it is ready.
+		 */
+		req = READ_ONCE(connection->req_next_ready);
 	}
+
+	connection->todo.req = req;
+	if (req)
+		connection->send.seen_dagtag_sector = req->dagtag_sector;
 
 	/*
 	 * Advancement of todo.req_next happens in advance_conn_req_next(),
-	 * called from mod_rq_state()
+	 * that of req_next_ready in advance_cache_ptr(), both called from
+	 * mod_rq_state()
 	 */
 
-	return connection->todo.req;
+	return req;
 }
 
 static void maybe_send_state_after_ahead(struct drbd_connection *connection)
@@ -3635,13 +3672,30 @@ static bool check_sender_todo(struct drbd_connection *connection)
 		|| !list_empty(&connection->todo.work_list);
 }
 
-static bool drbd_send_barrier_next_oos(struct drbd_connection *connection)
+/*
+ * Whether all requests that the sender has to process are in the transfer log
+ * and have been processed. Requests that only announce out-of-sync blocks do
+ * not count: they are not ready before they are done, and the sender has
+ * passed them.
+ *
+ * Replicated writes are ready as soon as they are added to the transfer log,
+ * so req_next_ready is set while any of them waits to be processed. A write
+ * that is being submitted has not yet reached the transfer log, so it is not
+ * covered by that. Take tl_update_lock to wait for it.
+ */
+static bool drbd_sender_processed_all_writes(struct drbd_connection *connection)
 {
-	if (!connection->todo.req_next)
-		return false;
+	struct drbd_resource *resource = connection->resource;
+	struct drbd_request *req_next;
+	bool ready;
 
-	return connection->todo.req_next->net_rq_state[connection->peer_node_id]
-		& RQ_NET_PENDING_OOS;
+	spin_lock_irq(&resource->tl_update_lock);
+	req_next = connection->todo.req_next;
+	ready = (req_next && (req_next->net_rq_state[connection->peer_node_id] & RQ_NET_READY)) ||
+		READ_ONCE(connection->req_next_ready);
+	spin_unlock_irq(&resource->tl_update_lock);
+
+	return !ready;
 }
 
 static void wait_for_sender_todo(struct drbd_connection *connection)
@@ -3672,7 +3726,8 @@ static void wait_for_sender_todo(struct drbd_connection *connection)
 	}
 
 	for (;;) {
-		int send_barrier;
+		bool send_barrier = false;
+
 		prepare_to_wait(&connection->sender_work.q_wait, &wait,
 				TASK_INTERRUPTIBLE);
 		if (check_sender_todo(connection) || signal_pending(current)) {
@@ -3686,7 +3741,8 @@ static void wait_for_sender_todo(struct drbd_connection *connection)
 		 * from the epoch of the last request we communicated, we want
 		 * to send the epoch separating barrier now.
 		 */
-		send_barrier = should_send_barrier(connection,
+		if (connection->cstate[NOW] >= C_CONNECTED)
+			send_barrier = should_send_barrier(connection,
 					atomic_read(&resource->current_tle_nr));
 
 		if (send_barrier) {
@@ -3701,13 +3757,17 @@ static void wait_for_sender_todo(struct drbd_connection *connection)
 			 * this case. If there is such a request then this
 			 * sender will be woken, so it is OK to schedule().
 			 *
-			 * If we have found a request that is
-			 * RQ_NET_PENDING_OOS, but not yet RQ_NET_READY, then
-			 * we also need to send a barrier.
+			 * Requests that only announce out-of-sync blocks are
+			 * not ready before they are done. The sender passes
+			 * them, so it may not have seen the most recent
+			 * dagtag although it has processed all replicated
+			 * writes. Then check that no further write is queued
+			 * or being submitted, so that we do not send a
+			 * barrier early in this case either.
 			 */
 			if (dagtag_newer_eq(connection->send.seen_dagtag_sector,
-						READ_ONCE(resource->dagtag_sector))
-					|| drbd_send_barrier_next_oos(connection)) {
+						READ_ONCE(resource->dagtag_sector)) ||
+					drbd_sender_processed_all_writes(connection)) {
 				finish_wait(&connection->sender_work.q_wait, &wait);
 				maybe_send_barrier(connection,
 						connection->send.current_epoch_nr + 1);
@@ -3764,11 +3824,21 @@ static bool should_send_barrier(struct drbd_connection *connection, unsigned int
 static void maybe_send_barrier(struct drbd_connection *connection, unsigned int epoch)
 {
 	/* re-init if first write on this connection */
-	if (should_send_barrier(connection, epoch)) {
-		if (connection->send.current_epoch_writes)
-			drbd_send_barrier(connection);
-		connection->send.current_epoch_nr = epoch;
-	}
+	if (!should_send_barrier(connection, epoch))
+		return;
+
+	/*
+	 * A request that only announces out-of-sync blocks is processed once
+	 * it is done. By then, the sender may have closed its epoch already.
+	 * Never step back to a closed epoch, the requests processed since
+	 * belong to the current one.
+	 */
+	if ((int)(epoch - connection->send.current_epoch_nr) < 0)
+		return;
+
+	if (connection->send.current_epoch_writes)
+		drbd_send_barrier(connection);
+	connection->send.current_epoch_nr = epoch;
 }
 
 /* The reconcile peer we asserted UpToDate on its predecessor generation has
@@ -3831,7 +3901,10 @@ static int process_one_request(struct drbd_connection *connection)
 			/* this time, no connection->send.current_epoch_writes++;
 			 * If it was sent, it was the closing barrier for the last
 			 * replicated epoch, before we went into AHEAD mode.
-			 * No more barriers will be sent, until we leave AHEAD mode again. */
+			 * No more barriers will be sent, until we leave AHEAD mode again.
+			 * If this request became ready only after its epoch
+			 * was closed, maybe_send_barrier() does nothing.
+			 */
 			maybe_send_barrier(connection, req->epoch);
 
 			/* make sure the state change to L_AHEAD/L_BEHIND
@@ -3931,6 +4004,11 @@ int drbd_sender(struct drbd_thread *thi)
 
 	while (get_t_state(thi) == RUNNING) {
 		drbd_thread_current_set_cpu(thi);
+
+		/* The only other places this thread can yield the CPU are
+		 * wait_for_sender_todo() and a network send.
+		 */
+		cond_resched();
 
 		if (list_empty(&connection->todo.work_list) &&
 		    connection->todo.req == NULL) {

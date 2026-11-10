@@ -14,7 +14,9 @@
 #include <linux/tcp.h>
 #include <linux/highmem.h>
 #include <linux/bio.h>
-#include <linux/drbd_genl_api.h>
+#include <linux/drbd.h>
+#include <uapi/linux/drbd_genl.h>
+#include <linux/drbd_nl_gen.h>
 #include <linux/drbd_config.h>
 #include <linux/tls.h>
 #include <net/tcp.h>
@@ -510,29 +512,29 @@ static int dtt_try_connect(struct dtt_path *path, struct socket **ret_socket)
 	*  able to use lo: interfaces for drbd.
 	* Make sure to use 0 as port number, so linux selects
 	*  a free one dynamically.
-# 5 "/scrap/drbd/drbd/build-6.18.44-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 512 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 5 "/scrap/drbd/drbd/build-6.18.62-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 514 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 	*/
 	what = "bind before connect";
-# 516 "/scrap/drbd/drbd/drbd_transport_tcp.c"
-# 9 "/scrap/drbd/drbd/build-6.18.44-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 520 "/scrap/drbd/drbd/build-6.18.44-mdl+/drbd_transport_tcp.c"
+# 518 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 9 "/scrap/drbd/drbd/build-6.18.62-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 522 "/scrap/drbd/drbd/build-6.18.62-mdl+/drbd_transport_tcp.c"
 	err = socket->ops->bind(socket, (struct sockaddr *) &my_addr,
 				path->path.my_addr_len);
-# 11 "/scrap/drbd/drbd/build-6.18.44-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 516 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 11 "/scrap/drbd/drbd/build-6.18.62-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 518 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 	if (err < 0)
 		goto out;
 
 	/* connect may fail, peer not yet available.
 	 * stay C_CONNECTING, don't go Disconnecting! */
 	what = "connect";
-# 523 "/scrap/drbd/drbd/drbd_transport_tcp.c"
-# 18 "/scrap/drbd/drbd/build-6.18.44-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 533 "/scrap/drbd/drbd/build-6.18.44-mdl+/drbd_transport_tcp.c"
+# 525 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 18 "/scrap/drbd/drbd/build-6.18.62-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 535 "/scrap/drbd/drbd/build-6.18.62-mdl+/drbd_transport_tcp.c"
 	err = socket->ops->connect(socket, (struct sockaddr *) &peer_addr,
-# 19 "/scrap/drbd/drbd/build-6.18.44-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 523 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 19 "/scrap/drbd/drbd/build-6.18.62-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 525 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 				   path->path.peer_addr_len, 0);
 	if (err < 0) {
 		err = dtt_socket_err_to_eagain(err);
@@ -937,8 +939,20 @@ static void dtt_control_data_ready_work(struct work_struct *item)
 	while (true) {
 		n = dtt_recv_short(csocket, tcp_transport->rbuf[CONTROL_STREAM].base, PAGE_SIZE,
 				   MSG_DONTWAIT | MSG_NOSIGNAL);
-		if (n <= 0)
+		if (n == 0) {
+			/* Orderly shutdown: the peer closed the meta socket, and
+			 * the close surfaced here as EOF rather than (or before) a
+			 * state-change callback. Do not silently drop it -- treat
+			 * it as a peer-initiated disconnect, mirroring
+			 * dtt_control_state_change(). Otherwise the connection
+			 * lingers until the ping timeout, or forever on a transport
+			 * that reports a close only through the receive path.
+			 */
+			drbd_control_event(&tcp_transport->transport, CLOSED_BY_PEER);
 			break;
+		}
+		if (n < 0)
+			break;	/* -EAGAIN: nothing more available right now */
 
 		drbd_buffer.buffer = tcp_transport->rbuf[CONTROL_STREAM].base;
 		drbd_buffer.avail = n;
@@ -1078,13 +1092,13 @@ static int dtt_init_listener(struct drbd_transport *transport,
 	addr_len = addr->sa_family == AF_INET6 ? sizeof(struct sockaddr_in6)
 		: sizeof(struct sockaddr_in);
 
-# 1069 "/scrap/drbd/drbd/drbd_transport_tcp.c"
-# 27 "/scrap/drbd/drbd/build-6.18.44-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 1084 "/scrap/drbd/drbd/build-6.18.44-mdl+/drbd_transport_tcp.c"
+# 1083 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 27 "/scrap/drbd/drbd/build-6.18.62-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1098 "/scrap/drbd/drbd/build-6.18.62-mdl+/drbd_transport_tcp.c"
 	err = s_listen->ops->bind(s_listen, (struct sockaddr *)&my_addr,
 				  addr_len);
-# 29 "/scrap/drbd/drbd/build-6.18.44-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 1069 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 29 "/scrap/drbd/drbd/build-6.18.62-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1083 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 	if (err < 0) {
 		what = "bind before listen";
 		goto out;
@@ -1579,22 +1593,22 @@ static int dtt_send_page(struct drbd_transport *transport, enum drbd_stream stre
 			struct page *p = page + (offset >> PAGE_SHIFT);
 			unsigned int poff = offset & ~PAGE_MASK;
 			unsigned int chunk = min_t(int, len, PAGE_SIZE - poff);
-# 1564 "/scrap/drbd/drbd/drbd_transport_tcp.c"
-# 37 "/scrap/drbd/drbd/build-6.18.44-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 1585 "/scrap/drbd/drbd/build-6.18.44-mdl+/drbd_transport_tcp.c"
+# 1578 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 37 "/scrap/drbd/drbd/build-6.18.62-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1599 "/scrap/drbd/drbd/build-6.18.62-mdl+/drbd_transport_tcp.c"
 			void *addr = kmap(p);
-# 38 "/scrap/drbd/drbd/build-6.18.44-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 1564 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 38 "/scrap/drbd/drbd/build-6.18.62-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1578 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 			struct kvec iov = { .iov_base = addr + poff, .iov_len = chunk };
 
 			iov_iter_kvec(&msg.msg_iter, ITER_SOURCE, &iov, 1, chunk);
 			sent = sock_sendmsg(socket, &msg);
-# 1569 "/scrap/drbd/drbd/drbd_transport_tcp.c"
-# 43 "/scrap/drbd/drbd/build-6.18.44-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 1595 "/scrap/drbd/drbd/build-6.18.44-mdl+/drbd_transport_tcp.c"
+# 1583 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 43 "/scrap/drbd/drbd/build-6.18.62-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1609 "/scrap/drbd/drbd/build-6.18.62-mdl+/drbd_transport_tcp.c"
 			kunmap(p);
-# 44 "/scrap/drbd/drbd/build-6.18.44-mdl+/.patches/drbd_transport_tcp.c.patch"
-# 1569 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 44 "/scrap/drbd/drbd/build-6.18.62-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1583 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 		} else {
 			bvec_set_page(&bvec, page, len, offset);
 			iov_iter_bvec(&msg.msg_iter, ITER_SOURCE, &bvec, 1, len);

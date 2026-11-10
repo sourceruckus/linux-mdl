@@ -474,7 +474,9 @@ static void seq_print_resource_transfer_log_summary(struct seq_file *m,
 			cond_resched();
 			rcu_read_lock();
 			next_hdr = rcu_dereference(list_next_rcu(&req->tl_requests));
+			read_lock_irq(&resource->state_rwlock);
 			drbd_put_ref_tl_walk(req, 0, 1);
+			read_unlock_irq(&resource->state_rwlock);
 			if (!refcount_read(&req->done_ref)) {
 				if (next_hdr == &resource->transfer_log)
 					break;
@@ -855,12 +857,17 @@ static int connection_oldest_requests_show(struct seq_file *m, void *ignored)
 	struct drbd_request *r1, *r2;
 
 	/* BUMP me if you change the file format/content/presentation */
-	seq_printf(m, "v: %u\n\n", 0);
+	seq_printf(m, "v: %u\n\n", 1);
 
 	rcu_read_lock();
 	r1 = READ_ONCE(connection->todo.req_next);
 	if (r1)
 		seq_print_minor_vnr_req(m, r1, now, jif);
+	r2 = READ_ONCE(connection->req_next_ready);
+	if (r2 && r2 != r1) {
+		r1 = r2;
+		seq_print_minor_vnr_req(m, r1, now, jif);
+	}
 	r2 = READ_ONCE(connection->req_ack_pending);
 	if (r2 && r2 != r1) {
 		r1 = r2;
@@ -1270,10 +1277,20 @@ static int device_data_gen_id_show(struct seq_file *m, void *ignored)
 	seq_printf(m, "0x%016llX\n", drbd_current_uuid(device));
 
 	for (node_id = 0; node_id < DRBD_NODE_ID_MAX; node_id++) {
-		if (!(md->peers[node_id].flags & MDF_HAVE_BITMAP))
+		struct drbd_peer_md *peer_md = &md->peers[node_id];
+
+		if (!test_bit(__MDF_HAVE_BITMAP, &peer_md->flags))
 			continue;
-		seq_printf(m, "%s[%d]0x%016llX", i++ ? " " : "", node_id,
-			   md->peers[node_id].bitmap_uuid);
+		/* A divergence bitmap fully records the divergence and is safe to
+		 * copy; without the flag it is a convergence bitmap being cleared
+		 * by a resync.
+		 */
+		seq_printf(m, "%s[%d]0x%016llX%s%s", i++ ? " " : "", node_id,
+			   peer_md->bitmap_uuid,
+			   test_bit(__MDF_PEER_DIVERGENCE_BITMAP, &peer_md->flags) ?
+				   "(DIVERGENCE_BITMAP)" : "",
+			   test_bit(__MDF_PEER_BITMAP_AUTHORITATIVE, &peer_md->flags) ?
+				   "(BITMAP_AUTHORITATIVE)" : "");
 	}
 	seq_putc(m, '\n');
 
@@ -1288,13 +1305,14 @@ static int device_io_frozen_show(struct seq_file *m, void *ignored)
 {
 	struct drbd_device *device = m->private;
 	unsigned long flags = device->flags;
+	char obligation[GEN_OBL_STR_MAX];
 	char sep = ' ';
 
 	if (!get_ldev_if_state(device, D_FAILED))
 		return -ENODEV;
 
 	/* BUMP me if you change the file format/content/presentation */
-	seq_printf(m, "v: %u\n\n", 0);
+	seq_printf(m, "v: %u\n\n", 2);
 
 	seq_printf(m, "drbd_suspended(): %d\n", drbd_suspended(device));
 	seq_printf(m, "suspend_cnt: %d\n", atomic_read(&device->suspend_cnt));
@@ -1303,11 +1321,11 @@ static int device_io_frozen_show(struct seq_file *m, void *ignored)
 	seq_printf(m, "ap_bio_cnt[WRITE]: %d\n", atomic_read(&device->ap_bio_cnt[WRITE]));
 	seq_printf(m, "device->pending_bitmap_work.n: %d\n", atomic_read(&device->pending_bitmap_work.n));
 	seq_printf(m, "may_inc_ap_bio(): %d\n", may_inc_ap_bio(device));
+	drbd_gen_obligation_str(READ_ONCE(device->gen_obligation), obligation, sizeof(obligation));
+	seq_printf(m, "gen-obligation: %s\n", obligation);
 	seq_printf(m, "flags: 0x%04lx :", flags);
 #define pretty_print_bit(n) \
 	seq_print_rq_state_bit(m, test_bit(n, &flags), &sep, #n)
-	pretty_print_bit(NEW_CUR_UUID);
-	pretty_print_bit(WRITING_NEW_CUR_UUID);
 	pretty_print_bit(MAKE_NEW_CUR_UUID);
 #undef pretty_print_bit
 	seq_putc(m, '\n');
@@ -1938,7 +1956,7 @@ static int drbd_version_show(struct seq_file *m, void *ignored)
 {
 	seq_printf(m, "# %s\n", drbd_buildtag());
 	seq_printf(m, "VERSION=%s\n", REL_VERSION);
-	seq_printf(m, "API_VERSION=%u\n", GENL_MAGIC_VERSION);
+	seq_printf(m, "API_VERSION=%u\n", DRBD_FAMILY_VERSION);
 	seq_printf(m, "PRO_VERSION_MIN=%u\n", PRO_VERSION_MIN);
 	seq_printf(m, "PRO_VERSION_MAX=%u\n", PRO_VERSION_MAX);
 #ifdef UTS_RELEASE
@@ -1983,17 +2001,17 @@ static const struct file_operations drbd_refcounts_fops = {
 	.release = single_release,
 };
 
-# 5 "/scrap/drbd/drbd/build-6.18.44-mdl+/.patches/drbd_debugfs.c.patch"
-# 1985 "/scrap/drbd/drbd/drbd_debugfs.c"
+# 5 "/scrap/drbd/drbd/build-6.18.62-mdl+/.patches/drbd_debugfs.c.patch"
+# 2003 "/scrap/drbd/drbd/drbd_debugfs.c"
 static int drbd_compat_show(struct seq_file *m, void *ignored)
 {
-# 1987 "/scrap/drbd/drbd/drbd_debugfs.c"
-# 7 "/scrap/drbd/drbd/build-6.18.44-mdl+/.patches/drbd_debugfs.c.patch"
-# 1993 "/scrap/drbd/drbd/build-6.18.44-mdl+/drbd_debugfs.c"
+# 2005 "/scrap/drbd/drbd/drbd_debugfs.c"
+# 7 "/scrap/drbd/drbd/build-6.18.62-mdl+/.patches/drbd_debugfs.c.patch"
+# 2011 "/scrap/drbd/drbd/build-6.18.62-mdl+/drbd_debugfs.c"
 	seq_puts(m, "kmap_local_page__no_present\n");
 	seq_puts(m, "struct_sockaddr_unsized__no_present\n");
-# 9 "/scrap/drbd/drbd/build-6.18.44-mdl+/.patches/drbd_debugfs.c.patch"
-# 1987 "/scrap/drbd/drbd/drbd_debugfs.c"
+# 9 "/scrap/drbd/drbd/build-6.18.62-mdl+/.patches/drbd_debugfs.c.patch"
+# 2005 "/scrap/drbd/drbd/drbd_debugfs.c"
 	return 0;
 }
 

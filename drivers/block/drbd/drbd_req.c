@@ -297,9 +297,8 @@ static void drbd_req_done(struct drbd_request *req)
 					clear_bit(bitmap_index, &mask);
 			}
 		}
-		if (device->bitmap)
-			modified_mask =
-				drbd_set_sync(device, req->i.sector, req->i.size, bits, mask);
+		modified_mask = drbd_set_sync(device, req->i.sector, req->i.size,
+					      bits, mask);
 		put_ldev(device);
 	}
 
@@ -364,7 +363,6 @@ static void drbd_req_oos_sent(struct drbd_request *req)
 	lockdep_assert_irqs_disabled();
 
 	if (s & RQ_WRITE && req->i.size) {
-		struct drbd_resource *resource = device->resource;
 		struct drbd_request *peer_ack_req;
 
 		spin_lock(&resource->peer_ack_lock); /* local irq already disabled */
@@ -704,6 +702,8 @@ void drbd_req_complete(struct drbd_request *req, struct bio_and_error *m)
 			resource->cached_all_devices_have_quorum : true;
 
 		m->error = ok && quorum ? 0 : (error ?: -EIO);
+		if (!m->error && (req->local_rq_state & RQ_WRITE))
+			req->local_rq_state |= RQ_COMPLETED_OK;
 		m->bio = req->master_bio;
 		req->master_bio = NULL;
 
@@ -735,8 +735,6 @@ void drbd_req_complete(struct drbd_request *req, struct bio_and_error *m)
 static void drbd_req_put_completion_ref(struct drbd_request *req, struct bio_and_error *m, int put)
 {
 	D_ASSERT(req->device, m || (req->local_rq_state & RQ_POSTPONED));
-
-	lockdep_assert_held(&req->device->resource->state_rwlock);
 
 	if (!put)
 		return;
@@ -990,6 +988,10 @@ static void mod_rq_state(struct drbd_request *req, struct bio_and_error *m,
 			!(req->net_rq_state[idx] & RQ_NET_DONE))
 		set_cache_ptr_if_null(connection, &connection->req_not_net_done, req);
 
+	if ((old_net & (RQ_NET_QUEUED | RQ_NET_READY)) != (RQ_NET_QUEUED | RQ_NET_READY) &&
+	    (new_net & (RQ_NET_QUEUED | RQ_NET_READY)) == (RQ_NET_QUEUED | RQ_NET_READY))
+		set_cache_ptr_if_null(connection, &connection->req_next_ready, req);
+
 	if (!(old_net & RQ_EXP_BARR_ACK) && (set & RQ_EXP_BARR_ACK))
 		refcount_inc(&req->done_ref); /* wait for the DONE */
 
@@ -1039,6 +1041,8 @@ static void mod_rq_state(struct drbd_request *req, struct bio_and_error *m,
 	if ((old_net & RQ_NET_QUEUED) && (clear & RQ_NET_QUEUED)) {
 		++o_put;
 		advance_conn_req_next(connection, req);
+		advance_cache_ptr(connection, &connection->req_next_ready,
+				  req, RQ_NET_QUEUED | RQ_NET_READY, 0);
 	}
 
 	if (drbd_sender_needs_master_bio(old_net) && !drbd_sender_needs_master_bio(new_net))
@@ -1127,15 +1131,15 @@ static inline bool is_pending_write_protocol_A(struct drbd_request *req, int idx
 }
 
 /* Confirm-before-complete: while a diskless primary's optimistically rotated
- * current generation is still unconfirmed (EXPOSED_GEN_UNCONFIRMED), hold back
- * completion of writes acknowledged in that generation, so we never acknowledge
- * data to the upper layers in a generation no quorate partition has confirmed.
- * Released by a NEW_UUID_CONFIRMED transfer-log walk once the generation is
- * confirmed (drbd_maybe_release_rotated_gen).
+ * current generation is still unconfirmed (obligation state UNCONFIRMED), hold
+ * back completion of writes acknowledged in that generation, so we never
+ * acknowledge data to the upper layers in a generation no quorate partition has
+ * confirmed.  Released by a NEW_UUID_CONFIRMED transfer-log walk once the
+ * generation is confirmed (drbd_maybe_release_rotated_gen).
  *
  * Only on on-no-quorum=suspend-io: with io-error the configured behaviour (error
- * out) wins. Only the diskless optimistic bump sets EXPOSED_GEN_UNCONFIRMED; a
- * diskful node self-confirms its bump synchronously and never arrives here set.
+ * out) wins. Only the diskless optimistic bump reaches UNCONFIRMED; a diskful
+ * node self-confirms its bump synchronously and never arrives here in it.
  */
 static bool hold_completion_for_unconfirmed_gen(struct drbd_request *req)
 {
@@ -1145,7 +1149,7 @@ static bool hold_completion_for_unconfirmed_gen(struct drbd_request *req)
 		return false;
 	if (device->resource->res_opts.on_no_quorum != ONQ_SUSPEND_IO)
 		return false;
-	if (!test_bit(EXPOSED_GEN_UNCONFIRMED, &device->flags))
+	if (drbd_gen_obligation_state(device) != GEN_OBL_UNCONFIRMED)
 		return false;
 	return (int)(req->epoch - device->exposed_gen_epoch) >= 0;
 }
@@ -1250,7 +1254,7 @@ void __req_mod(struct drbd_request *req, enum drbd_req_event what,
 		break;
 
 	case READ_COMPLETED_WITH_ERROR:
-		drbd_set_all_out_of_sync(device, req->i.sector, req->i.size);
+		drbd_set_all_out_of_sync(device, -1, req->i.sector, req->i.size);
 		drbd_report_io_error(device, req);
 		fallthrough;
 	case READ_AHEAD_COMPLETED_WITH_ERROR:
@@ -1442,6 +1446,15 @@ void __req_mod(struct drbd_request *req, enum drbd_req_event what,
 			     (req->local_rq_state & RQ_WRITE) ? 0 : RQ_NET_DONE);
 		break;
 
+	case POSTPONED_BY_PEER:
+		/* The peer did not process this write; retry it as a
+		 * brand-new request once every reference drains. See
+		 * drbd_restart_request().
+		 */
+		mod_rq_state(req, m, peer_device, RQ_NET_OK|RQ_NET_PENDING,
+			     RQ_POSTPONED);
+		break;
+
 	case COMPLETION_RESUMED:
 		mod_rq_state(req, m, peer_device, RQ_COMPLETION_SUSP, 0);
 		break;
@@ -1450,8 +1463,8 @@ void __req_mod(struct drbd_request *req, enum drbd_req_event what,
 		/* The optimistically rotated data generation has been confirmed
 		 * durable by an in-order barrier ack from a quorate peer.  Release
 		 * the writes whose completion we held back in that generation (see
-		 * the RQ_UNCONF_GEN hold in ack_common).  Once EXPOSED_GEN_UNCONFIRMED
-		 * is cleared, every such write is safe to acknowledge: the peer holds
+		 * the RQ_UNCONF_GEN hold in ack_common).  Once the generation is
+		 * confirmed, every such write is safe to acknowledge: the peer holds
 		 * the new current UUID, so the diskless-primary strand cannot occur.
 		 */
 		if (req->local_rq_state & RQ_UNCONF_GEN)
@@ -1567,7 +1580,7 @@ static bool drbd_may_do_local_read(struct drbd_device *device, sector_t sector, 
 		struct drbd_peer_md *peer_md = &md->peers[node_id];
 
 		/* Skip bitmap indexes which are not assigned to a peer. */
-		if (!(peer_md->flags & MDF_HAVE_BITMAP))
+		if (!test_bit(__MDF_HAVE_BITMAP, &peer_md->flags))
 			continue;
 
 		if (drbd_bm_count_bits(device, peer_md->bitmap_index, sbnr, ebnr))
@@ -1948,8 +1961,10 @@ drbd_submit_req_private_bio(struct drbd_request *req)
 
 static void drbd_queue_write(struct drbd_device *device, struct drbd_request *req)
 {
-	if (req->private_bio)
+	if (req->local_rq_state & RQ_WAIT_FOR_AL_ECNT) {
+		req->local_rq_state |= RQ_AP_ACTLOG_CNT;
 		atomic_inc(&device->ap_actlog_cnt);
+	}
 	spin_lock_irq(&device->pending_completion_lock);
 	list_add_tail(&req->req_pending_master_completion,
 			&device->pending_master_completion[1 /* WRITE */]);
@@ -1962,11 +1977,20 @@ static void drbd_queue_write(struct drbd_device *device, struct drbd_request *re
 	wake_up(&device->al_wait);
 }
 
+static void drbd_req_al_ecnt_done(struct drbd_request *req)
+{
+	if (!(req->local_rq_state & RQ_WAIT_FOR_AL_ECNT))
+		return;
+
+	req->local_rq_state &= ~RQ_WAIT_FOR_AL_ECNT;
+	atomic_sub(interval_to_al_extents(&req->i), &req->device->wait_for_actlog_ecnt);
+}
+
 static void drbd_req_in_actlog(struct drbd_request *req)
 {
 	req->local_rq_state |= RQ_IN_ACT_LOG;
 	ktime_get_accounting(req->in_actlog_kt);
-	atomic_sub(interval_to_al_extents(&req->i), &req->device->wait_for_actlog_ecnt);
+	drbd_req_al_ecnt_done(req);
 }
 
 /* returns the new drbd_request pointer, if the caller is expected to submit it
@@ -1983,6 +2007,7 @@ drbd_request_prepare(struct drbd_device *device, struct bio *bio,
 {
 	const int rw = bio_data_dir(bio);
 	struct drbd_request *req;
+	bool al_suspended;
 
 	/* allocate outside of all locks; */
 	req = drbd_req_new(device, bio);
@@ -2018,15 +2043,18 @@ drbd_request_prepare(struct drbd_device *device, struct bio *bio,
 	 * See also how peer_requests are handled
 	 * in receive_Data() { ... drbd_wait_for_activity_log_extents(); ... }
 	 */
-	if (req->private_bio)
+	al_suspended = test_bit(AL_SUSPENDED, &device->flags);
+	if (req->private_bio && !al_suspended) {
+		req->local_rq_state |= RQ_WAIT_FOR_AL_ECNT;
 		atomic_add(interval_to_al_extents(&req->i), &device->wait_for_actlog_ecnt);
+	}
 
 	/* process discards always from our submitter thread */
 	if ((bio_op(bio) == REQ_OP_WRITE_ZEROES) ||
 	    (bio_op(bio) == REQ_OP_DISCARD))
 		goto queue_for_submitter_thread;
 
-	if (req->private_bio && !test_bit(AL_SUSPENDED, &device->flags)) {
+	if (req->private_bio && !al_suspended) {
 		/* ldev_safe: have private_bio */
 		if (!drbd_al_begin_io_fastpath(device, &req->i))
 			goto queue_for_submitter_thread;
@@ -2247,7 +2275,7 @@ static void drbd_send_and_submit(struct drbd_request *req)
 	 * that is exactly what we hold, so for a trailing or lone write the epoch
 	 * would never close and the confirming barrier would never be sent.  Close
 	 * the epoch here so the sender emits the barrier independent of completion.
-	 * Self-limiting: the first barrier ack clears EXPOSED_GEN_UNCONFIRMED, after
+	 * Self-limiting: the first barrier ack confirms the generation, after
 	 * which no further write takes this path.
 	 */
 	if (hold_completion_for_unconfirmed_gen(req))
@@ -2334,6 +2362,7 @@ static void drbd_conflict_submit_write(struct drbd_request *req)
 			 * queued when conflicts are released.
 			 */
 			drbd_remove_interval(&device->requests, &req->i);
+			drbd_clear_interval(&req->i);
 		}
 	}
 	spin_unlock_irq(&device->interval_lock);
@@ -2366,8 +2395,8 @@ static bool inc_ap_bio_cond(struct drbd_device *device, int rw)
 		return false;
 
 	/* check need for new current uuid _AFTER_ ensuring IO is not suspended via may_inc_ap_bio */
-	if (test_bit(NEW_CUR_UUID, &device->flags)) {
-		if (!test_and_set_bit(WRITING_NEW_CUR_UUID, &device->flags))
+	if (drbd_gen_obligation_outstanding(device)) {
+		if (drbd_gen_obligation_mint_start(device))
 			drbd_device_post_work(device, MAKE_NEW_CUR_UUID);
 
 		return false;
@@ -2380,6 +2409,18 @@ static bool inc_ap_bio_cond(struct drbd_device *device, int rw)
 		if (ap_bio_cnt >= nr_requests)
 			return false;
 	} while (atomic_cmpxchg(&device->ap_bio_cnt[rw], ap_bio_cnt, ap_bio_cnt + 1) != ap_bio_cnt);
+
+	/* Re-check suspend_cnt after publishing our ap_bio_cnt increment.
+	 * atomic_cmpxchg() is a full barrier, so this load is ordered after
+	 * the increment; it pairs with the smp_mb__after_atomic() in
+	 * drbd_suspend_io(). If a suspend raced in, at least one side sees
+	 * the other: either drbd_suspend_io() observes our increment and
+	 * waits, or we observe suspend_cnt here and roll back.
+	 */
+	if (atomic_read(&device->suspend_cnt)) {
+		dec_ap_bio(device, rw);
+		return false;
+	}
 
 	return true;
 }
@@ -2519,6 +2560,19 @@ static void __drbd_submit_peer_request(struct drbd_peer_request *peer_req)
 		drbd_cleanup_after_failed_submit_peer_write(peer_req);
 }
 
+/* The only place where a request leaves the submitter thread's queue. */
+static void drbd_submit_queued_write(struct drbd_device *device, struct drbd_request *req)
+{
+	if (req->local_rq_state & RQ_AP_ACTLOG_CNT) {
+		req->local_rq_state &= ~RQ_AP_ACTLOG_CNT;
+		atomic_dec(&device->ap_actlog_cnt);
+	}
+	drbd_req_al_ecnt_done(req);
+
+	list_del_init(&req->list);
+	drbd_conflict_submit_write(req);
+}
+
 static void submit_fast_path(struct drbd_device *device, struct waiting_for_act_log *wfa)
 {
 	struct blk_plug plug;
@@ -2541,11 +2595,9 @@ static void submit_fast_path(struct drbd_device *device, struct waiting_for_act_
 				continue;
 
 			drbd_req_in_actlog(req);
-			atomic_dec(&device->ap_actlog_cnt);
 		}
 
-		list_del_init(&req->list);
-		drbd_conflict_submit_write(req);
+		drbd_submit_queued_write(device, req);
 	}
 	blk_finish_plug(&plug);
 }
@@ -2621,9 +2673,7 @@ static void send_and_submit_pending(struct drbd_device *device, struct waiting_f
 	}
 	list_for_each_entry_safe(req, tmp, &wfa->requests.pending, list) {
 		drbd_req_in_actlog(req);
-		atomic_dec(&device->ap_actlog_cnt);
-		list_del_init(&req->list);
-		drbd_conflict_submit_write(req);
+		drbd_submit_queued_write(device, req);
 	}
 	blk_finish_plug(&plug);
 }

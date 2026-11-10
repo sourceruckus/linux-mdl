@@ -1,4 +1,4 @@
-# 1 "drbd-headers/linux/drbd_limits.h"
+# 1 "drbd-headers/uapi/linux/drbd_limits.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2014, LINBIT HA-Solutions GmbH.

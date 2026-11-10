@@ -1,0 +1,99 @@
+#!make # syntax highlighting
+
+# PRE_CFLAGS may contain (M)OFED header locations
+LINUXINCLUDE := $(PRE_CFLAGS) -I$(src) -I$(src)/drbd-headers -I$(src)/drbd-headers/uapi $(LINUXINCLUDE)
+
+# Files in the standard include directories take precendence over files
+# in the drbd-kernel-compat directory.
+#
+# Add -I$(src) to EXTRA_CFLAGS again: some (rhel5, maybe other) kbuild does not
+# yet use LINUXINCLUDE like we expect it to ;( fortunately it does not contain
+# in-tree drbd either yet, so precedence of include files is not important.
+#
+# override: we absolutely need this, even if EXTRA_CFLAGS originates from make
+# command line or environment
+override EXTRA_CFLAGS += -I$(src) -I$(src)/drbd-kernel-compat
+
+ifneq ($(strip $(shell \
+	grep -q -e '\<nsecs_to_jiffies\>' $(objtree)/Module.symvers || \
+	grep -q -e 'EXPORT_SYMBOL(nsecs_to_jiffies)' $(srctree)/kernel/time/time.c ; \
+	echo $$?)),0)
+compat_objs += drbd-kernel-compat/nsecs_to_jiffies.o
+endif
+
+ifndef CONFIG_LRU_CACHE
+compat_objs += drbd-kernel-compat/lru_cache.o
+endif
+
+compat_objs += drbd-kernel-compat/drbd_wrappers.o
+
+ifdef CONFIG_TLS
+ifndef CONFIG_NET_HANDSHAKE
+# TLS is enabled in the kernel,
+# but they did not enable NET_HANDSHAKE.
+# If our compat test case thinks the kernel is recent enough to support it,
+# we need to provide it.
+# Different versions of Make treat the '#' sign (in '#define') differently,
+# some want it escaped, others need it unescaped. Could use $(pound).
+# But just wildcard it.
+COMPAT_NET_HANDSHAKE := $(shell set -x; grep -qe '^.define COMPAT_HAVE_TLS_TX_RX$$' $(src)/compat.h && echo m)
+endif
+endif
+
+# ================================================================
+CONFIG_BLK_DEV_DRBD := m
+obj-$(CONFIG_BLK_DEV_DRBD)       += drbd.o
+obj-$(CONFIG_BLK_DEV_DRBD)       += drbd_transport_tcp.o
+obj-$(CONFIG_BLK_DEV_DRBD)       += drbd_transport_lb-tcp.o
+obj-$(if $(CONFIG_INFINIBAND_ADDR_TRANS),m) += drbd_transport_rdma.o
+obj-$(COMPAT_NET_HANDSHAKE)      += drbd-kernel-compat/handshake/
+# ================================================================
+
+ifdef CONFIG_DEV_DAX_PMEM
+CONFIG_DRBD_DAX := y
+endif
+
+# enable fault injection by default
+ifndef CONFIG_DRBD_FAULT_INJECTION
+	override EXTRA_CFLAGS += -DCONFIG_DRBD_FAULT_INJECTION
+	ccflags-y += -DCONFIG_DRBD_FAULT_INJECTION
+endif
+
+# Disabled for the external module build by default.
+# In upstream Linux, this should default to yes.
+# Enable by adding "CONFIG_DRBD_COMPAT_84=y" to your make command line.
+CONFIG_DRBD_COMPAT_84 := n
+
+# For drbd_strings.c. Could also use drbd-y += drbd-headers/drbd_strings.o,
+# but I don't think we should produce .o files in that directory.
+# Older kernel trees may not have cmd_copy yet.
+ifndef cmd_copy
+quiet_cmd_copy = COPY    $@
+      cmd_copy = cat $< > $@
+endif
+
+$(obj)/drbd_strings.c: $(src)/drbd-headers/drbd_strings.c
+	$(call cmd,copy)
+
+drbd-y += drbd_buildtag.o
+drbd-y += drbd_bitmap.o
+drbd-y += drbd_proc.o
+drbd-y += drbd_sender.o
+drbd-y += drbd_receiver.o
+drbd-y += drbd_req.o
+drbd-y += drbd_actlog.o
+drbd-y += drbd_main.o
+drbd-y += drbd_strings.o
+drbd-y += drbd_nl.o
+drbd-y += drbd-headers/linux/drbd_nl_gen.o
+drbd-y += drbd_interval.o
+drbd-y += drbd_state.o
+drbd-y += drbd_transport.o
+drbd-y += $(compat_objs)
+
+drbd-$(CONFIG_DRBD_DAX)   += drbd_dax_pmem.o
+drbd-$(CONFIG_KREF_DEBUG) += kref_debug.o drbd_kref_debug.o
+drbd-$(CONFIG_DEBUG_FS)   += drbd_debugfs.o
+drbd-$(CONFIG_DRBD_COMPAT_84) += drbd_legacy_84.o
+
+ccflags-$(CONFIG_DRBD_COMPAT_84) += -DCONFIG_DRBD_COMPAT_84
