@@ -3525,7 +3525,7 @@ static inline struct drbd_interval *drbd_find_conflict(struct drbd_device *devic
 #define ktime_aggregate(D, R, M) (D->M = ktime_add(D->M, ktime_sub(R->M, R->start_kt)))
 #define ktime_aggregate_pd(P, N, R, M) (P->M = ktime_add(P->M, ktime_sub(R->M[N], R->start_kt)))
 #define ktime_get_accounting(V) (V = ktime_get())
-#define ktime_get_accounting_assign(V, T) (V = T)
+#define ktime_get_accounting_assign(V, T) V = T
 #define ktime_var_for_accounting(V) ktime_t V = ktime_get()
 #else
 #define ktime_aggregate_delta(D, ST, M)
