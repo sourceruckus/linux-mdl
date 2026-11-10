@@ -7,16 +7,21 @@ usage()
 {
     echo "import upstream DRBD module sources into kernel tree"
     echo
-    echo "usage: $(basename $0) [--help] <path-to-drbd-src>"
+    echo "usage: $(basename $0) [--help] [--remove] <path-to-drbd-src>"
 }
 
 
+LINUXDIR=$(realpath $(dirname $0)/../../..)
 DRBDDIR=
+REMOVE=
 while [ $# -gt 0 ] ; do
     case $1 in
         --help)
             usage
             exit 0
+            ;;
+        --remove)
+            REMOVE=1
             ;;
         *)
             if [ -z "$DRBDDIR" ] ; then
@@ -34,6 +39,28 @@ while [ $# -gt 0 ] ; do
 done
 
 
+# remove mainline code if present
+#
+# NOTE: This leaves the mainlined lru_cache code in place.
+#
+if [ -n "$REMOVE" ]; then
+    echo "Removing mainline DRBD code from $LINUXDIR"
+    rm -vi $LINUXDIR/drivers/block/drbd/*.[cho]
+    rm -vi $LINUXDIR/include/linux/drbd*
+    rm -vi $LINUXDIR/include/linux/genl_magic_*
+    rm -vi $LINUXDIR/include/uapi/linux/drbd*
+fi
+
+if [ -z "$DRBDDIR" ]; then
+    echo "Not importing anything because you didn't specify path to DRBD src dir"
+    if [ -z "$REMOVE" ]; then
+        echo
+        usage
+        exit 1
+    fi
+    exit 0
+fi
+
 # initial import
 #
 # FIXME: Technically, build-current is a symlink to build-$kernelversion, so
@@ -41,16 +68,24 @@ done
 #        for now as-is, but I could see this making problems for me down the
 #        road while patching multiple kernel trees.
 #
+pushd $LINUXDIR/drivers/block/drbd
 cp -v $DRBDDIR/drbd/build-current/*.[ch] .
 rm -v compat*.h
 cp -v $DRBDDIR/drbd/Kconfig .
-cp -v $DRBDDIR/drbd/build-current/Kbuild Makefile
-cp -v $DRBDDIR/drbd/build-current/linux/drbd*.h ../../../include/linux/
+cp -v $DRBDDIR/drbd/build-current/Kbuild Makefile.example
 cp -v $DRBDDIR/drbd/build-current/drbd-headers/drbd*.[ch] .
-mv -v drbd_protocol.h ../../../include/linux/
-cp -v $DRBDDIR/drbd/build-current/drbd-headers/linux/*.h ../../../include/linux/
+cp -v $DRBDDIR/drbd/build-current/drbd-headers/linux/drbd*.c .
+#cp -v $DRBDDIR/drbd/build-current/drbd-headers/uapi/linux/drbd*.c .
+mv -v drbd_protocol.h $LINUXDIR/include/linux/
 cp -v $DRBDDIR/drbd/build-current/drbd-kernel-compat/drbd_wrappers.[ch] .
-cp -v $DRBDDIR/drbd/build-current/compat.h ../../../include/linux/drbd_compat.h
+
+pushd $LINUXDIR/include
+cp -v $DRBDDIR/drbd/build-current/linux/drbd*.h linux/
+cp -v $DRBDDIR/drbd/build-current/drbd-headers/linux/*.h linux/
+cp -v $DRBDDIR/drbd/build-current/drbd-headers/uapi/linux/*.h uapi/linux/
+cp -v $DRBDDIR/drbd/build-current/compat.h linux/drbd_compat.h
+popd
+
 #mkdir handshake
 #cp -v $DRBDDIR/drbd/build-current/drbd-kernel-compat/handshake/*.[ch] handshake/.
 #cp -v $DRBDDIR/drbd/build-current/drbd-kernel-compat/handshake/Kbuild handshake/Makefile
@@ -59,15 +94,27 @@ cp -v $DRBDDIR/drbd/build-current/compat.h ../../../include/linux/drbd_compat.h
 
 # Then, since we renamed compat.h->drbd_compat.h, we have to sed some changes
 # into a few files:
+#
+# NOTE: genl_magic no longer exists per upstream commit
+#       e94a523d4560f6d21dcd1e439e2037201de33f7a.
+#
+# FIXME: not sure what i have to do to suppor the new YNL-generated code...
+#
 sed -i 's|#include "compat.h"|#include <linux/drbd_compat.h>|' \
-    ../../../include/linux/genl_magic_struct.h \
     drbd_wrappers.h
 
 # same with drbd_protocol.h
 sed -i 's|#include <drbd_protocol.h>|#include <linux/drbd_protocol.h>|' \
-    ../../../include/linux/drbd*.h
+    $LINUXDIR/include/linux/drbd*.h \
+    $LINUXDIR/include/uapi/linux/drbd*.h
 sed -i 's|#include "drbd_protocol.h"|#include <linux/drbd_protocol.h>|' \
     *.h *.c
+
+# and drbd_nl_gen.h
+sed -i 's|#include "drbd_nl_gen.h"|#include <linux/drbd_nl_gen.h>|' \
+    *.h *.c
+
+
 
 # And finally, we have to tweak a couple of include statements to work nicely
 # now that we've actually split headers out into their propper locations:
@@ -77,5 +124,7 @@ sed -i 's|#include <kref_debug.h>|#include "kref_debug.h"|' \
 # Then generate drbd_buildtag.c w/ SHA of git tree.
 SHA=$(GIT_DIR=$DRBDDIR/.git git rev-parse HEAD)
 sed "s|__GIT_HASH__|$SHA|" drbd_buildtag.c.in > drbd_buildtag.c
+
+popd
 
 exit 0

@@ -1,7 +1,7 @@
-obj-m += drbd.o drbd_transport_tcp.o drbd_transport_lb-tcp.o
-ifdef CONFIG_INFINIBAND
-obj-m += drbd_transport_rdma.o
-endif
+# optional objects
+obj-$(CONFIG_BLK_DEV_DRBD_TCP) += drbd_transport_tcp.o
+obj-$(CONFIG_BLK_DEV_DRBD_LB_TCP) += drbd_transport_lb-tcp.o
+obj-$(CONFIG_BLK_DEV_DRBD_RDMA) += drbd_transport_rdma.o
 
 
 #clean-files := compat.h $(wildcard .config.$(KERNELVERSION).timestamp)
@@ -87,10 +87,14 @@ endif
 #endif
 
 
+# enable timing stats if enabled
+ccflags-$(CONFIG_DRBD_TIMING_STATS) += -DCONFIG_DRBD_TIMING_STATS
+
 drbd-$(CONFIG_DEBUG_FS) += drbd_debugfs.o
 drbd-y += drbd_buildtag.o drbd_bitmap.o drbd_proc.o
 drbd-y += drbd_sender.o drbd_receiver.o drbd_req.o drbd_actlog.o
 drbd-y += drbd_main.o drbd_strings.o drbd_nl.o
+drbd-y += drbd_nl_gen.o
 drbd-y += drbd_interval.o drbd_state.o $(compat_objs)
 drbd-y += drbd_nla.o drbd_transport.o
 
