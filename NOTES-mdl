@@ -1,8 +1,6 @@
 -*- org -*-
 
 * TODO
-- DRBD v9.3.4
-- OpenZFS vv2.4.4
 - play with CONFIG_FW_LOADER_DEBUG! might not need my fw loading patch anymore!
 - Shrink config down more?  My last attempt was disheartening, I cut out all
   kinds of hopefully unneeded networking and filesystems, and it only cut the
@@ -39,7 +37,13 @@ Then made the following changes:
 
 - Device Drivers
   - Block devices
-    - DRBD: Y
+    - DRBD: M
+    - DRBD Fault Injection: N
+    - DRBD Timing Stats: N
+    - DRBD TCP Transport: M
+    - DRBD Load Ballanced TCP Transport: M
+    - DRBD RDMA Transport: M
+    - DRBD 8.4 Compat: Y
 - File Systems
   - ZFS: Y
 
