@@ -1,8 +1,6 @@
 -*- org -*-
 
 * TODO
-- OpenZFS 2.4.x (next time we update 6.18)
-- DRBD 9.3.x (next time we update 6.18)
 
 
 * config history 6.12
@@ -89,7 +87,13 @@ amd64, then made the following changes:
   - Block devices
     - Null test block driver: N (was M)
     - Normal floppy disk: N (was M)
-    - DRBD: Y (after removing DRBD8 and merging DRBD9 code in)
+    - DRBD: M (after removing DRBD8 and merging DRBD9 code in)
+    - DRBD Fault Injection: N
+    - DRBD Timing Stats: N
+    - DRBD TCP Transport: M
+    - DRBD Load Balanced TCP Transport: M
+    - DRBD RDMA Transport: M
+    - DRBD 8.4 Compat: Y
     - ATA over Ethernet: N (was M)
     - Network Block Device: N (was M)
     - Rados Block Driver: N (was M)
