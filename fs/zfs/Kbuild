@@ -2,11 +2,13 @@
 # first.  This ensures its module initialization function is run before
 # any of the other module initialization functions which depend on it.
 
-ZFS_MODULE_CFLAGS += -std=gnu99 -Wno-declaration-after-statement
+ZFS_MODULE_CFLAGS += -std=gnu11 -Wno-declaration-after-statement
 ZFS_MODULE_CFLAGS += -Wmissing-prototypes
-ZFS_MODULE_CFLAGS +=   -Wno-format-zero-length
+ZFS_MODULE_CFLAGS += -Wno-format-zero-length
 
 ifneq ($(KBUILD_EXTMOD),)
+ZFS_MODULE_CFLAGS += 
+ZFS_MODULE_CPPFLAGS += -UDEBUG -DNDEBUG
 zfs_include = /scrap/zfs/include
 icp_include = /scrap/zfs/module/icp/include
 zstd_include = /scrap/zfs/module/zstd/include
@@ -15,6 +17,12 @@ ZFS_MODULE_CFLAGS += -I/scrap/zfs/include
 src = /scrap/zfs/module
 obj = /scrap/zfs/module
 else
+ifeq ($(CONFIG_ZFS_DEBUG),y)
+ZFS_MODULE_CFLAGS += -Werror
+ZFS_MODULE_CPPFLAGS += -DDEBUG -UNDEBUG -DZFS_DEBUG
+else
+ZFS_MODULE_CPPFLAGS += -UDEBUG -DNDEBUG
+endif
 zfs_include = $(srctree)/include/zfs
 icp_include = $(src)/icp/include
 zstd_include = $(src)/zstd/include
@@ -26,7 +34,6 @@ ZFS_MODULE_CFLAGS += -I$(zfs_include)/os/linux/spl
 ZFS_MODULE_CFLAGS += -I$(zfs_include)/os/linux/zfs
 ZFS_MODULE_CFLAGS += -I$(zfs_include)
 ZFS_MODULE_CPPFLAGS += -D_KERNEL
-ZFS_MODULE_CPPFLAGS += -UDEBUG -DNDEBUG
 
 # KASAN enables -Werror=frame-larger-than=1024, which
 # breaks oh so many parts of our build.
@@ -47,6 +54,13 @@ CFLAGS_zfs/range_tree.o += -mllvm -x86-cmov-converter=false
 CFLAGS_zfs/zap_micro.o += -mllvm -x86-cmov-converter=false
 endif
 endif
+
+# These are internal functions for 64-bit math on 32-bit platforms. The
+# compiler will generate references to them if necessary, to be resolved at
+# link time. We don't need or provide prototypes for them, so we disable
+# warnings that would complain about them.
+CFLAGS_REMOVE_os/linux/spl/spl-math-compat.o += -Wmissing-prototypes
+CFLAGS_REMOVE_os/linux/spl/spl-math-compat.o += -Wmissing-declarations
 
 ifneq ($(KBUILD_EXTMOD),)
 #ZFS_MODULE_CFLAGS += -I/include
@@ -69,7 +83,6 @@ ccflags-$(CONFIG_SPARC64) += -Wno-unused-value
 obj-$(CONFIG_ZFS) := spl.o zfs.o
 
 SPL_OBJS := \
-	spl-atomic.o \
 	spl-condvar.o \
 	spl-cred.o \
 	spl-err.o \
@@ -77,6 +90,7 @@ SPL_OBJS := \
 	spl-kmem-cache.o \
 	spl-kmem.o \
 	spl-kstat.o \
+	spl-math-compat.o \
 	spl-proc.o \
 	spl-procfs-list.o \
 	spl-shrinker.o \
@@ -135,6 +149,7 @@ ICP_OBJS_X86_64 := \
 	asm-x86_64/sha2/sha256-x86_64.o \
 	asm-x86_64/sha2/sha512-x86_64.o \
 	asm-x86_64/modes/aesni-gcm-x86_64.o \
+	asm-x86_64/modes/aesni-gcm-avx2-vaes.o \
 	asm-x86_64/modes/gcm_pclmulqdq.o \
 	asm-x86_64/modes/ghash-x86_64.o
 
@@ -176,14 +191,6 @@ $(addprefix $(obj)/icp/,$(ICP_OBJS) $(ICP_OBJS_X86) $(ICP_OBJS_X86_64) \
 $(addprefix $(obj)/icp/,$(ICP_OBJS) $(ICP_OBJS_X86) $(ICP_OBJS_X86_64) \
 	$(ICP_OBJS_ARM64) $(ICP_OBJS_PPC_PPC64)) : ccflags-y += -I$(icp_include) -I$(zfs_include)/os/linux/spl -I$(zfs_include)
 
-# Suppress objtool "return with modified stack frame" warnings.
-OBJECT_FILES_NON_STANDARD_aesni-gcm-x86_64.o := y
-
-# Suppress objtool "unsupported stack pointer realignment" warnings.
-# See #6950 for the reasoning.
-OBJECT_FILES_NON_STANDARD_sha256-x86_64.o := y
-OBJECT_FILES_NON_STANDARD_sha512-x86_64.o := y
-
 LUA_OBJS := \
 	lapi.o \
 	lauxlib.o \
@@ -224,8 +231,7 @@ zfs-objs += $(addprefix nvpair/,$(NVPAIR_OBJS))
 
 
 UNICODE_OBJS := \
-	u8_textprep.o \
-	uconv.o
+	u8_textprep.o
 
 zfs-objs += $(addprefix unicode/,$(UNICODE_OBJS))
 
@@ -301,10 +307,9 @@ ZSTD_UPSTREAM_OBJS := \
 
 zfs-objs += $(addprefix zstd/,$(ZSTD_OBJS) $(ZSTD_UPSTREAM_OBJS))
 
-# Disable aarch64 neon SIMD instructions for kernel mode
 $(addprefix $(obj)/zstd/,$(ZSTD_OBJS) $(ZSTD_UPSTREAM_OBJS)) : ccflags-y += -I$(zstd_include) $(ZFS_ZSTD_FLAGS)
 $(addprefix $(obj)/zstd/,$(ZSTD_OBJS) $(ZSTD_UPSTREAM_OBJS)) : asflags-y += -I$(zstd_include)
-$(addprefix $(obj)/zstd/,$(ZSTD_UPSTREAM_OBJS)) : ccflags-y += -include $(zstd_include)/aarch64_compat.h -include $(zstd_include)/zstd_compat_wrapper.h -Wp,-w
+$(addprefix $(obj)/zstd/,$(ZSTD_UPSTREAM_OBJS)) : ccflags-y += -include $(zstd_include)/zstd_compat_wrapper.h -Wp,-w
 $(obj)/zstd/zfs_zstd.o : ccflags-y += -include $(zstd_include)/zstd_compat_wrapper.h
 
 
@@ -414,6 +419,8 @@ ZFS_OBJS := \
 	zfeature.o \
 	zfs_byteswap.o \
 	zfs_chksum.o \
+	zfs_debug_common.o \
+	zfs_crrd.o \
 	zfs_fm.o \
 	zfs_fuid.o \
 	zfs_impl.o \
@@ -440,6 +447,7 @@ ZFS_OBJS := \
 ZFS_OBJS_OS := \
 	abd_os.o \
 	arc_os.o \
+	kasan_compat.o \
 	mmp_os.o \
 	policy.o \
 	qat.o \
@@ -499,11 +507,37 @@ UBSAN_SANITIZE_sa.o := n
 UBSAN_SANITIZE_zfs/zap_micro.o := n
 UBSAN_SANITIZE_zfs/sa.o := n
 
-# Suppress incorrect warnings from versions of objtool which are not
-# aware of x86 EVEX prefix instructions used for AVX512.
-OBJECT_FILES_NON_STANDARD_vdev_raidz_math_avx512bw.o := y
-OBJECT_FILES_NON_STANDARD_vdev_raidz_math_avx512f.o := y
-
 ifeq ($(CONFIG_ALTIVEC),y)
 $(obj)/zfs/vdev_raidz_math_powerpc_altivec.o : c_flags += -maltivec
 endif
+
+# The following recipes attempt to fix out of src-tree builds, where $(src) != $(obj), so that the
+# subdir %.c/%.S -> %.o targets will work as expected. The in-kernel pattern targets do not seem to
+# be working on subdirs since about ~6.10
+zobjdirs = $(dir $(zfs-objs)) $(dir $(spl-objs))                                             \
+  $(dir $(zfs-$(CONFIG_X86))) $(dir $(zfs-$(CONFIG_UML_X86))) $(dir $(zfs-$(CONFIG_ARM64)))  \
+  $(dir $(zfs-$(CONFIG_PPC64))) $(dir $(zfs-$(CONFIG_PPC)))
+
+z_cdirs = $(sort $(filter-out lua/setjmp/ $(addprefix icp/asm-aarch64/, aes/ blake3/ modes/ sha2/) \
+  $(addprefix icp/asm-x86_64/, aes/ blake3/ modes/ sha2/)                                          \
+  $(addprefix icp/asm-ppc/, aes/ blake3/ modes/ sha2/)                                             \
+  $(addprefix icp/asm-ppc64/, aes/ blake3/ modes/ sha2/), $(zobjdirs)))
+z_sdirs = $(sort $(filter lua/setjmp/ $(addprefix icp/asm-aarch64/, aes/ blake3/ modes/ sha2/)     \
+  $(addprefix icp/asm-x86_64/, aes/ blake3/ modes/ sha2/)                                          \
+  $(addprefix icp/asm-ppc/, aes/ blake3/ modes/ sha2/)                                             \
+  $(addprefix icp/asm-ppc64/, aes/ blake3/ modes/ sha2/), $(zobjdirs)))
+
+define ZKMOD_C_O_MAKE_TARGET
+$1%.o: $(src)/$1%.c FORCE
+	$$(call if_changed_rule,cc_o_c)
+	$$(call cmd,force_checksrc)
+endef
+
+define ZKMOD_S_O_MAKE_TARGET
+$1%.o: $(src)/$1%.S FORCE
+	$$(call if_changed_rule,as_o_S)
+	$$(call cmd,force_checksrc)
+endef
+
+$(foreach target,$(z_cdirs), $(eval $(call ZKMOD_C_O_MAKE_TARGET,$(target))))
+$(foreach target,$(z_sdirs), $(eval $(call ZKMOD_S_O_MAKE_TARGET,$(target))))

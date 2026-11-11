@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: CDDL-1.0
 if CONFIG_KERNEL
 kernel_linuxdir = $(kerneldir)/linux
 kernel_linux_HEADERS = \
@@ -8,6 +9,7 @@ kernel_linux_HEADERS = \
 	%D%/kernel/linux/mm_compat.h \
 	%D%/kernel/linux/mod_compat.h \
 	%D%/kernel/linux/page_compat.h \
+	%D%/kernel/linux/pagemap_compat.h \
 	%D%/kernel/linux/simd.h \
 	%D%/kernel/linux/simd_aarch64.h \
 	%D%/kernel/linux/simd_arm.h \
@@ -15,6 +17,7 @@ kernel_linux_HEADERS = \
 	%D%/kernel/linux/simd_x86.h \
 	%D%/kernel/linux/utsname_compat.h \
 	%D%/kernel/linux/vfs_compat.h \
+	%D%/kernel/linux/workqueue_compat.h \
 	%D%/kernel/linux/xattr_compat.h
 
 kernel_sysdir = $(kerneldir)/sys
@@ -74,7 +77,7 @@ kernel_spl_sys_HEADERS = \
 	%D%/spl/sys/kstat.h \
 	%D%/spl/sys/list.h \
 	%D%/spl/sys/misc.h \
-	%D%/spl/sys/mod_os.h \
+	%D%/spl/sys/mod.h \
 	%D%/spl/sys/mutex.h \
 	%D%/spl/sys/param.h \
 	%D%/spl/sys/proc.h \

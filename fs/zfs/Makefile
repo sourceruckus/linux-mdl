@@ -19,8 +19,8 @@ check:
 	cppcheck cppcheck-Linux cppcheck-FreeBSD
 
 # For FreeBSD, use debug options from ./configure if not overridden.
-export WITH_DEBUG ?= 
-export WITH_INVARIANTS ?= 
+WITH_DEBUG ?= 
+WITH_INVARIANTS ?= 
 
 # Filter out options that FreeBSD make doesn't understand
 getflags = ( \
@@ -43,6 +43,7 @@ done; \
 echo $$fmakeflags \
 )
 FMAKEFLAGS = -C /scrap/zfs/module -f Makefile.bsd $(shell $(getflags))
+FMAKEFLAGS += WITH_DEBUG=$(WITH_DEBUG) WITH_INVARIANTS=$(WITH_INVARIANTS)
 
 ifneq (/scrap/zfs/module,/scrap/zfs/module)
 FMAKEFLAGS += MAKEOBJDIR=/scrap/zfs/module
@@ -57,6 +58,7 @@ modules-Linux:
 		$(if ,LD=) $(if ,LLVM=) \
 		$(if ,CROSS_COMPILE=) \
 		$(if ,ARCH=) \
+		$(if ,objtool=/scrap/zfs/scripts/objtool-wrapper) \
 		M="$$PWD"  CONFIG_ZFS=m modules
 
 modules-FreeBSD:
@@ -84,14 +86,14 @@ clean: clean-Linux
 modules_uninstall-Linux-legacy:
 	$(RM) -r $(addprefix $(KMODDIR)/$(INSTALL_MOD_DIR)/,spl/ avl/ icp/ lua/ nvpair/ unicode/ zcommon/ zfs/ zstd/)
 
-KMODDIR := $(INSTALL_MOD_PATH)/lib/modules/6.12.27-mdl+
+KMODDIR := $(INSTALL_MOD_PATH)/lib/modules/6.12.116-mdl+
 modules_install-Linux: modules_uninstall-Linux-legacy
 	@# Install the kernel modules
 	$(MAKE) -C /scrap/linux-mdl-6.12 M="$$PWD" modules_install \
 		INSTALL_MOD_PATH=$(INSTALL_MOD_PATH) \
 		INSTALL_MOD_DIR=$(INSTALL_MOD_DIR) \
 		$(if ,ARCH=) \
-		KERNELRELEASE=6.12.27-mdl+
+		KERNELRELEASE=6.12.116-mdl+
 	@# Remove extraneous build products when packaging
 	if [ -n "$(DESTDIR)" ] && [ "$(DONT_DELETE_MODULES_FILES)" != "1" ]; then \
 		find $(KMODDIR) -name 'modules.*' -delete; \
@@ -102,11 +104,11 @@ modules_install-Linux: modules_uninstall-Linux-legacy
 	@# Naturally, depmod is less than amused by this.
 	@# So if we find it missing or with one of these present,
 	@# we check for the alternate path for the System.map
-	sysmap=$(INSTALL_MOD_PATH)/boot/System.map-6.12.27-mdl+; \
+	sysmap=$(INSTALL_MOD_PATH)/boot/System.map-6.12.116-mdl+; \
 	{ [ -f "$$sysmap" ] && [ $$(wc -l < "$$sysmap") -ge 100 ]; } || \
-		sysmap=$(INSTALL_MOD_PATH)/usr/lib/debug/boot/System.map-6.12.27-mdl+; \
+		sysmap=$(INSTALL_MOD_PATH)/usr/lib/debug/boot/System.map-6.12.116-mdl+; \
 	if [ -f $$sysmap ]; then \
-		depmod -ae -F $$sysmap 6.12.27-mdl+ -b $(INSTALL_MOD_PATH)/; \
+		depmod -ae -F $$sysmap 6.12.116-mdl+ -b $(INSTALL_MOD_PATH)/; \
 	fi
 
 modules_install-FreeBSD:
@@ -116,8 +118,8 @@ modules_install-FreeBSD:
 modules_install: modules_install-Linux
 
 data_install-Linux:
-	@mkdir -p $(DESTDIR)//usr/src/zfs-2.3.2/6.12.27-mdl+
-	cp ../zfs.release ../zfs_config.h NONE $(DESTDIR)//usr/src/zfs-2.3.2/6.12.27-mdl+
+	@mkdir -p $(DESTDIR)//usr/src/zfs-2.4.4/6.12.116-mdl+
+	cp ../zfs.release ../zfs_config.h NONE $(DESTDIR)//usr/src/zfs-2.4.4/6.12.116-mdl+
 
 data_install-FreeBSD:
 	@
@@ -134,7 +136,7 @@ modules_uninstall-FreeBSD:
 modules_uninstall: modules_uninstall-Linux
 
 data_uninstall-Linux:
-	$(RM) $(addprefix $(DESTDIR)//usr/src/zfs-2.3.2/6.12.27-mdl+/,zfs.release zfs_config.h NONE)
+	$(RM) $(addprefix $(DESTDIR)//usr/src/zfs-2.4.4/6.12.116-mdl+/,zfs.release zfs_config.h NONE)
 
 data_uninstall-FreeBSD:
 	@
@@ -142,7 +144,7 @@ data_uninstall-FreeBSD:
 data_uninstall: data_uninstall-Linux
 
 cppcheck-Linux:
-	@printf "skipping cppcheck because cppcheck is not installed\n" -j16 --std=c99 --quiet --force --error-exitcode=2 \
+	@printf "skipping cppcheck because cppcheck is not installed\n" -j48 --std=c99 --quiet --force --error-exitcode=2 \
 		--inline-suppr \
 		--suppress=unmatchedSuppression \
 		--suppress=noValidConfiguration \
@@ -164,7 +166,8 @@ cppcheck-FreeBSD:
 cppcheck: cppcheck-Linux
 
 distdir:
-	cd . && find . -name '*.[chS]' -exec sh -c 'for f; do mkdir -p $$distdir/$${f%/*}; cp ./$$f $$distdir/$$f; done' _ {} +
+	( cd . && find . -name '*.[chS]' ) | \
+	  while read f; do mkdir -p $$distdir/$${f%/*}; cp ./$$f $$distdir/$$f; done
 	cp ./Makefile.bsd $$distdir/Makefile.bsd
 
 gen-zstd-symbols:

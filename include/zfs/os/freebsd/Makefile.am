@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: CDDL-1.0
 noinst_HEADERS = \
 	%D%/linux/compiler.h \
 	%D%/linux/types.h \
@@ -33,7 +34,7 @@ noinst_HEADERS = \
 	%D%/spl/sys/list_impl.h \
 	%D%/spl/sys/lock.h \
 	%D%/spl/sys/misc.h \
-	%D%/spl/sys/mod_os.h \
+	%D%/spl/sys/mod.h \
 	%D%/spl/sys/mode.h \
 	%D%/spl/sys/mount.h \
 	%D%/spl/sys/mutex.h \

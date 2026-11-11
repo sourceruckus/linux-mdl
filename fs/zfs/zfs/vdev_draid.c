@@ -22,6 +22,8 @@
 /*
  * Copyright (c) 2018 Intel Corporation.
  * Copyright (c) 2020 by Lawrence Livermore National Security, LLC.
+ * Copyright (c) 2025, Klara, Inc.
+ * Copyright (c) 2026, Wasabi Technologies, Inc.
  */
 
 #include <sys/zfs_context.h>
@@ -477,7 +479,7 @@ vdev_draid_generate_perms(const draid_map_t *map, uint8_t **permsp)
 	VERIFY3U(map->dm_children, <=, VDEV_DRAID_MAX_CHILDREN);
 	VERIFY3U(map->dm_seed, !=, 0);
 	VERIFY3U(map->dm_nperms, !=, 0);
-	VERIFY3P(map->dm_perms, ==, NULL);
+	VERIFY0P(map->dm_perms);
 
 #ifdef _KERNEL
 	/*
@@ -578,7 +580,7 @@ vdev_draid_permute_id(vdev_draid_config_t *vdc,
  * i.e. vdev_draid_psize_to_asize().
  */
 static uint64_t
-vdev_draid_asize(vdev_t *vd, uint64_t psize, uint64_t txg)
+vdev_draid_psize_to_asize(vdev_t *vd, uint64_t psize, uint64_t txg)
 {
 	(void) txg;
 	vdev_draid_config_t *vdc = vd->vdev_tsd;
@@ -590,7 +592,7 @@ vdev_draid_asize(vdev_t *vd, uint64_t psize, uint64_t txg)
 	uint64_t asize = (rows * vdc->vdc_groupwidth) << ashift;
 
 	ASSERT3U(asize, !=, 0);
-	ASSERT3U(asize % (vdc->vdc_groupwidth), ==, 0);
+	ASSERT0(asize % (vdc->vdc_groupwidth));
 
 	return (asize);
 }
@@ -599,8 +601,9 @@ vdev_draid_asize(vdev_t *vd, uint64_t psize, uint64_t txg)
  * Deflate the asize to the psize, this includes stripping parity.
  */
 uint64_t
-vdev_draid_asize_to_psize(vdev_t *vd, uint64_t asize)
+vdev_draid_asize_to_psize(vdev_t *vd, uint64_t asize, uint64_t txg)
 {
+	(void) txg;
 	vdev_draid_config_t *vdc = vd->vdev_tsd;
 
 	ASSERT0(asize % vdc->vdc_groupwidth);
@@ -703,7 +706,7 @@ vdev_draid_map_alloc_scrub(zio_t *zio, uint64_t abd_offset, raidz_row_t *rr)
 	uint64_t skip_off = 0;
 
 	ASSERT3U(zio->io_type, ==, ZIO_TYPE_READ);
-	ASSERT3P(rr->rr_abd_empty, ==, NULL);
+	ASSERT0P(rr->rr_abd_empty);
 
 	if (rr->rr_nempty > 0) {
 		rr->rr_abd_empty = abd_alloc_linear(rr->rr_nempty * skip_size,
@@ -792,7 +795,7 @@ vdev_draid_map_alloc_empty(zio_t *zio, raidz_row_t *rr)
 	uint64_t skip_off = 0;
 
 	ASSERT3U(zio->io_type, ==, ZIO_TYPE_READ);
-	ASSERT3P(rr->rr_abd_empty, ==, NULL);
+	ASSERT0P(rr->rr_abd_empty);
 
 	if (rr->rr_nempty > 0) {
 		rr->rr_abd_empty = abd_alloc_linear(rr->rr_nempty * skip_size,
@@ -806,7 +809,7 @@ vdev_draid_map_alloc_empty(zio_t *zio, raidz_row_t *rr)
 			/* empty data column (small read), add a skip sector */
 			ASSERT3U(skip_size, ==, parity_size);
 			ASSERT3U(rr->rr_nempty, !=, 0);
-			ASSERT3P(rc->rc_abd, ==, NULL);
+			ASSERT0P(rc->rc_abd);
 			rc->rc_abd = abd_get_offset_size(rr->rr_abd_empty,
 			    skip_off, skip_size);
 			skip_off += skip_size;
@@ -962,7 +965,7 @@ vdev_draid_map_alloc_row(zio_t *zio, raidz_row_t **rrp, uint64_t io_offset,
 	vdev_draid_config_t *vdc = vd->vdev_tsd;
 	uint64_t ashift = vd->vdev_top->vdev_ashift;
 	uint64_t io_size = abd_size;
-	uint64_t io_asize = vdev_draid_asize(vd, io_size, 0);
+	uint64_t io_asize = vdev_draid_psize_to_asize(vd, io_size, 0);
 	uint64_t group = vdev_draid_offset_to_group(vd, io_offset);
 	uint64_t start_offset = vdev_draid_group_to_offset(vd, group + 1);
 
@@ -972,7 +975,7 @@ vdev_draid_map_alloc_row(zio_t *zio, raidz_row_t **rrp, uint64_t io_offset,
 	 */
 	if (io_offset + io_asize > start_offset) {
 		io_size = vdev_draid_asize_to_psize(vd,
-		    start_offset - io_offset);
+		    start_offset - io_offset, 0);
 	}
 
 	/*
@@ -1117,7 +1120,7 @@ vdev_draid_map_alloc(zio_t *zio)
 	if (size < abd_size) {
 		vdev_t *vd = zio->io_vd;
 
-		io_offset += vdev_draid_asize(vd, size, 0);
+		io_offset += vdev_draid_psize_to_asize(vd, size, 0);
 		abd_offset += size;
 		abd_size -= size;
 		nrows++;
@@ -1159,7 +1162,7 @@ vdev_draid_get_astart(vdev_t *vd, const uint64_t start)
 /*
  * Allocatable space for dRAID is (children - nspares) * sizeof(smallest child)
  * rounded down to the last full slice.  So each child must provide at least
- * 1 / (children - nspares) of its asize.
+ * 1 / (children - nspares) of its asize rounded up to VDEV_DRAID_ROWHEIGHT.
  */
 static uint64_t
 vdev_draid_min_asize(vdev_t *vd)
@@ -1169,7 +1172,9 @@ vdev_draid_min_asize(vdev_t *vd)
 	ASSERT3P(vd->vdev_ops, ==, &vdev_draid_ops);
 
 	return (VDEV_DRAID_REFLOW_RESERVE +
-	    (vd->vdev_min_asize + vdc->vdc_ndisks - 1) / (vdc->vdc_ndisks));
+	    ((vd->vdev_min_asize + vdc->vdc_ndisks - 1) / (vdc->vdc_ndisks) +
+	    VDEV_DRAID_ROWHEIGHT - 1) / VDEV_DRAID_ROWHEIGHT *
+	    VDEV_DRAID_ROWHEIGHT);
 }
 
 /*
@@ -1187,7 +1192,7 @@ vdev_draid_min_alloc(vdev_t *vd)
 }
 
 /*
- * Returns true if the txg range does not exist on any leaf vdev.
+ * Returns false if the txg range exists on any leaf vdev, true otherwise.
  *
  * A dRAID spare does not fit into the DTL model. While it has child vdevs
  * there is no redundancy among them, and the effective child vdev is
@@ -1245,8 +1250,7 @@ vdev_draid_missing(vdev_t *vd, uint64_t physical_offset, uint64_t txg,
 		if (vd == NULL)
 			return (B_TRUE);
 
-		return (vdev_draid_missing(vd, physical_offset,
-		    txg, size));
+		return (vdev_draid_missing(vd, physical_offset, txg, size));
 	}
 
 	return (vdev_dtl_contains(vd, DTL_MISSING, txg, size));
@@ -1450,13 +1454,6 @@ vdev_draid_group_missing(vdev_t *vd, uint64_t offset, uint64_t txg,
 		/* Transaction group is known to be partially replicated. */
 		if (vdev_draid_partial(cvd, physical_offset, txg, size))
 			return (B_TRUE);
-
-		/*
-		 * Always check groups with active distributed spares
-		 * because any vdev failure in the pool will affect them.
-		 */
-		if (vdev_draid_find_spare(cvd) != NULL)
-			return (B_TRUE);
 	}
 
 	return (B_FALSE);
@@ -1526,7 +1523,7 @@ vdev_draid_open_children(vdev_t *vd)
  */
 static int
 vdev_draid_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
-    uint64_t *logical_ashift, uint64_t *physical_ashift)
+    uint64_t *logical_ashift, uint64_t *physical_ashift, cred_t *cr)
 {
 	vdev_draid_config_t *vdc =  vd->vdev_tsd;
 	uint64_t nparity = vdc->vdc_nparity;
@@ -1543,8 +1540,8 @@ vdev_draid_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
 	 * ordering is important to ensure the distributed spares calculate
 	 * the correct psize in the event that the dRAID vdevs were expanded.
 	 */
-	vdev_open_children_subset(vd, vdev_draid_open_children);
-	vdev_open_children_subset(vd, vdev_draid_open_spares);
+	vdev_open_children_subset(vd, cr, vdev_draid_open_children);
+	vdev_open_children_subset(vd, cr, vdev_draid_open_spares);
 
 	/* Verify enough of the children are available to continue. */
 	for (int c = 0; c < vd->vdev_children; c++) {
@@ -1622,7 +1619,7 @@ vdev_draid_rebuild_asize(vdev_t *vd, uint64_t start, uint64_t asize,
 	    SPA_MAXBLOCKSIZE);
 
 	ASSERT3U(vdev_draid_get_astart(vd, start), ==, start);
-	ASSERT3U(asize % (vdc->vdc_groupwidth << ashift), ==, 0);
+	ASSERT0(asize % (vdc->vdc_groupwidth << ashift));
 
 	/* Chunks must evenly span all data columns in the group. */
 	psize = (((psize >> ashift) / ndata) * ndata) << ashift;
@@ -1633,7 +1630,7 @@ vdev_draid_rebuild_asize(vdev_t *vd, uint64_t start, uint64_t asize,
 	uint64_t left = vdev_draid_group_to_offset(vd, group + 1) - start;
 	chunk_size = MIN(chunk_size, left);
 
-	ASSERT3U(chunk_size % (vdc->vdc_groupwidth << ashift), ==, 0);
+	ASSERT0(chunk_size % (vdc->vdc_groupwidth << ashift));
 	ASSERT3U(vdev_draid_offset_to_group(vd, start), ==,
 	    vdev_draid_offset_to_group(vd, start + chunk_size - 1));
 
@@ -1770,7 +1767,7 @@ vdev_draid_need_resilver(vdev_t *vd, const dva_t *dva, size_t psize,
     uint64_t phys_birth)
 {
 	uint64_t offset = DVA_GET_OFFSET(dva);
-	uint64_t asize = vdev_draid_asize(vd, psize, 0);
+	uint64_t asize = vdev_draid_psize_to_asize(vd, psize, 0);
 
 	if (phys_birth == TXG_UNKNOWN) {
 		/*
@@ -1827,7 +1824,7 @@ vdev_draid_io_verify(vdev_t *vd, raidz_row_t *rr, int col)
 	zfs_range_seg64_t logical_rs, physical_rs, remain_rs;
 	logical_rs.rs_start = rr->rr_offset;
 	logical_rs.rs_end = logical_rs.rs_start +
-	    vdev_draid_asize(vd, rr->rr_size, 0);
+	    vdev_draid_psize_to_asize(vd, rr->rr_size, 0);
 
 	raidz_col_t *rc = &rr->rr_col[col];
 	vdev_t *cvd = vd->vdev_child[rc->rc_devidx];
@@ -1912,12 +1909,34 @@ vdev_draid_io_start_read(zio_t *zio, raidz_row_t *rr)
 		}
 
 		if (vdev_draid_missing(cvd, rc->rc_offset, zio->io_txg, 1)) {
+			vdev_t *svd;
+
 			if (c >= rr->rr_firstdatacol)
 				rr->rr_missingdata++;
 			else
 				rr->rr_missingparity++;
 			rc->rc_error = SET_ERROR(ESTALE);
 			rc->rc_skipped = 1;
+
+			/*
+			 * If this child has draid spare attached, and that
+			 * spare by rc_offset maps to another spare, the repair
+			 * would go to that spare, and we want all mirrored
+			 * children on it to be updated with the repaired data,
+			 * even when we cannot vouch for it during rebuilds
+			 * (which don't have checksums). Otherwise, we will have
+			 * a lot of checksum errors on that spares during scrub.
+			 * The worst thing that can happen in this case is that
+			 * we will update the reserved spare column on some
+			 * device with unverified data, which is harmless.
+			 */
+			if ((svd = vdev_draid_find_spare(cvd)) != NULL) {
+				svd = vdev_draid_spare_get_child(svd,
+				    rc->rc_offset);
+				if (svd && (svd->vdev_ops == &vdev_spare_ops ||
+				    svd->vdev_ops == &vdev_replacing_ops))
+					rc->rc_tgt_is_dspare = 1;
+			}
 			continue;
 		}
 
@@ -1935,34 +1954,15 @@ vdev_draid_io_start_read(zio_t *zio, raidz_row_t *rr)
 			vdev_t *svd;
 
 			/*
-			 * Sequential rebuilds need to always consider the data
-			 * on the child being rebuilt to be stale.  This is
-			 * important when all columns are available to aid
-			 * known reconstruction in identifing which columns
-			 * contain incorrect data.
-			 *
-			 * Furthermore, all repairs need to be constrained to
-			 * the devices being rebuilt because without a checksum
-			 * we cannot verify the data is actually correct and
-			 * performing an incorrect repair could result in
-			 * locking in damage and making the data unrecoverable.
+			 * Repairs need to be constrained to the devices being
+			 * rebuilt since without a checksum we cannot verify the
+			 * data is actually correct and performing an incorrect
+			 * repair could result in locking in the damage and
+			 * making the data unrecoverable.
 			 */
-			if (zio->io_priority == ZIO_PRIORITY_REBUILD) {
-				if (vdev_draid_rebuilding(cvd)) {
-					if (c >= rr->rr_firstdatacol)
-						rr->rr_missingdata++;
-					else
-						rr->rr_missingparity++;
-					rc->rc_error = SET_ERROR(ESTALE);
-					rc->rc_skipped = 1;
-					rc->rc_allow_repair = 1;
-					continue;
-				} else {
-					rc->rc_allow_repair = 0;
-				}
-			} else {
-				rc->rc_allow_repair = 1;
-			}
+			if (zio->io_priority == ZIO_PRIORITY_REBUILD &&
+			    !vdev_draid_rebuilding(cvd))
+				rc->rc_allow_repair = 0;
 
 			/*
 			 * If this child is a distributed spare then the
@@ -1993,6 +1993,33 @@ vdev_draid_io_start_read(zio_t *zio, raidz_row_t *rr)
 			    vdev_draid_rebuilding(cvd)) {
 				rc->rc_force_repair = 1;
 				rc->rc_allow_repair = 1;
+			}
+		}
+
+		if (vdev_sit_out_reads(cvd, zio->io_flags)) {
+			rr->rr_outlier_cnt++;
+			ASSERT0(rc->rc_latency_outlier);
+			rc->rc_latency_outlier = 1;
+		}
+	}
+
+	/*
+	 * When the row contains a latency outlier and sufficient parity
+	 * exists to reconstruct the column data, then skip reading the
+	 * known slow child vdev as a performance optimization.
+	 */
+	if (rr->rr_outlier_cnt > 0 &&
+	    (rr->rr_firstdatacol - rr->rr_missingparity) >=
+	    (rr->rr_missingdata + 1)) {
+
+		for (int c = rr->rr_cols - 1; c >= rr->rr_firstdatacol; c--) {
+			raidz_col_t *rc = &rr->rr_col[c];
+
+			if (rc->rc_error == 0 && rc->rc_latency_outlier) {
+				rr->rr_missingdata++;
+				rc->rc_error = SET_ERROR(EAGAIN);
+				rc->rc_skipped = 1;
+				break;
 			}
 		}
 	}
@@ -2271,7 +2298,7 @@ vdev_draid_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	ASSERT3U(vdc->vdc_groupwidth, <=, vdc->vdc_ndisks);
 	ASSERT3U(vdc->vdc_groupsz, >=, 2 * VDEV_DRAID_ROWHEIGHT);
 	ASSERT3U(vdc->vdc_devslicesz, >=, VDEV_DRAID_ROWHEIGHT);
-	ASSERT3U(vdc->vdc_devslicesz % VDEV_DRAID_ROWHEIGHT, ==, 0);
+	ASSERT0(vdc->vdc_devslicesz % VDEV_DRAID_ROWHEIGHT);
 	ASSERT3U((vdc->vdc_groupwidth * vdc->vdc_ngroups) %
 	    vdc->vdc_ndisks, ==, 0);
 
@@ -2311,7 +2338,8 @@ vdev_ops_t vdev_draid_ops = {
 	.vdev_op_fini = vdev_draid_fini,
 	.vdev_op_open = vdev_draid_open,
 	.vdev_op_close = vdev_draid_close,
-	.vdev_op_asize = vdev_draid_asize,
+	.vdev_op_psize_to_asize = vdev_draid_psize_to_asize,
+	.vdev_op_asize_to_psize = vdev_draid_asize_to_psize,
 	.vdev_op_min_asize = vdev_draid_min_asize,
 	.vdev_op_min_alloc = vdev_draid_min_alloc,
 	.vdev_op_io_start = vdev_draid_io_start,
@@ -2438,8 +2466,9 @@ vdev_draid_spare_close(vdev_t *vd)
  */
 static int
 vdev_draid_spare_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
-    uint64_t *logical_ashift, uint64_t *physical_ashift)
+    uint64_t *logical_ashift, uint64_t *physical_ashift, cred_t *cr)
 {
+	(void) cr;
 	vdev_draid_spare_t *vds = vd->vdev_tsd;
 	vdev_t *rvd = vd->vdev_spa->spa_root_vdev;
 	uint64_t asize, max_asize;
@@ -2482,6 +2511,7 @@ vdev_draid_spare_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	*max_psize = max_asize + VDEV_LABEL_START_SIZE + VDEV_LABEL_END_SIZE;
 
 	vds->vds_draid_vdev = tvd;
+	vd->vdev_nonrot = tvd->vdev_nonrot;
 
 	return (0);
 }
@@ -2801,7 +2831,8 @@ vdev_ops_t vdev_draid_spare_ops = {
 	.vdev_op_fini = vdev_draid_spare_fini,
 	.vdev_op_open = vdev_draid_spare_open,
 	.vdev_op_close = vdev_draid_spare_close,
-	.vdev_op_asize = vdev_default_asize,
+	.vdev_op_psize_to_asize = vdev_default_asize,
+	.vdev_op_asize_to_psize = vdev_default_psize,
 	.vdev_op_min_asize = vdev_default_min_asize,
 	.vdev_op_min_alloc = NULL,
 	.vdev_op_io_start = vdev_draid_spare_io_start,

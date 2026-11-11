@@ -379,8 +379,8 @@ typedef struct l2arc_lb_ptr_buf {
  * L2ARC Internals
  */
 typedef struct l2arc_dev {
-	vdev_t			*l2ad_vdev;	/* vdev */
-	spa_t			*l2ad_spa;	/* spa */
+	vdev_t			*l2ad_vdev;	/* can be NULL during remove */
+	spa_t			*l2ad_spa;	/* can be NULL during remove */
 	uint64_t		l2ad_hand;	/* next write location */
 	uint64_t		l2ad_start;	/* first addr on device */
 	uint64_t		l2ad_end;	/* last addr on device */
@@ -476,8 +476,8 @@ struct arc_buf_hdr {
 
 	arc_buf_contents_t	b_type;
 	uint8_t			b_complevel;
-	uint8_t			b_reserved1; /* used for 4 byte alignment */
-	uint16_t		b_reserved2; /* used for 4 byte alignment */
+	uint8_t			b_reserved1;	/* used for 4 byte alignment */
+	uint16_t		b_l2size;	/* alignment or L2-only size */
 	arc_buf_hdr_t		*b_hash_next;
 	arc_flags_t		b_flags;
 
@@ -778,6 +778,8 @@ typedef struct arc_stats {
 	 * due to ARC_FLAG_UNCACHED being set.
 	 */
 	kstat_named_t arcstat_uncached_evictable_metadata;
+	/* Number of L2ARC devices currently attached across all pools. */
+	kstat_named_t arcstat_l2_ndev;
 	kstat_named_t arcstat_l2_hits;
 	kstat_named_t arcstat_l2_misses;
 	/*
@@ -954,7 +956,7 @@ typedef struct arc_sums {
 	wmsum_t arcstat_data_size;
 	wmsum_t arcstat_metadata_size;
 	wmsum_t arcstat_dbuf_size;
-	wmsum_t arcstat_dnode_size;
+	aggsum_t arcstat_dnode_size;
 	wmsum_t arcstat_bonus_size;
 	wmsum_t arcstat_l2_hits;
 	wmsum_t arcstat_l2_misses;

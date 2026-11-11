@@ -247,7 +247,7 @@ zpl_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
 	 * and fifos, but we want to know if this behavior ever changes.
 	 */
 	if (S_ISSOCK(mode) || S_ISFIFO(mode))
-		ASSERT(rdev == 0);
+		ASSERT0(rdev);
 
 	crhold(cr);
 	vap = kmem_zalloc(sizeof (vattr_t), KM_SLEEP);
@@ -374,14 +374,20 @@ zpl_unlink(struct inode *dir, struct dentry *dentry)
 	return (error);
 }
 
+#if defined(HAVE_IOPS_MKDIR_USERNS)
 static int
-#ifdef HAVE_IOPS_MKDIR_USERNS
 zpl_mkdir(struct user_namespace *user_ns, struct inode *dir,
     struct dentry *dentry, umode_t mode)
 #elif defined(HAVE_IOPS_MKDIR_IDMAP)
+static int
+zpl_mkdir(struct mnt_idmap *user_ns, struct inode *dir,
+    struct dentry *dentry, umode_t mode)
+#elif defined(HAVE_IOPS_MKDIR_DENTRY)
+static struct dentry *
 zpl_mkdir(struct mnt_idmap *user_ns, struct inode *dir,
     struct dentry *dentry, umode_t mode)
 #else
+static int
 zpl_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 #endif
 {
@@ -390,12 +396,14 @@ zpl_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	znode_t *zp;
 	int error;
 	fstrans_cookie_t cookie;
-#if !(defined(HAVE_IOPS_MKDIR_USERNS) || defined(HAVE_IOPS_MKDIR_IDMAP))
+#if !(defined(HAVE_IOPS_MKDIR_USERNS) || \
+	defined(HAVE_IOPS_MKDIR_IDMAP) || defined(HAVE_IOPS_MKDIR_DENTRY))
 	zidmap_t *user_ns = kcred->user_ns;
 #endif
 
 	if (is_nametoolong(dentry)) {
-		return (-ENAMETOOLONG);
+		error = -ENAMETOOLONG;
+		goto err;
 	}
 
 	crhold(cr);
@@ -422,9 +430,14 @@ zpl_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	spl_fstrans_unmark(cookie);
 	kmem_free(vap, sizeof (vattr_t));
 	crfree(cr);
-	ASSERT3S(error, <=, 0);
 
+err:
+	ASSERT3S(error, <=, 0);
+#if defined(HAVE_IOPS_MKDIR_DENTRY)
+	return (error != 0 ? ERR_PTR(error) : NULL);
+#else
 	return (error);
+#endif
 }
 
 static int
@@ -490,6 +503,32 @@ zpl_getattr_impl(const struct path *path, struct kstat *stat, u32 request_mask,
 	if (request_mask & STATX_BTIME) {
 		stat->btime = zp->z_btime;
 		stat->result_mask |= STATX_BTIME;
+	}
+#endif
+
+#ifdef STATX_CHANGE_COOKIE
+	if (request_mask & STATX_CHANGE_COOKIE) {
+		/*
+		 * knfsd uses the STATX_CHANGE_COOKIE to surface to clients
+		 * change_info4 data, which is used to implement NFS client
+		 * name caching (see RFC 8881 Section 10.8). This number
+		 * should always increase with changes and should not be
+		 * reused. We cannot simply present ctime here because
+		 * ZFS uses a coarse timer to set them, which may cause
+		 * clients to fail to detect changes and invalidate cache.
+		 *
+		 * ZFS always increments znode z_seq number, but this is
+		 * uint_t and so we mask in ctime to upper bits.
+		 *
+		 * STATX_ATTR_CHANGE_MONOTONIC is advertised
+		 * to prevent knfsd from generating the change cookie
+		 * based on ctime. C.f. nfsd4_change_attribute in
+		 * fs/nfsd/nfsfh.c.
+		 */
+		stat->change_cookie =
+		    ((u64)stat->ctime.tv_sec << 32) | zp->z_seq;
+		stat->attributes |= STATX_ATTR_CHANGE_MONOTONIC;
+		stat->result_mask |= STATX_CHANGE_COOKIE;
 	}
 #endif
 
@@ -604,15 +643,15 @@ zpl_setattr(struct dentry *dentry, struct iattr *ia)
 
 static int
 #ifdef HAVE_IOPS_RENAME_USERNS
-zpl_rename2(struct user_namespace *user_ns, struct inode *sdip,
+zpl_rename(struct user_namespace *user_ns, struct inode *sdip,
     struct dentry *sdentry, struct inode *tdip, struct dentry *tdentry,
     unsigned int rflags)
 #elif defined(HAVE_IOPS_RENAME_IDMAP)
-zpl_rename2(struct mnt_idmap *user_ns, struct inode *sdip,
+zpl_rename(struct mnt_idmap *user_ns, struct inode *sdip,
     struct dentry *sdentry, struct inode *tdip, struct dentry *tdentry,
     unsigned int rflags)
 #else
-zpl_rename2(struct inode *sdip, struct dentry *sdentry,
+zpl_rename(struct inode *sdip, struct dentry *sdentry,
     struct inode *tdip, struct dentry *tdentry, unsigned int rflags)
 #endif
 {
@@ -646,17 +685,6 @@ zpl_rename2(struct inode *sdip, struct dentry *sdentry,
 
 	return (error);
 }
-
-#if !defined(HAVE_IOPS_RENAME_USERNS) && \
-	!defined(HAVE_RENAME_WANTS_FLAGS) && \
-	!defined(HAVE_IOPS_RENAME_IDMAP)
-static int
-zpl_rename(struct inode *sdip, struct dentry *sdentry,
-    struct inode *tdip, struct dentry *tdentry)
-{
-	return (zpl_rename2(sdip, sdentry, tdip, tdentry, 0));
-}
-#endif
 
 static int
 #ifdef HAVE_IOPS_SYMLINK_USERNS
@@ -822,13 +850,7 @@ const struct inode_operations zpl_dir_inode_operations = {
 	.mkdir		= zpl_mkdir,
 	.rmdir		= zpl_rmdir,
 	.mknod		= zpl_mknod,
-#if defined(HAVE_RENAME_WANTS_FLAGS) || defined(HAVE_IOPS_RENAME_USERNS)
-	.rename		= zpl_rename2,
-#elif defined(HAVE_IOPS_RENAME_IDMAP)
-	.rename		= zpl_rename2,
-#else
 	.rename		= zpl_rename,
-#endif
 	.tmpfile	= zpl_tmpfile,
 	.setattr	= zpl_setattr,
 	.getattr	= zpl_getattr,

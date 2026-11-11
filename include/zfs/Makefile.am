@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: CDDL-1.0
 if BUILD_LINUX
 include $(srcdir)/%D%/os/linux/Makefile.am
 endif
@@ -10,6 +11,7 @@ COMMON_H = \
 	cityhash.h \
 	zfeature_common.h \
 	zfs_comutil.h \
+	zfs_crrd.h \
 	zfs_deleg.h \
 	zfs_fletcher.h \
 	zfs_namecheck.h \
@@ -69,7 +71,6 @@ COMMON_H = \
 	sys/metaslab_impl.h \
 	sys/mmp.h \
 	sys/mntent.h \
-	sys/mod.h \
 	sys/multilist.h \
 	sys/nvpair.h \
 	sys/nvpair_impl.h \

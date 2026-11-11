@@ -23,6 +23,7 @@
  * Copyright (c) 2014 by Chunwei Chen. All rights reserved.
  * Copyright (c) 2019 by Delphix. All rights reserved.
  * Copyright (c) 2023, 2024, Klara Inc.
+ * Copyright (c) 2025, Rob Norris <robn@despairlabs.com>
  */
 
 /*
@@ -255,10 +256,6 @@ abd_unmark_zfs_page(struct page *page)
 #endif /* _LP64 */
 
 #ifndef CONFIG_HIGHMEM
-
-#ifndef __GFP_RECLAIM
-#define	__GFP_RECLAIM		__GFP_WAIT
-#endif
 
 /*
  * The goal is to minimize fragmentation by preferentially populating ABDs
@@ -867,9 +864,9 @@ abd_iter_advance(struct abd_iter *aiter, size_t amount)
 	 * Ensure that last chunk is not in use. abd_iterate_*() must clear
 	 * this state (directly or abd_iter_unmap()) before advancing.
 	 */
-	ASSERT3P(aiter->iter_mapaddr, ==, NULL);
+	ASSERT0P(aiter->iter_mapaddr);
 	ASSERT0(aiter->iter_mapsize);
-	ASSERT3P(aiter->iter_page, ==, NULL);
+	ASSERT0P(aiter->iter_page);
 	ASSERT0(aiter->iter_page_doff);
 	ASSERT0(aiter->iter_page_dsize);
 
@@ -891,6 +888,14 @@ abd_iter_advance(struct abd_iter *aiter, size_t amount)
 	}
 }
 
+#ifndef nth_page
+/*
+ * Since 6.18 nth_page() no longer exists, and is no longer required to iterate
+ * within a single SG entry, so we replace it with a simple addition.
+ */
+#define	nth_page(p, n)	((p)+(n))
+#endif
+
 /*
  * Map the current chunk into aiter. This can be safely called when the aiter
  * has already exhausted, in which case this does nothing.
@@ -901,7 +906,7 @@ abd_iter_map(struct abd_iter *aiter)
 	void *paddr;
 	size_t offset = 0;
 
-	ASSERT3P(aiter->iter_mapaddr, ==, NULL);
+	ASSERT0P(aiter->iter_mapaddr);
 	ASSERT0(aiter->iter_mapsize);
 
 	/* There's nothing left to iterate over, so do nothing */
@@ -918,7 +923,14 @@ abd_iter_map(struct abd_iter *aiter)
 		aiter->iter_mapsize = MIN(aiter->iter_sg->length - offset,
 		    aiter->iter_abd->abd_size - aiter->iter_pos);
 
-		paddr = zfs_kmap_local(sg_page(aiter->iter_sg));
+		struct page *page = sg_page(aiter->iter_sg);
+		if (PageHighMem(page)) {
+			page = nth_page(page, offset / PAGE_SIZE);
+			offset &= PAGE_SIZE - 1;
+			aiter->iter_mapsize = MIN(aiter->iter_mapsize,
+			    PAGE_SIZE - offset);
+		}
+		paddr = zfs_kmap_local(page);
 	}
 
 	aiter->iter_mapaddr = (char *)paddr + offset;
@@ -936,8 +948,14 @@ abd_iter_unmap(struct abd_iter *aiter)
 		return;
 
 	if (!abd_is_linear(aiter->iter_abd)) {
+		size_t offset = aiter->iter_offset;
+
+		struct page *page = sg_page(aiter->iter_sg);
+		if (PageHighMem(page))
+			offset &= PAGE_SIZE - 1;
+
 		/* LINTED E_FUNC_SET_NOT_USED */
-		zfs_kunmap_local(aiter->iter_mapaddr - aiter->iter_offset);
+		zfs_kunmap_local(aiter->iter_mapaddr - offset);
 	}
 
 	ASSERT3P(aiter->iter_mapaddr, !=, NULL);
@@ -1192,153 +1210,7 @@ abd_iter_page(struct abd_iter *aiter)
 	aiter->iter_page_dsize = dsize;
 }
 
-/*
- * Note: ABD BIO functions only needed to support vdev_classic. See comments in
- * vdev_disk.c.
- */
-
-/*
- * bio_nr_pages for ABD.
- * @off is the offset in @abd
- */
-unsigned long
-abd_nr_pages_off(abd_t *abd, unsigned int size, size_t off)
-{
-	unsigned long pos;
-
-	if (abd_is_gang(abd)) {
-		unsigned long count = 0;
-
-		for (abd_t *cabd = abd_gang_get_offset(abd, &off);
-		    cabd != NULL && size != 0;
-		    cabd = list_next(&ABD_GANG(abd).abd_gang_chain, cabd)) {
-			ASSERT3U(off, <, cabd->abd_size);
-			int mysize = MIN(size, cabd->abd_size - off);
-			count += abd_nr_pages_off(cabd, mysize, off);
-			size -= mysize;
-			off = 0;
-		}
-		return (count);
-	}
-
-	if (abd_is_linear(abd))
-		pos = (unsigned long)abd_to_buf(abd) + off;
-	else
-		pos = ABD_SCATTER(abd).abd_offset + off;
-
-	return (((pos + size + PAGESIZE - 1) >> PAGE_SHIFT) -
-	    (pos >> PAGE_SHIFT));
-}
-
-static unsigned int
-bio_map(struct bio *bio, void *buf_ptr, unsigned int bio_size)
-{
-	unsigned int offset, size, i;
-	struct page *page;
-
-	offset = offset_in_page(buf_ptr);
-	for (i = 0; i < bio->bi_max_vecs; i++) {
-		size = PAGE_SIZE - offset;
-
-		if (bio_size <= 0)
-			break;
-
-		if (size > bio_size)
-			size = bio_size;
-
-		if (is_vmalloc_addr(buf_ptr))
-			page = vmalloc_to_page(buf_ptr);
-		else
-			page = virt_to_page(buf_ptr);
-
-		/*
-		 * Some network related block device uses tcp_sendpage, which
-		 * doesn't behave well when using 0-count page, this is a
-		 * safety net to catch them.
-		 */
-		ASSERT3S(page_count(page), >, 0);
-
-		if (bio_add_page(bio, page, size, offset) != size)
-			break;
-
-		buf_ptr += size;
-		bio_size -= size;
-		offset = 0;
-	}
-
-	return (bio_size);
-}
-
-/*
- * bio_map for gang ABD.
- */
-static unsigned int
-abd_gang_bio_map_off(struct bio *bio, abd_t *abd,
-    unsigned int io_size, size_t off)
-{
-	ASSERT(abd_is_gang(abd));
-
-	for (abd_t *cabd = abd_gang_get_offset(abd, &off);
-	    cabd != NULL;
-	    cabd = list_next(&ABD_GANG(abd).abd_gang_chain, cabd)) {
-		ASSERT3U(off, <, cabd->abd_size);
-		int size = MIN(io_size, cabd->abd_size - off);
-		int remainder = abd_bio_map_off(bio, cabd, size, off);
-		io_size -= (size - remainder);
-		if (io_size == 0 || remainder > 0)
-			return (io_size);
-		off = 0;
-	}
-	ASSERT0(io_size);
-	return (io_size);
-}
-
-/*
- * bio_map for ABD.
- * @off is the offset in @abd
- * Remaining IO size is returned
- */
-unsigned int
-abd_bio_map_off(struct bio *bio, abd_t *abd,
-    unsigned int io_size, size_t off)
-{
-	struct abd_iter aiter;
-
-	ASSERT3U(io_size, <=, abd->abd_size - off);
-	if (abd_is_linear(abd))
-		return (bio_map(bio, ((char *)abd_to_buf(abd)) + off, io_size));
-
-	ASSERT(!abd_is_linear(abd));
-	if (abd_is_gang(abd))
-		return (abd_gang_bio_map_off(bio, abd, io_size, off));
-
-	abd_iter_init(&aiter, abd);
-	abd_iter_advance(&aiter, off);
-
-	for (int i = 0; i < bio->bi_max_vecs; i++) {
-		struct page *pg;
-		size_t len, sgoff, pgoff;
-		struct scatterlist *sg;
-
-		if (io_size <= 0)
-			break;
-
-		sg = aiter.iter_sg;
-		sgoff = aiter.iter_offset;
-		pgoff = sgoff & (PAGESIZE - 1);
-		len = MIN(io_size, PAGESIZE - pgoff);
-		ASSERT(len > 0);
-
-		pg = nth_page(sg_page(sg), sgoff >> PAGE_SHIFT);
-		if (bio_add_page(bio, pg, len, pgoff) != len)
-			break;
-
-		io_size -= len;
-		abd_iter_advance(&aiter, len);
-	}
-
-	return (io_size);
-}
+EXPORT_SYMBOL(abd_alloc_from_pages);
 
 /* Tunable Parameters */
 module_param(zfs_abd_scatter_enabled, int, 0644);

@@ -62,8 +62,9 @@ typedef struct mzap_phys {
 	uint64_t mz_salt;
 	uint64_t mz_normflags;
 	uint64_t mz_pad[5];
-	mzap_ent_phys_t mz_chunk[1];
+
 	/* actually variable size depending on block size */
+	mzap_ent_phys_t mz_chunk[];
 } mzap_phys_t;
 
 typedef struct mzap_ent {
@@ -219,7 +220,8 @@ void fzap_byteswap(void *buf, size_t size);
 int fzap_count(zap_t *zap, uint64_t *count);
 int fzap_lookup(zap_name_t *zn,
     uint64_t integer_size, uint64_t num_integers, void *buf,
-    char *realname, int rn_len, boolean_t *normalization_conflictp);
+    char *realname, int rn_len, boolean_t *normalization_conflictp,
+    uint64_t *actual_num_integers);
 void fzap_prefetch(zap_name_t *zn);
 int fzap_add(zap_name_t *zn, uint64_t integer_size, uint64_t num_integers,
     const void *val, const void *tag, dmu_tx_t *tx);

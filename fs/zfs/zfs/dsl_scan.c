@@ -189,16 +189,16 @@ static uint_t zfs_scan_mem_lim_fact = 20;
 static uint_t zfs_scan_mem_lim_soft_fact = 20;
 
 /* minimum milliseconds to scrub per txg */
-static uint_t zfs_scrub_min_time_ms = 1000;
+static uint_t zfs_scrub_min_time_ms = 750;
 
 /* minimum milliseconds to obsolete per txg */
 static uint_t zfs_obsolete_min_time_ms = 500;
 
 /* minimum milliseconds to free per txg */
-static uint_t zfs_free_min_time_ms = 1000;
+static uint_t zfs_free_min_time_ms = 500;
 
 /* minimum milliseconds to resilver per txg */
-static uint_t zfs_resilver_min_time_ms = 3000;
+static uint_t zfs_resilver_min_time_ms = 1500;
 
 static uint_t zfs_scan_checkpoint_intval = 7200; /* in seconds */
 int zfs_scan_suspend_progress = 0; /* set to prevent scans from progressing */
@@ -208,7 +208,13 @@ static const ddt_class_t zfs_scrub_ddt_class_max = DDT_CLASS_DUPLICATE;
 /* max number of blocks to free in a single TXG */
 static uint64_t zfs_async_block_max_blocks = UINT64_MAX;
 /* max number of dedup blocks to free in a single TXG */
-static uint64_t zfs_max_async_dedup_frees = 100000;
+static uint64_t zfs_max_async_dedup_frees = 250000;
+
+/*
+ * After freeing this many async ZIOs (dedup, clone, gang blocks), wait for
+ * them to complete before continuing.  This prevents unbounded I/O queueing.
+ */
+static uint64_t zfs_async_free_zio_wait_interval = 2000;
 
 /* set to disable resilver deferring */
 static int zfs_resilver_disable_defer = B_FALSE;
@@ -217,16 +223,14 @@ static int zfs_resilver_disable_defer = B_FALSE;
 static uint_t zfs_resilver_defer_percent = 10;
 
 /*
- * We wait a few txgs after importing a pool to begin scanning so that
- * the import / mounting code isn't held up by scrub / resilver IO.
- * Unfortunately, it is a bit difficult to determine exactly how long
- * this will take since userspace will trigger fs mounts asynchronously
- * and the kernel will create zvol minors asynchronously. As a result,
- * the value provided here is a bit arbitrary, but represents a
- * reasonable estimate of how many txgs it will take to finish fully
- * importing a pool
+ * Number of TXGs to wait after importing before starting background
+ * work (async destroys, scan/scrub/resilver operations). This allows
+ * the import command and filesystem mounts to complete quickly without
+ * being delayed by background activities. The value is somewhat arbitrary
+ * since userspace triggers filesystem mounts asynchronously, but 5 TXGs
+ * provides a reasonable window for import completion in most cases.
  */
-#define	SCAN_IMPORT_WAIT_TXGS 		5
+static uint_t zfs_import_defer_txgs = 5;
 
 #define	DSL_SCAN_IS_SCRUB_RESILVER(scn) \
 	((scn)->scn_phys.scn_func == POOL_SCAN_SCRUB || \
@@ -234,6 +238,9 @@ static uint_t zfs_resilver_defer_percent = 10;
 
 #define	DSL_SCAN_IS_SCRUB(scn)		\
 	((scn)->scn_phys.scn_func == POOL_SCAN_SCRUB)
+
+#define	DSL_SCAN_IS_RESILVER(scn) \
+	((scn)->scn_phys.scn_func == POOL_SCAN_RESILVER)
 
 /*
  * Enable/disable the processing of the free_bpobj object.
@@ -451,7 +458,7 @@ static inline void
 bp2sio(const blkptr_t *bp, scan_io_t *sio, int dva_i)
 {
 	sio->sio_blk_prop = bp->blk_prop;
-	sio->sio_phys_birth = BP_GET_PHYSICAL_BIRTH(bp);
+	sio->sio_phys_birth = BP_GET_RAW_PHYSICAL_BIRTH(bp);
 	sio->sio_birth = BP_GET_LOGICAL_BIRTH(bp);
 	sio->sio_cksum = bp->blk_cksum;
 	sio->sio_nr_dvas = BP_GET_NDVAS(bp);
@@ -1021,7 +1028,7 @@ dsl_scan(dsl_pool_t *dp, pool_scan_func_t func, uint64_t txgstart,
 			if (err == 0) {
 				spa_event_notify(spa, NULL, NULL,
 				    ESC_ZFS_ERRORSCRUB_RESUME);
-				return (ECANCELED);
+				return (0);
 			}
 			return (SET_ERROR(err));
 		}
@@ -1037,7 +1044,7 @@ dsl_scan(dsl_pool_t *dp, pool_scan_func_t func, uint64_t txgstart,
 		    POOL_SCRUB_NORMAL);
 		if (err == 0) {
 			spa_event_notify(spa, NULL, NULL, ESC_ZFS_SCRUB_RESUME);
-			return (SET_ERROR(ECANCELED));
+			return (0);
 		}
 		return (SET_ERROR(err));
 	}
@@ -1132,10 +1139,6 @@ dsl_scan_done(dsl_scan_t *scn, boolean_t complete, dmu_tx_t *tx)
 		}
 	}
 
-	scn->scn_phys.scn_state = complete ? DSS_FINISHED : DSS_CANCELED;
-
-	spa_notify_waiters(spa);
-
 	if (dsl_scan_restarting(scn, tx)) {
 		spa_history_log_internal(spa, "scan aborted, restarting", tx,
 		    "errors=%llu", (u_longlong_t)spa_approx_errlog_size(spa));
@@ -1173,7 +1176,7 @@ dsl_scan_done(dsl_scan_t *scn, boolean_t complete, dmu_tx_t *tx)
 			vdev_dtl_reassess(spa->spa_root_vdev, tx->tx_txg,
 			    scn->scn_phys.scn_max_txg, B_TRUE, B_FALSE);
 
-			if (scn->scn_phys.scn_min_txg) {
+			if (DSL_SCAN_IS_RESILVER(scn)) {
 				nvlist_t *aux = fnvlist_alloc();
 				fnvlist_add_string(aux, ZFS_EV_RESILVER_TYPE,
 				    "healing");
@@ -1194,6 +1197,9 @@ dsl_scan_done(dsl_scan_t *scn, boolean_t complete, dmu_tx_t *tx)
 		 * Don't clear flag until after vdev_dtl_reassess to ensure that
 		 * DTL_MISSING will get updated when possible.
 		 */
+		scn->scn_phys.scn_state = complete ? DSS_FINISHED :
+		    DSS_CANCELED;
+		scn->scn_phys.scn_end_time = gethrestime_sec();
 		spa->spa_scrub_started = B_FALSE;
 
 		/*
@@ -1223,9 +1229,13 @@ dsl_scan_done(dsl_scan_t *scn, boolean_t complete, dmu_tx_t *tx)
 		/* Clear recent error events (i.e. duplicate events tracking) */
 		if (complete)
 			zfs_ereport_clear(spa, NULL);
+	} else {
+		scn->scn_phys.scn_state = complete ? DSS_FINISHED :
+		    DSS_CANCELED;
+		scn->scn_phys.scn_end_time = gethrestime_sec();
 	}
 
-	scn->scn_phys.scn_end_time = gethrestime_sec();
+	spa_notify_waiters(spa);
 
 	if (spa->spa_errata == ZPOOL_ERRATA_ZOL_2094_SCRUB)
 		spa->spa_errata = 0;
@@ -1270,6 +1280,7 @@ dsl_errorscrub_pause_resume_sync(void *arg, dmu_tx_t *tx)
 		spa->spa_scan_pass_errorscrub_pause = gethrestime_sec();
 		scn->errorscrub_phys.dep_paused_flags = B_TRUE;
 		dsl_errorscrub_sync_state(scn, tx);
+		zap_cursor_fini(&scn->errorscrub_cursor);
 		spa_event_notify(spa, NULL, NULL, ESC_ZFS_ERRORSCRUB_PAUSED);
 	} else {
 		ASSERT3U(*cmd, ==, POOL_SCRUB_NORMAL);
@@ -1434,7 +1445,7 @@ dsl_scan_restart_resilver(dsl_pool_t *dp, uint64_t txg)
 	if (txg == 0) {
 		dmu_tx_t *tx;
 		tx = dmu_tx_create_dd(dp->dp_mos_dir);
-		VERIFY(0 == dmu_tx_assign(tx, DMU_TX_WAIT));
+		VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT | DMU_TX_SUSPEND));
 
 		txg = dmu_tx_get_txg(tx);
 		dp->dp_scan->scn_restart_txg = txg;
@@ -1659,7 +1670,7 @@ dsl_scan_check_suspend(dsl_scan_t *scn, const zbookmark_phys_t *zb)
 	 *  or
 	 *  - the scan queue has reached its memory use limit
 	 */
-	uint64_t curr_time_ns = gethrtime();
+	uint64_t curr_time_ns = getlrtime();
 	uint64_t scan_time_ns = curr_time_ns - scn->scn_sync_start_time;
 	uint64_t sync_time_ns = curr_time_ns -
 	    scn->scn_dp->dp_spa->spa_sync_starttime;
@@ -1721,7 +1732,7 @@ dsl_error_scrub_check_suspend(dsl_scan_t *scn, const zbookmark_phys_t *zb)
 	 *  - the spa is shutting down because this pool is being exported
 	 *    or the machine is rebooting.
 	 */
-	uint64_t curr_time_ns = gethrtime();
+	uint64_t curr_time_ns = getlrtime();
 	uint64_t error_scrub_time_ns = curr_time_ns - scn->scn_sync_start_time;
 	uint64_t sync_time_ns = curr_time_ns -
 	    scn->scn_dp->dp_spa->spa_sync_starttime;
@@ -1762,7 +1773,7 @@ dsl_scan_zil_block(zilog_t *zilog, const blkptr_t *bp, void *arg,
 
 	ASSERT(!BP_IS_REDACTED(bp));
 	if (BP_IS_HOLE(bp) ||
-	    BP_GET_LOGICAL_BIRTH(bp) <= scn->scn_phys.scn_cur_min_txg)
+	    BP_GET_BIRTH(bp) <= scn->scn_phys.scn_cur_min_txg)
 		return (0);
 
 	/*
@@ -1772,13 +1783,13 @@ dsl_scan_zil_block(zilog_t *zilog, const blkptr_t *bp, void *arg,
 	 * scrub there's nothing to do to it).
 	 */
 	if (claim_txg == 0 &&
-	    BP_GET_LOGICAL_BIRTH(bp) >= spa_min_claim_txg(dp->dp_spa))
+	    BP_GET_BIRTH(bp) >= spa_min_claim_txg(dp->dp_spa))
 		return (0);
 
 	SET_BOOKMARK(&zb, zh->zh_log.blk_cksum.zc_word[ZIL_ZC_OBJSET],
 	    ZB_ZIL_OBJECT, ZB_ZIL_LEVEL, bp->blk_cksum.zc_word[ZIL_ZC_SEQ]);
 
-	VERIFY(0 == scan_funcs[scn->scn_phys.scn_func](dp, bp, &zb));
+	VERIFY0(scan_funcs[scn->scn_phys.scn_func](dp, bp, &zb));
 	return (0);
 }
 
@@ -1798,7 +1809,7 @@ dsl_scan_zil_record(zilog_t *zilog, const lr_t *lrc, void *arg,
 
 		ASSERT(!BP_IS_REDACTED(bp));
 		if (BP_IS_HOLE(bp) ||
-		    BP_GET_LOGICAL_BIRTH(bp) <= scn->scn_phys.scn_cur_min_txg)
+		    BP_GET_BIRTH(bp) <= scn->scn_phys.scn_cur_min_txg)
 			return (0);
 
 		/*
@@ -1806,7 +1817,7 @@ dsl_scan_zil_record(zilog_t *zilog, const lr_t *lrc, void *arg,
 		 * already txg sync'ed (but this log block contains
 		 * other records that are not synced)
 		 */
-		if (claim_txg == 0 || BP_GET_LOGICAL_BIRTH(bp) < claim_txg)
+		if (claim_txg == 0 || BP_GET_BIRTH(bp) < claim_txg)
 			return (0);
 
 		ASSERT3U(BP_GET_LSIZE(bp), !=, 0);
@@ -1814,7 +1825,7 @@ dsl_scan_zil_record(zilog_t *zilog, const lr_t *lrc, void *arg,
 		    lr->lr_foid, ZB_ZIL_LEVEL,
 		    lr->lr_offset / BP_GET_LSIZE(bp));
 
-		VERIFY(0 == scan_funcs[scn->scn_phys.scn_func](dp, bp, &zb));
+		VERIFY0(scan_funcs[scn->scn_phys.scn_func](dp, bp, &zb));
 	}
 	return (0);
 }
@@ -1946,7 +1957,7 @@ dsl_scan_prefetch(scan_prefetch_ctx_t *spc, blkptr_t *bp, zbookmark_phys_t *zb)
 		return;
 
 	if (BP_IS_HOLE(bp) ||
-	    BP_GET_LOGICAL_BIRTH(bp) <= scn->scn_phys.scn_cur_min_txg ||
+	    BP_GET_BIRTH(bp) <= scn->scn_phys.scn_cur_min_txg ||
 	    (BP_GET_LEVEL(bp) == 0 && BP_GET_TYPE(bp) != DMU_OT_DNODE &&
 	    BP_GET_TYPE(bp) != DMU_OT_OBJSET))
 		return;
@@ -2217,7 +2228,7 @@ dsl_scan_recurse(dsl_scan_t *scn, dsl_dataset_t *ds, dmu_objset_type_t ostype,
 	if (dnp != NULL &&
 	    dnp->dn_bonuslen > DN_MAX_BONUS_LEN(dnp)) {
 		scn->scn_phys.scn_errors++;
-		spa_log_error(spa, zb, BP_GET_LOGICAL_BIRTH(bp));
+		spa_log_error(spa, zb, BP_GET_PHYSICAL_BIRTH(bp));
 		return (SET_ERROR(EINVAL));
 	}
 
@@ -2313,7 +2324,7 @@ dsl_scan_recurse(dsl_scan_t *scn, dsl_dataset_t *ds, dmu_objset_type_t ostype,
 		 * by arc_read() for the cases above.
 		 */
 		scn->scn_phys.scn_errors++;
-		spa_log_error(spa, zb, BP_GET_LOGICAL_BIRTH(bp));
+		spa_log_error(spa, zb, BP_GET_PHYSICAL_BIRTH(bp));
 		return (SET_ERROR(EINVAL));
 	}
 
@@ -2390,7 +2401,12 @@ dsl_scan_visitbp(const blkptr_t *bp, const zbookmark_phys_t *zb,
 	if (f != SPA_FEATURE_NONE)
 		ASSERT(dsl_dataset_feature_is_active(ds, f));
 
-	if (BP_GET_LOGICAL_BIRTH(bp) <= scn->scn_phys.scn_cur_min_txg) {
+	/*
+	 * Recurse any blocks that were written either logically or physically
+	 * at or after cur_min_txg.  About logical birth we care for traversal,
+	 * looking for any changes, while about physical for the actual scan.
+	 */
+	if (BP_GET_BIRTH(bp) <= scn->scn_phys.scn_cur_min_txg) {
 		scn->scn_lt_min_this_txg++;
 		return;
 	}
@@ -2416,7 +2432,7 @@ dsl_scan_visitbp(const blkptr_t *bp, const zbookmark_phys_t *zb,
 	 * Don't scan it now unless we need to because something
 	 * under it was modified.
 	 */
-	if (BP_GET_BIRTH(bp) > scn->scn_phys.scn_cur_max_txg) {
+	if (BP_GET_PHYSICAL_BIRTH(bp) > scn->scn_phys.scn_cur_max_txg) {
 		scn->scn_gt_max_this_txg++;
 		return;
 	}
@@ -3228,7 +3244,7 @@ static boolean_t
 scan_io_queue_check_suspend(dsl_scan_t *scn)
 {
 	/* See comment in dsl_scan_check_suspend() */
-	uint64_t curr_time_ns = gethrtime();
+	uint64_t curr_time_ns = getlrtime();
 	uint64_t scan_time_ns = curr_time_ns - scn->scn_sync_start_time;
 	uint64_t sync_time_ns = curr_time_ns -
 	    scn->scn_dp->dp_spa->spa_sync_starttime;
@@ -3581,12 +3597,12 @@ dsl_scan_async_block_should_pause(dsl_scan_t *scn)
 	}
 
 	if (zfs_max_async_dedup_frees != 0 &&
-	    scn->scn_dedup_frees_this_txg >= zfs_max_async_dedup_frees) {
+	    scn->scn_async_frees_this_txg >= zfs_max_async_dedup_frees) {
 		return (B_TRUE);
 	}
 
-	elapsed_nanosecs = gethrtime() - scn->scn_sync_start_time;
-	return (elapsed_nanosecs / NANOSEC > zfs_txg_timeout ||
+	elapsed_nanosecs = getlrtime() - scn->scn_sync_start_time;
+	return (elapsed_nanosecs / (NANOSEC / 2) > zfs_txg_timeout ||
 	    (NSEC2MSEC(elapsed_nanosecs) > scn->scn_async_block_min_time_ms &&
 	    txg_sync_waiting(scn->scn_dp)) ||
 	    spa_shutting_down(scn->scn_dp->dp_spa));
@@ -3603,14 +3619,32 @@ dsl_scan_free_block_cb(void *arg, const blkptr_t *bp, dmu_tx_t *tx)
 			return (SET_ERROR(ERESTART));
 	}
 
-	zio_nowait(zio_free_sync(scn->scn_zio_root, scn->scn_dp->dp_spa,
-	    dmu_tx_get_txg(tx), bp, 0));
+	zio_t *zio = zio_free_sync(scn->scn_zio_root, scn->scn_dp->dp_spa,
+	    dmu_tx_get_txg(tx), bp, 0);
 	dsl_dir_diduse_space(tx->tx_pool->dp_free_dir, DD_USED_HEAD,
 	    -bp_get_dsize_sync(scn->scn_dp->dp_spa, bp),
 	    -BP_GET_PSIZE(bp), -BP_GET_UCSIZE(bp), tx);
 	scn->scn_visited_this_txg++;
-	if (BP_GET_DEDUP(bp))
-		scn->scn_dedup_frees_this_txg++;
+	if (zio != NULL) {
+		/*
+		 * zio_free_sync() returned a ZIO, meaning this is an
+		 * async I/O (dedup, clone or gang block).
+		 */
+		scn->scn_async_frees_this_txg++;
+		zio_nowait(zio);
+
+		/*
+		 * After issuing N async ZIOs, wait for them to complete.
+		 * This makes time limits work with actual I/O completion
+		 * times, not just queuing times.
+		 */
+		uint64_t i = zfs_async_free_zio_wait_interval;
+		if (i != 0 && (scn->scn_async_frees_this_txg % i) == 0) {
+			VERIFY0(zio_wait(scn->scn_zio_root));
+			scn->scn_zio_root = zio_root(scn->scn_dp->dp_spa, NULL,
+			    NULL, ZIO_FLAG_MUSTSUCCEED);
+		}
+	}
 	return (0);
 }
 
@@ -3854,10 +3888,10 @@ dsl_process_async_destroys(dsl_pool_t *dp, dmu_tx_t *tx)
 		    "free_bpobj/bptree on %s in txg %llu; err=%u",
 		    (longlong_t)scn->scn_visited_this_txg,
 		    (longlong_t)
-		    NSEC2MSEC(gethrtime() - scn->scn_sync_start_time),
+		    NSEC2MSEC(getlrtime() - scn->scn_sync_start_time),
 		    spa->spa_name, (longlong_t)tx->tx_txg, err);
 		scn->scn_visited_this_txg = 0;
-		scn->scn_dedup_frees_this_txg = 0;
+		scn->scn_async_frees_this_txg = 0;
 
 		/*
 		 * Write out changes to the DDT and the BRT that may be required
@@ -4185,14 +4219,14 @@ dsl_errorscrub_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 	}
 
 	spa->spa_scrub_active = B_TRUE;
-	scn->scn_sync_start_time = gethrtime();
+	scn->scn_sync_start_time = getlrtime();
 
 	/*
 	 * zfs_scan_suspend_progress can be set to disable scrub progress.
 	 * See more detailed comment in dsl_scan_sync().
 	 */
 	if (zfs_scan_suspend_progress) {
-		uint64_t scan_time_ns = gethrtime() - scn->scn_sync_start_time;
+		uint64_t scan_time_ns = getlrtime() - scn->scn_sync_start_time;
 		int mintime = zfs_scrub_min_time_ms;
 
 		while (zfs_scan_suspend_progress &&
@@ -4200,7 +4234,7 @@ dsl_errorscrub_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		    !spa_shutting_down(scn->scn_dp->dp_spa) &&
 		    NSEC2MSEC(scan_time_ns) < mintime) {
 			delay(hz);
-			scan_time_ns = gethrtime() - scn->scn_sync_start_time;
+			scan_time_ns = getlrtime() - scn->scn_sync_start_time;
 		}
 		return;
 	}
@@ -4384,6 +4418,14 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		return;
 
 	/*
+	 * Wait a few txgs after importing before doing background work
+	 * (async destroys and scanning).  This should help the import
+	 * command to complete quickly.
+	 */
+	if (spa->spa_syncing_txg < spa->spa_first_txg + zfs_import_defer_txgs)
+		return;
+
+	/*
 	 * If the scan is inactive due to a stalled async destroy, try again.
 	 */
 	if (!scn->scn_async_stalled && !dsl_scan_active(scn))
@@ -4391,7 +4433,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 
 	/* reset scan statistics */
 	scn->scn_visited_this_txg = 0;
-	scn->scn_dedup_frees_this_txg = 0;
+	scn->scn_async_frees_this_txg = 0;
 	scn->scn_holes_this_txg = 0;
 	scn->scn_lt_min_this_txg = 0;
 	scn->scn_gt_max_this_txg = 0;
@@ -4402,7 +4444,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 	scn->scn_avg_zio_size_this_txg = 0;
 	scn->scn_zios_this_txg = 0;
 	scn->scn_suspending = B_FALSE;
-	scn->scn_sync_start_time = gethrtime();
+	scn->scn_sync_start_time = getlrtime();
 	spa->spa_scrub_active = B_TRUE;
 
 	/*
@@ -4420,20 +4462,13 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		return;
 
 	/*
-	 * Wait a few txgs after importing to begin scanning so that
-	 * we can get the pool imported quickly.
-	 */
-	if (spa->spa_syncing_txg < spa->spa_first_txg + SCAN_IMPORT_WAIT_TXGS)
-		return;
-
-	/*
 	 * zfs_scan_suspend_progress can be set to disable scan progress.
 	 * We don't want to spin the txg_sync thread, so we add a delay
 	 * here to simulate the time spent doing a scan. This is mostly
 	 * useful for testing and debugging.
 	 */
 	if (zfs_scan_suspend_progress) {
-		uint64_t scan_time_ns = gethrtime() - scn->scn_sync_start_time;
+		uint64_t scan_time_ns = getlrtime() - scn->scn_sync_start_time;
 		uint_t mintime = (scn->scn_phys.scn_func ==
 		    POOL_SCAN_RESILVER) ? zfs_resilver_min_time_ms :
 		    zfs_scrub_min_time_ms;
@@ -4443,7 +4478,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		    !spa_shutting_down(scn->scn_dp->dp_spa) &&
 		    NSEC2MSEC(scan_time_ns) < mintime) {
 			delay(hz);
-			scan_time_ns = gethrtime() - scn->scn_sync_start_time;
+			scan_time_ns = getlrtime() - scn->scn_sync_start_time;
 		}
 		return;
 	}
@@ -4573,7 +4608,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		    "%llu in ddt, %llu > maxtxg)",
 		    (longlong_t)scn->scn_visited_this_txg,
 		    spa->spa_name,
-		    (longlong_t)NSEC2MSEC(gethrtime() -
+		    (longlong_t)NSEC2MSEC(getlrtime() -
 		    scn->scn_sync_start_time),
 		    (longlong_t)scn->scn_objsets_visited_this_txg,
 		    (longlong_t)scn->scn_holes_this_txg,
@@ -4614,7 +4649,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		    (longlong_t)scn->scn_zios_this_txg,
 		    spa->spa_name,
 		    (longlong_t)scn->scn_segs_this_txg,
-		    (longlong_t)NSEC2MSEC(gethrtime() -
+		    (longlong_t)NSEC2MSEC(getlrtime() -
 		    scn->scn_sync_start_time),
 		    (longlong_t)scn->scn_avg_zio_size_this_txg,
 		    (longlong_t)scn->scn_avg_seg_size_this_txg);
@@ -4800,7 +4835,7 @@ dsl_scan_scrub_cb(dsl_pool_t *dp,
 {
 	dsl_scan_t *scn = dp->dp_scan;
 	spa_t *spa = dp->dp_spa;
-	uint64_t phys_birth = BP_GET_BIRTH(bp);
+	uint64_t phys_birth = BP_GET_PHYSICAL_BIRTH(bp);
 	size_t psize = BP_GET_PSIZE(bp);
 	boolean_t needs_io = B_FALSE;
 	int zio_flags = ZIO_FLAG_SCAN_THREAD | ZIO_FLAG_RAW | ZIO_FLAG_CANFAIL;
@@ -5130,7 +5165,7 @@ dsl_scan_io_queue_vdev_xfer(vdev_t *svd, vdev_t *tvd)
 	mutex_enter(&svd->vdev_scan_io_queue_lock);
 	mutex_enter(&tvd->vdev_scan_io_queue_lock);
 
-	VERIFY3P(tvd->vdev_scan_io_queue, ==, NULL);
+	VERIFY0P(tvd->vdev_scan_io_queue);
 	tvd->vdev_scan_io_queue = svd->vdev_scan_io_queue;
 	svd->vdev_scan_io_queue = NULL;
 	if (tvd->vdev_scan_io_queue != NULL)
@@ -5308,7 +5343,10 @@ ZFS_MODULE_PARAM(zfs, zfs_, async_block_max_blocks, U64, ZMOD_RW,
 	"Max number of blocks freed in one txg");
 
 ZFS_MODULE_PARAM(zfs, zfs_, max_async_dedup_frees, U64, ZMOD_RW,
-	"Max number of dedup blocks freed in one txg");
+	"Max number of dedup, clone or gang blocks freed in one txg");
+
+ZFS_MODULE_PARAM(zfs, zfs_, async_free_zio_wait_interval, U64, ZMOD_RW,
+	"Wait for pending free I/Os after issuing this many asynchronously");
 
 ZFS_MODULE_PARAM(zfs, zfs_, free_bpobj_enabled, INT, ZMOD_RW,
 	"Enable processing of the free_bpobj");
@@ -5324,6 +5362,9 @@ ZFS_MODULE_PARAM(zfs, zfs_, scan_issue_strategy, UINT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs, zfs_, scan_legacy, INT, ZMOD_RW,
 	"Scrub using legacy non-sequential method");
+
+ZFS_MODULE_PARAM(zfs, zfs_, import_defer_txgs, UINT, ZMOD_RW,
+	"Number of TXGs to defer background work after pool import");
 
 ZFS_MODULE_PARAM(zfs, zfs_, scan_checkpoint_intval, UINT, ZMOD_RW,
 	"Scan progress on-disk checkpointing interval");

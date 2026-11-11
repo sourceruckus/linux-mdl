@@ -39,21 +39,7 @@
 
 
 int
-secpolicy_nfs(cred_t *cr)
-{
-
-	return (priv_check_cred(cr, PRIV_NFS_DAEMON));
-}
-
-int
 secpolicy_zfs(cred_t *cr)
-{
-
-	return (priv_check_cred(cr, PRIV_VFS_MOUNT));
-}
-
-int
-secpolicy_zfs_proc(cred_t *cr, proc_t *proc)
 {
 
 	return (priv_check_cred(cr, PRIV_VFS_MOUNT));

@@ -23,7 +23,7 @@
  *
  * Copyright (c) 2018, Intel Corporation.
  * Copyright (c) 2020 by Lawrence Livermore National Security, LLC.
- * Copyright (c) 2022 Hewlett Packard Enterprise Development LP.
+ * Copyright (c) 2022, 2026 Hewlett Packard Enterprise Development LP.
  * Copyright (c) 2024 by Delphix. All rights reserved.
  */
 
@@ -233,7 +233,7 @@ vdev_rebuild_initiate_sync(void *arg, dmu_tx_t *tx)
 	mutex_enter(&vd->vdev_rebuild_lock);
 	memset(vrp, 0, sizeof (uint64_t) * REBUILD_PHYS_ENTRIES);
 	vrp->vrp_rebuild_state = VDEV_REBUILD_ACTIVE;
-	vrp->vrp_min_txg = 0;
+	vrp->vrp_min_txg = TXG_INITIAL;
 	vrp->vrp_max_txg = dmu_tx_get_txg(tx);
 	vrp->vrp_start_time = gethrestime_sec();
 	vrp->vrp_scan_time_ms = 0;
@@ -256,7 +256,7 @@ vdev_rebuild_initiate_sync(void *arg, dmu_tx_t *tx)
 	    "vdev_id=%llu vdev_guid=%llu started",
 	    (u_longlong_t)vd->vdev_id, (u_longlong_t)vd->vdev_guid);
 
-	ASSERT3P(vd->vdev_rebuild_thread, ==, NULL);
+	ASSERT0P(vd->vdev_rebuild_thread);
 	vd->vdev_rebuild_thread = thread_create(NULL, 0,
 	    vdev_rebuild_thread, vd, 0, &p0, TS_RUN, maxclsyspri);
 
@@ -278,7 +278,7 @@ vdev_rebuild_log_notify(spa_t *spa, vdev_t *vd, const char *name)
  * active for the duration of the rebuild, then revert to the enabled state.
  */
 static void
-vdev_rebuild_initiate(vdev_t *vd)
+vdev_rebuild_initiate(vdev_t *vd, uint64_t txg)
 {
 	spa_t *spa = vd->vdev_spa;
 
@@ -286,8 +286,7 @@ vdev_rebuild_initiate(vdev_t *vd)
 	ASSERT(MUTEX_HELD(&vd->vdev_rebuild_lock));
 	ASSERT(!vd->vdev_rebuilding);
 
-	dmu_tx_t *tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
-	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+	dmu_tx_t *tx = dmu_tx_create_assigned(spa_get_dsl(spa), txg);
 
 	vd->vdev_rebuilding = B_TRUE;
 
@@ -413,10 +412,10 @@ vdev_rebuild_reset_sync(void *arg, dmu_tx_t *tx)
 	mutex_enter(&vd->vdev_rebuild_lock);
 
 	ASSERT(vrp->vrp_rebuild_state == VDEV_REBUILD_ACTIVE);
-	ASSERT3P(vd->vdev_rebuild_thread, ==, NULL);
+	ASSERT0P(vd->vdev_rebuild_thread);
 
 	vrp->vrp_last_offset = 0;
-	vrp->vrp_min_txg = 0;
+	vrp->vrp_min_txg = TXG_INITIAL;
 	vrp->vrp_max_txg = dmu_tx_get_txg(tx);
 	vrp->vrp_bytes_scanned = 0;
 	vrp->vrp_bytes_issued = 0;
@@ -529,7 +528,7 @@ vdev_rebuild_blkptr_init(blkptr_t *bp, vdev_t *vd, uint64_t start,
 	    vd->vdev_ops == &vdev_spare_ops);
 
 	uint64_t psize = vd->vdev_ops == &vdev_draid_ops ?
-	    vdev_draid_asize_to_psize(vd, asize) : asize;
+	    vdev_draid_asize_to_psize(vd, asize, 0) : asize;
 
 	BP_ZERO(bp);
 
@@ -592,8 +591,9 @@ vdev_rebuild_range(vdev_rebuild_t *vr, uint64_t start, uint64_t size)
 	mutex_exit(&vr->vr_io_lock);
 
 	dmu_tx_t *tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
-	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT | DMU_TX_SUSPEND));
 	uint64_t txg = dmu_tx_get_txg(tx);
+	vr->vr_last_txg = txg;
 
 	spa_config_enter(spa, SCL_STATE_ALL, vd, RW_READER);
 	mutex_enter(&vd->vdev_rebuild_lock);
@@ -617,7 +617,6 @@ vdev_rebuild_range(vdev_rebuild_t *vr, uint64_t start, uint64_t size)
 		return (SET_ERROR(EINTR));
 	}
 	mutex_exit(&vd->vdev_rebuild_lock);
-	dmu_tx_commit(tx);
 
 	vr->vr_scan_offset[txg & TXG_MASK] = start + size;
 	vr->vr_pass_bytes_issued += size;
@@ -627,6 +626,9 @@ vdev_rebuild_range(vdev_rebuild_t *vr, uint64_t start, uint64_t size)
 	    abd_alloc(psize, B_FALSE), psize, vdev_rebuild_cb, vr,
 	    ZIO_PRIORITY_REBUILD, ZIO_FLAG_RAW | ZIO_FLAG_CANFAIL |
 	    ZIO_FLAG_RESILVER, NULL));
+	/* vdev_rebuild_cb releases SCL_STATE_ALL */
+
+	dmu_tx_commit(tx);
 
 	return (0);
 }
@@ -763,6 +765,7 @@ vdev_rebuild_thread(void *arg)
 	vdev_t *vd = arg;
 	spa_t *spa = vd->vdev_spa;
 	vdev_t *rvd = spa->spa_root_vdev;
+	dsl_pool_t *dp = spa_get_dsl(spa);
 	int error = 0;
 
 	/*
@@ -770,9 +773,8 @@ vdev_rebuild_thread(void *arg)
 	 * is not required for a correct rebuild, but we do want rebuilds to
 	 * emulate the resilver behavior as much as possible.
 	 */
-	dsl_pool_t *dsl = spa_get_dsl(spa);
-	if (dsl_scan_scrubbing(dsl))
-		dsl_scan_cancel(dsl);
+	if (dsl_scan_scrubbing(dp))
+		dsl_scan_cancel(dp);
 
 	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
 	mutex_enter(&vd->vdev_rebuild_lock);
@@ -787,8 +789,9 @@ vdev_rebuild_thread(void *arg)
 	vdev_rebuild_phys_t *vrp = &vr->vr_rebuild_phys;
 	vr->vr_top_vdev = vd;
 	vr->vr_scan_msp = NULL;
-	vr->vr_scan_tree = zfs_range_tree_create(NULL, ZFS_RANGE_SEG64, NULL,
-	    0, 0);
+	vr->vr_scan_tree = zfs_range_tree_create_flags(
+	    NULL, ZFS_RANGE_SEG64, NULL, 0, 0,
+	    ZFS_RT_F_DYN_NAME, vdev_rt_name(vd, "vr_scan_tree"));
 	mutex_init(&vr->vr_io_lock, NULL, MUTEX_DEFAULT, NULL);
 	cv_init(&vr->vr_io_cv, NULL, CV_DEFAULT, NULL);
 
@@ -822,6 +825,7 @@ vdev_rebuild_thread(void *arg)
 		uint64_t limit = (arc_c_max / 2) / MAX(rvd->vdev_children, 1);
 		vr->vr_bytes_inflight_max = MIN(limit, MAX(1ULL << 20,
 		    zfs_rebuild_vdev_limit * vd->vdev_children));
+		vr->vr_last_txg = 0;
 
 		/*
 		 * Removal of vdevs from the vdev tree may eliminate the need
@@ -853,7 +857,7 @@ vdev_rebuild_thread(void *arg)
 			if (zfs_range_tree_space(msp->ms_allocating[j])) {
 				mutex_exit(&msp->ms_lock);
 				mutex_exit(&msp->ms_sync_lock);
-				txg_wait_synced(dsl, 0);
+				txg_wait_synced(dp, 0);
 				mutex_enter(&msp->ms_sync_lock);
 				mutex_enter(&msp->ms_lock);
 				break;
@@ -908,8 +912,16 @@ vdev_rebuild_thread(void *arg)
 		error = vdev_rebuild_ranges(vr);
 		zfs_range_tree_vacate(vr->vr_scan_tree, NULL, NULL);
 
-		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+		/*
+		 * Allow rebuilt ranges to be sync-ed before enabling metaslab
+		 * to avoid any interfering allocations. Otherwise, we might
+		 * see checksum errors after scrub.
+		 */
+		if (vr->vr_last_txg != 0)
+			txg_wait_synced(dp, vr->vr_last_txg);
+
 		metaslab_enable(msp, B_FALSE, B_FALSE);
+		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
 
 		if (error != 0)
 			break;
@@ -930,9 +942,8 @@ vdev_rebuild_thread(void *arg)
 
 	spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
 
-	dsl_pool_t *dp = spa_get_dsl(spa);
 	dmu_tx_t *tx = dmu_tx_create_dd(dp->dp_mos_dir);
-	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT | DMU_TX_SUSPEND));
 
 	mutex_enter(&vd->vdev_rebuild_lock);
 	if (error == 0) {
@@ -1014,7 +1025,7 @@ vdev_rebuild_active(vdev_t *vd)
  * top-level vdev is currently actively rebuilding.
  */
 void
-vdev_rebuild(vdev_t *vd)
+vdev_rebuild(vdev_t *vd, uint64_t txg)
 {
 	vdev_rebuild_t *vr = &vd->vdev_rebuild_config;
 	vdev_rebuild_phys_t *vrp __maybe_unused = &vr->vr_rebuild_phys;
@@ -1038,7 +1049,7 @@ vdev_rebuild(vdev_t *vd)
 		if (!vd->vdev_rebuild_reset_wanted)
 			vd->vdev_rebuild_reset_wanted = B_TRUE;
 	} else {
-		vdev_rebuild_initiate(vd);
+		vdev_rebuild_initiate(vd, txg);
 	}
 	mutex_exit(&vd->vdev_rebuild_lock);
 }
@@ -1078,7 +1089,7 @@ vdev_rebuild_restart_impl(vdev_t *vd)
 void
 vdev_rebuild_restart(spa_t *spa)
 {
-	ASSERT(MUTEX_HELD(&spa_namespace_lock) ||
+	ASSERT(spa_namespace_held() ||
 	    spa->spa_load_thread == curthread);
 
 	vdev_rebuild_restart_impl(spa->spa_root_vdev);
@@ -1093,7 +1104,7 @@ vdev_rebuild_stop_wait(vdev_t *vd)
 {
 	spa_t *spa = vd->vdev_spa;
 
-	ASSERT(MUTEX_HELD(&spa_namespace_lock) ||
+	ASSERT(spa_namespace_held() ||
 	    spa->spa_export_thread == curthread);
 
 	if (vd == spa->spa_root_vdev) {
@@ -1124,6 +1135,22 @@ void
 vdev_rebuild_stop_all(spa_t *spa)
 {
 	vdev_rebuild_stop_wait(spa->spa_root_vdev);
+}
+
+/*
+ * Return rebuild transaction groups range.  It's used to populate DTLs
+ * of the non-writable devices during the rebuild so that they could be
+ * healed correctly, in case they are cleared, and not miss the data
+ * that was written to their spares during the rebuild.
+ */
+void
+vdev_rebuild_txgs(vdev_t *vd, uint64_t *min_txg, uint64_t *size)
+{
+	vdev_rebuild_t *vr = &vd->vdev_rebuild_config;
+	vdev_rebuild_phys_t *vrp = &vr->vr_rebuild_phys;
+
+	*min_txg = vrp->vrp_min_txg;
+	*size = vrp->vrp_max_txg - vrp->vrp_min_txg;
 }
 
 /*

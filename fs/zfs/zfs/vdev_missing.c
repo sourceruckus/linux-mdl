@@ -45,7 +45,7 @@
 
 static int
 vdev_missing_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
-    uint64_t *ashift, uint64_t *pshift)
+    uint64_t *ashift, uint64_t *pshift, cred_t *cr)
 {
 	/*
 	 * Really this should just fail.  But then the root vdev will be in the
@@ -53,7 +53,7 @@ vdev_missing_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	 * VDEV_AUX_BAD_GUID_SUM.  So we pretend to succeed, knowing that we
 	 * will fail the GUID sum check before ever trying to open the pool.
 	 */
-	(void) vd;
+	(void) vd, (void) cr;
 	*psize = 0;
 	*max_psize = 0;
 	*ashift = 0;
@@ -85,7 +85,8 @@ vdev_ops_t vdev_missing_ops = {
 	.vdev_op_fini = NULL,
 	.vdev_op_open = vdev_missing_open,
 	.vdev_op_close = vdev_missing_close,
-	.vdev_op_asize = vdev_default_asize,
+	.vdev_op_psize_to_asize = vdev_default_asize,
+	.vdev_op_asize_to_psize = vdev_default_psize,
 	.vdev_op_min_asize = vdev_default_min_asize,
 	.vdev_op_min_alloc = NULL,
 	.vdev_op_io_start = vdev_missing_io_start,
@@ -110,7 +111,8 @@ vdev_ops_t vdev_hole_ops = {
 	.vdev_op_fini = NULL,
 	.vdev_op_open = vdev_missing_open,
 	.vdev_op_close = vdev_missing_close,
-	.vdev_op_asize = vdev_default_asize,
+	.vdev_op_psize_to_asize = vdev_default_asize,
+	.vdev_op_asize_to_psize = vdev_default_psize,
 	.vdev_op_min_asize = vdev_default_min_asize,
 	.vdev_op_min_alloc = NULL,
 	.vdev_op_io_start = vdev_missing_io_start,

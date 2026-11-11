@@ -386,7 +386,7 @@ vdev_mirror_map_init(zio_t *zio)
 
 static int
 vdev_mirror_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
-    uint64_t *logical_ashift, uint64_t *physical_ashift)
+    uint64_t *logical_ashift, uint64_t *physical_ashift, cred_t *cr)
 {
 	int numerrors = 0;
 	int lasterror = 0;
@@ -396,7 +396,7 @@ vdev_mirror_open(vdev_t *vd, uint64_t *asize, uint64_t *max_asize,
 		return (SET_ERROR(EINVAL));
 	}
 
-	vdev_open_children(vd);
+	vdev_open_children(vd, cr);
 
 	for (int c = 0; c < vd->vdev_children; c++) {
 		vdev_t *cvd = vd->vdev_child[c];
@@ -532,7 +532,7 @@ vdev_mirror_child_select(zio_t *zio)
 	uint64_t txg = zio->io_txg;
 	int c, lowest_load;
 
-	ASSERT(zio->io_bp == NULL || BP_GET_BIRTH(zio->io_bp) == txg);
+	ASSERT(zio->io_bp == NULL || BP_GET_PHYSICAL_BIRTH(zio->io_bp) == txg);
 
 	lowest_load = INT_MAX;
 	mm->mm_preferred_cnt = 0;
@@ -669,18 +669,19 @@ vdev_mirror_io_start(zio_t *zio)
 	}
 
 	while (children--) {
-		mc = &mm->mm_child[c];
-		c++;
+		mc = &mm->mm_child[c++];
 
 		/*
-		 * When sequentially resilvering only issue write repair
-		 * IOs to the vdev which is being rebuilt since performance
-		 * is limited by the slowest child.  This is an issue for
-		 * faster replacement devices such as distributed spares.
+		 * When sequentially resilvering and the integrity of the data
+		 * is speculative (ZIO_FLAG_SPECULATIVE), issue write repair IOs
+		 * only to the vdev which is being rebuilt. Existing data on
+		 * other children must never be overwritten with unconfirmed
+		 * data to avoid unrecoverable damage to the pool.
 		 */
 		if ((zio->io_priority == ZIO_PRIORITY_REBUILD) &&
 		    (zio->io_flags & ZIO_FLAG_IO_REPAIR) &&
 		    !(zio->io_flags & ZIO_FLAG_SCRUB) &&
+		    (zio->io_flags & ZIO_FLAG_SPECULATIVE) &&
 		    mm->mm_rebuilding && !mc->mc_rebuilding) {
 			continue;
 		}
@@ -779,7 +780,7 @@ vdev_mirror_io_done(zio_t *zio)
 	 * being written out during self healing.
 	 */
 	if ((zio->io_flags & ZIO_FLAG_DIO_READ) &&
-	    (zio->io_flags & ZIO_FLAG_DIO_CHKSUM_ERR)) {
+	    (zio->io_post & ZIO_POST_DIO_CHKSUM_ERR)) {
 		zio_dio_chksum_verify_error_report(zio);
 		zio->io_error = vdev_mirror_worst_error(mm);
 		ASSERT3U(zio->io_error, ==, ECKSUM);
@@ -972,7 +973,8 @@ vdev_ops_t vdev_mirror_ops = {
 	.vdev_op_fini = NULL,
 	.vdev_op_open = vdev_mirror_open,
 	.vdev_op_close = vdev_mirror_close,
-	.vdev_op_asize = vdev_default_asize,
+	.vdev_op_psize_to_asize = vdev_default_asize,
+	.vdev_op_asize_to_psize = vdev_default_psize,
 	.vdev_op_min_asize = vdev_default_min_asize,
 	.vdev_op_min_alloc = NULL,
 	.vdev_op_io_start = vdev_mirror_io_start,
@@ -997,7 +999,8 @@ vdev_ops_t vdev_replacing_ops = {
 	.vdev_op_fini = NULL,
 	.vdev_op_open = vdev_mirror_open,
 	.vdev_op_close = vdev_mirror_close,
-	.vdev_op_asize = vdev_default_asize,
+	.vdev_op_psize_to_asize = vdev_default_asize,
+	.vdev_op_asize_to_psize = vdev_default_psize,
 	.vdev_op_min_asize = vdev_default_min_asize,
 	.vdev_op_min_alloc = NULL,
 	.vdev_op_io_start = vdev_mirror_io_start,
@@ -1022,7 +1025,8 @@ vdev_ops_t vdev_spare_ops = {
 	.vdev_op_fini = NULL,
 	.vdev_op_open = vdev_mirror_open,
 	.vdev_op_close = vdev_mirror_close,
-	.vdev_op_asize = vdev_default_asize,
+	.vdev_op_psize_to_asize = vdev_default_asize,
+	.vdev_op_asize_to_psize = vdev_default_psize,
 	.vdev_op_min_asize = vdev_default_min_asize,
 	.vdev_op_min_alloc = NULL,
 	.vdev_op_io_start = vdev_mirror_io_start,

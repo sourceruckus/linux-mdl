@@ -100,15 +100,17 @@ zfs_uiomove_bvec_impl(void *p, size_t n, zfs_uio_rw_t rw, zfs_uio_t *uio)
 
 	while (n && uio->uio_resid) {
 		void *paddr;
-		cnt = MIN(bv->bv_len - skip, n);
+		size_t offset = bv->bv_offset + skip;
+		cnt = MIN(PAGE_SIZE - (offset & ~PAGE_MASK),
+		    MIN(bv->bv_len - skip, n));
 
-		paddr = zfs_kmap_local(bv->bv_page);
+		paddr = zfs_kmap_local(bv->bv_page + (offset >> PAGE_SHIFT));
 		if (rw == UIO_READ) {
 			/* Copy from buffer 'p' to the bvec data */
-			memcpy(paddr + bv->bv_offset + skip, p, cnt);
+			memcpy(paddr + (offset & ~PAGE_MASK), p, cnt);
 		} else {
 			/* Copy from bvec data to buffer 'p' */
-			memcpy(p, paddr + bv->bv_offset + skip, cnt);
+			memcpy(p, paddr + (offset & ~PAGE_MASK), cnt);
 		}
 		zfs_kunmap_local(paddr);
 
@@ -232,9 +234,8 @@ zfs_uiomove_iter(void *p, size_t n, zfs_uio_rw_t rw, zfs_uio_t *uio,
     boolean_t revert)
 {
 	size_t cnt = MIN(n, uio->uio_resid);
-
-	if (uio->uio_skip)
-		iov_iter_advance(uio->uio_iter, uio->uio_skip);
+	size_t oldcnt = cnt;
+	int error = 0;
 
 	if (rw == UIO_READ)
 		cnt = copy_to_iter(p, cnt, uio->uio_iter);
@@ -250,16 +251,21 @@ zfs_uiomove_iter(void *p, size_t n, zfs_uio_rw_t rw, zfs_uio_t *uio,
 		return (EFAULT);
 
 	/*
-	 * Revert advancing the uio_iter.  This is set by zfs_uiocopy()
-	 * to avoid consuming the uio and its iov_iter structure.
+	 * When revert is set this is a zfs_uiocopy() which should not
+	 * consume the uio and its iov_iter structure.  Otherwise, it's
+	 * a zfs_uiomove() which is expected to update the uio.  Partial
+	 * copies are allowed for both copy and move but EFAULT should
+	 * be returned for zfs_uiomove().
 	 */
 	if (revert)
 		iov_iter_revert(uio->uio_iter, cnt);
+	else if (cnt != oldcnt)
+		error = EFAULT;
 
 	uio->uio_resid -= cnt;
 	uio->uio_loffset += cnt;
 
-	return (0);
+	return (error);
 }
 
 int
@@ -507,11 +513,13 @@ static int
 zfs_uio_pin_user_pages(zfs_uio_t *uio, zfs_uio_rw_t rw)
 {
 	long res;
-	size_t skip = uio->uio_skip;
+	size_t skip = uio->uio_iter->iov_offset;
 	size_t len = uio->uio_resid - skip;
 	unsigned int gup_flags = 0;
 	unsigned long addr;
 	unsigned long nr_pages;
+
+	ASSERT3U(uio->uio_segflg, ==, UIO_ITER);
 
 	/*
 	 * Kernel 6.2 introduced the FOLL_PCI_P2PDMA flag. This flag could
@@ -577,7 +585,7 @@ static int
 zfs_uio_get_dio_pages_iov_iter(zfs_uio_t *uio, zfs_uio_rw_t rw)
 {
 	size_t start;
-	size_t wanted = uio->uio_resid - uio->uio_skip;
+	size_t wanted = uio->uio_resid;
 	ssize_t rollback = 0;
 	ssize_t cnt;
 	unsigned maxpages = DIV_ROUND_UP(wanted, PAGE_SIZE);
@@ -611,7 +619,7 @@ zfs_uio_get_dio_pages_iov_iter(zfs_uio_t *uio, zfs_uio_rw_t rw)
 #endif
 
 	}
-	ASSERT3U(rollback, ==, uio->uio_resid - uio->uio_skip);
+	ASSERT3U(rollback, ==, uio->uio_resid);
 	iov_iter_revert(uio->uio_iter, rollback);
 
 	return (0);

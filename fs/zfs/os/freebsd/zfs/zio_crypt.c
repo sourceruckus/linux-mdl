@@ -371,9 +371,6 @@ error:
 	return (ret);
 }
 
-void *failed_decrypt_buf;
-int failed_decrypt_size;
-
 /*
  * This function handles all encryption and decryption in zfs. When
  * encrypting it expects puio to reference the plaintext and cuio to
@@ -437,6 +434,7 @@ zio_crypt_key_wrap(crypto_key_t *cwkey, zio_crypt_key_t *key, uint8_t *iv,
 
 	ASSERT3U(crypt, <, ZIO_CRYPT_FUNCTIONS);
 
+	memset(&cuio_s, 0, sizeof (cuio_s));
 	zfs_uio_init(&cuio, &cuio_s);
 
 	keydata_len = zio_crypt_table[crypt].ci_keylen;
@@ -519,6 +517,7 @@ zio_crypt_key_unwrap(crypto_key_t *cwkey, uint64_t crypt, uint64_t version,
 	keydata_len = zio_crypt_table[crypt].ci_keylen;
 	rw_init(&key->zk_salt_lock, NULL, RW_DEFAULT, NULL);
 
+	memset(&cuio_s, 0, sizeof (cuio_s));
 	zfs_uio_init(&cuio, &cuio_s);
 
 	/*
@@ -1663,9 +1662,6 @@ error:
 	return (ret);
 }
 
-void *failed_decrypt_buf;
-int faile_decrypt_size;
-
 /*
  * Primary encryption / decryption entrypoint for zio data.
  */
@@ -1758,13 +1754,6 @@ zio_do_crypt_data(boolean_t encrypt, zio_crypt_key_t *key,
 	return (0);
 
 error:
-	if (!encrypt) {
-		if (failed_decrypt_buf != NULL)
-			kmem_free(failed_decrypt_buf, failed_decrypt_size);
-		failed_decrypt_buf = kmem_alloc(datalen, KM_SLEEP);
-		failed_decrypt_size = datalen;
-		memcpy(failed_decrypt_buf, cipherbuf, datalen);
-	}
 	if (locked)
 		rw_exit(&key->zk_salt_lock);
 	if (authbuf != NULL)
@@ -1822,9 +1811,3 @@ error:
 
 	return (SET_ERROR(ret));
 }
-
-#if defined(_KERNEL) && defined(HAVE_SPL)
-module_param(zfs_key_max_salt_uses, ulong, 0644);
-MODULE_PARM_DESC(zfs_key_max_salt_uses, "Max number of times a salt value "
-	"can be used for generating encryption keys before it is rotated");
-#endif

@@ -33,6 +33,7 @@
 #include <sys/fs/zfs.h>
 #include <sys/zio.h>
 #include <sys/dmu.h>
+#include <sys/wmsum.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -212,12 +213,16 @@ typedef enum {
 #define	DDE_FLAG_LOADED		(1 << 0)	/* entry ready for use */
 #define	DDE_FLAG_OVERQUOTA	(1 << 1)	/* entry unusable, no space */
 #define	DDE_FLAG_LOGGED		(1 << 2)	/* loaded from log */
+#define	DDE_FLAG_FROM_FLUSHING	(1 << 3)	/* loaded from flushing log */
 
 /*
  * Additional data to support entry update or repair. This is fixed size
  * because its relatively rarely used.
  */
 typedef struct {
+	/* protects dde_phys, dde_orig_phys and dde_lead_zio during I/O */
+	kmutex_t	dde_io_lock;
+
 	/* copy of data after a repair read, to be rewritten */
 	abd_t		*dde_repair_abd;
 
@@ -276,28 +281,43 @@ typedef struct {
  */
 typedef struct {
 	kmutex_t	ddt_lock;	/* protects changes to all fields */
-
 	avl_tree_t	ddt_tree;	/* "live" (changed) entries this txg */
-	avl_tree_t	ddt_log_tree;	/* logged entries */
-
 	avl_tree_t	ddt_repair_tree;	/* entries being repaired */
 
-	ddt_log_t	ddt_log[2];		/* active/flushing logs */
+	/* Protects ddt_object[] and ddt_object_dnode[]. */
+	krwlock_t	ddt_objects_lock ____cacheline_aligned;
+
+	/*
+	 * Log trees are stable during I/O, and only modified during sync
+	 * with exclusive access.
+	 */
+	ddt_log_t	ddt_log[2] ____cacheline_aligned; /* logged entries */
 	ddt_log_t	*ddt_log_active;	/* pointers into ddt_log */
 	ddt_log_t	*ddt_log_flushing;	/* swapped when flush starts */
 
-	hrtime_t	ddt_flush_start;	/* log flush start this txg */
-	uint32_t	ddt_flush_pass;		/* log flush pass this txg */
-
-	int32_t		ddt_flush_count;	/* entries flushed this txg */
-	int32_t		ddt_flush_min;		/* min rem entries to flush */
 	int32_t		ddt_log_ingest_rate;	/* rolling log ingest rate */
 	int32_t		ddt_log_flush_rate;	/* rolling log flush rate */
 	int32_t		ddt_log_flush_time_rate; /* avg time spent flushing */
+	uint32_t	ddt_log_flush_pressure;	/* pressure to apply for cap */
+	uint32_t	ddt_log_flush_prev_backlog; /* prev backlog size */
 
 	uint64_t	ddt_flush_force_txg;	/* flush hard before this txg */
 
 	kstat_t		*ddt_ksp;	/* kstats context */
+
+	/* wmsums for hot-path lookup counters */
+	wmsum_t		ddt_kstat_dds_lookup;
+	wmsum_t		ddt_kstat_dds_lookup_live_hit;
+	wmsum_t		ddt_kstat_dds_lookup_live_wait;
+	wmsum_t		ddt_kstat_dds_lookup_live_miss;
+	wmsum_t		ddt_kstat_dds_lookup_existing;
+	wmsum_t		ddt_kstat_dds_lookup_new;
+	wmsum_t		ddt_kstat_dds_lookup_log_hit;
+	wmsum_t		ddt_kstat_dds_lookup_log_active_hit;
+	wmsum_t		ddt_kstat_dds_lookup_log_flushing_hit;
+	wmsum_t		ddt_kstat_dds_lookup_log_miss;
+	wmsum_t		ddt_kstat_dds_lookup_stored_hit;
+	wmsum_t		ddt_kstat_dds_lookup_stored_miss;
 
 	enum zio_checksum ddt_checksum;	/* checksum algorithm in use */
 	spa_t		*ddt_spa;	/* pool this ddt is on */
@@ -309,6 +329,7 @@ typedef struct {
 
 	/* per-type/per-class entry store objects */
 	uint64_t	ddt_object[DDT_TYPES][DDT_CLASSES];
+	dnode_t		*ddt_object_dnode[DDT_TYPES][DDT_CLASSES];
 
 	/* object ids for stored, logged and per-type/per-class stats */
 	uint64_t	ddt_stat_object;
@@ -354,6 +375,8 @@ extern uint64_t ddt_phys_refcnt(const ddt_univ_phys_t *ddp,
 extern ddt_phys_variant_t ddt_phys_select(const ddt_t *ddt,
     const ddt_entry_t *dde, const blkptr_t *bp);
 extern uint64_t ddt_phys_birth(const ddt_univ_phys_t *ddp,
+    ddt_phys_variant_t v);
+extern int ddt_phys_is_gang(const ddt_univ_phys_t *ddp,
     ddt_phys_variant_t v);
 extern int ddt_phys_dva_count(const ddt_univ_phys_t *ddp, ddt_phys_variant_t v,
     boolean_t encrypted);

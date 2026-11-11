@@ -28,6 +28,7 @@
  * Copyright (c) 2016 Actifio, Inc. All rights reserved.
  * Copyright (c) 2018, loli10K <ezomori.nozomu@gmail.com>. All rights reserved.
  * Copyright (c) 2023 Hewlett Packard Enterprise Development LP.
+ * Copyright (c) 2025, Rob Norris <robn@despairlabs.com>
  */
 
 #include <sys/dmu.h>
@@ -150,8 +151,8 @@ dsl_dir_evict_async(void *dbu)
 
 	for (t = 0; t < TXG_SIZE; t++) {
 		ASSERT(!txg_list_member(&dp->dp_dirty_dirs, dd, t));
-		ASSERT(dd->dd_tempreserved[t] == 0);
-		ASSERT(dd->dd_space_towrite[t] == 0);
+		ASSERT0(dd->dd_tempreserved[t]);
+		ASSERT0(dd->dd_space_towrite[t]);
 	}
 
 	if (dd->dd_parent)
@@ -416,7 +417,7 @@ dsl_dir_namelen(dsl_dir_t *dd)
 static int
 getcomponent(const char *path, char *component, const char **nextp)
 {
-	char *p;
+	const char *p;
 
 	if ((path == NULL) || (path[0] == '\0'))
 		return (SET_ERROR(ENOENT));
@@ -759,7 +760,7 @@ typedef enum {
 
 static enforce_res_t
 dsl_enforce_ds_ss_limits(dsl_dir_t *dd, zfs_prop_t prop,
-    cred_t *cr, proc_t *proc)
+    cred_t *cr)
 {
 	enforce_res_t enforce = ENFORCE_ALWAYS;
 	uint64_t obj;
@@ -774,16 +775,8 @@ dsl_enforce_ds_ss_limits(dsl_dir_t *dd, zfs_prop_t prop,
 	if (crgetzoneid(cr) != GLOBAL_ZONEID)
 		return (ENFORCE_ALWAYS);
 
-	/*
-	 * We are checking the saved credentials of the user process, which is
-	 * not the current process.  Note that we can't use secpolicy_zfs(),
-	 * because it only works if the cred is that of the current process (on
-	 * Linux).
-	 */
-	if (secpolicy_zfs_proc(cr, proc) == 0)
+	if (secpolicy_zfs(cr) == 0)
 		return (ENFORCE_NEVER);
-#else
-	(void) proc;
 #endif
 
 	if ((obj = dsl_dir_phys(dd)->dd_head_dataset_obj) == 0)
@@ -817,7 +810,7 @@ dsl_enforce_ds_ss_limits(dsl_dir_t *dd, zfs_prop_t prop,
  */
 int
 dsl_fs_ss_limit_check(dsl_dir_t *dd, uint64_t delta, zfs_prop_t prop,
-    dsl_dir_t *ancestor, cred_t *cr, proc_t *proc)
+    dsl_dir_t *ancestor, cred_t *cr)
 {
 	objset_t *os = dd->dd_pool->dp_meta_objset;
 	uint64_t limit, count;
@@ -849,7 +842,7 @@ dsl_fs_ss_limit_check(dsl_dir_t *dd, uint64_t delta, zfs_prop_t prop,
 	 * are allowed to change the limit on the current dataset, but there
 	 * is another limit in the tree above.
 	 */
-	enforce = dsl_enforce_ds_ss_limits(dd, prop, cr, proc);
+	enforce = dsl_enforce_ds_ss_limits(dd, prop, cr);
 	if (enforce == ENFORCE_NEVER)
 		return (0);
 
@@ -893,7 +886,7 @@ dsl_fs_ss_limit_check(dsl_dir_t *dd, uint64_t delta, zfs_prop_t prop,
 
 	if (dd->dd_parent != NULL)
 		err = dsl_fs_ss_limit_check(dd->dd_parent, delta, prop,
-		    ancestor, cr, proc);
+		    ancestor, cr);
 
 	return (err);
 }
@@ -1457,6 +1450,8 @@ dsl_dir_tempreserve_space(dsl_dir_t *dd, uint64_t lsize, uint64_t asize,
 			    MSEC2NSEC(10), MSEC2NSEC(10));
 			err = SET_ERROR(ERESTART);
 		}
+
+		ASSERT3U(err, ==, ERESTART);
 	}
 
 	if (err == 0) {
@@ -1539,9 +1534,28 @@ dsl_dir_willuse_space(dsl_dir_t *dd, int64_t space, dmu_tx_t *tx)
 }
 
 /* call from syncing context when we actually write/free space for this dd */
-void
-dsl_dir_diduse_space(dsl_dir_t *dd, dd_used_t type,
-    int64_t used, int64_t compressed, int64_t uncompressed, dmu_tx_t *tx)
+static void dsl_dir_diduse_transfer_space_impl(dsl_dir_t *dd, int64_t used,
+    int64_t compressed, int64_t uncompressed, int64_t tonew,
+    dd_used_t oldtype, dd_used_t newtype, boolean_t nested, dmu_tx_t *tx);
+
+static void
+dsl_dir_lock_enter(dsl_dir_t *dd, boolean_t nested)
+{
+	/*
+	 * lockdep needs an explicit subclass when a child dd_lock
+	 * nests an ancestor.
+	 */
+	if (nested) {
+		mutex_enter_nested(&dd->dd_lock, NESTED_SINGLE);
+	} else {
+		mutex_enter(&dd->dd_lock);
+	}
+}
+
+static void
+dsl_dir_diduse_space_impl(dsl_dir_t *dd, dd_used_t type,
+    int64_t used, int64_t compressed, int64_t uncompressed,
+    boolean_t nested, dmu_tx_t *tx)
 {
 	int64_t accounted_delta;
 
@@ -1559,7 +1573,7 @@ dsl_dir_diduse_space(dsl_dir_t *dd, dd_used_t type,
 	 */
 	boolean_t needlock = !MUTEX_HELD(&dd->dd_lock);
 	if (needlock)
-		mutex_enter(&dd->dd_lock);
+		dsl_dir_lock_enter(dd, nested);
 	dsl_dir_phys_t *ddp = dsl_dir_phys(dd);
 	accounted_delta = parent_delta(dd, ddp->dd_used_bytes, used);
 	ASSERT(used >= 0 || ddp->dd_used_bytes >= -used);
@@ -1587,10 +1601,18 @@ dsl_dir_diduse_space(dsl_dir_t *dd, dd_used_t type,
 		mutex_exit(&dd->dd_lock);
 
 	if (dd->dd_parent != NULL) {
-		dsl_dir_diduse_transfer_space(dd->dd_parent,
+		dsl_dir_diduse_transfer_space_impl(dd->dd_parent,
 		    accounted_delta, compressed, uncompressed,
-		    used, DD_USED_CHILD_RSRV, DD_USED_CHILD, tx);
+		    used, DD_USED_CHILD_RSRV, DD_USED_CHILD, nested, tx);
 	}
+}
+
+void
+dsl_dir_diduse_space(dsl_dir_t *dd, dd_used_t type, int64_t used,
+    int64_t compressed, int64_t uncompressed, dmu_tx_t *tx)
+{
+	dsl_dir_diduse_space_impl(dd, type, used, compressed, uncompressed,
+	    B_FALSE, tx);
 }
 
 void
@@ -1617,10 +1639,10 @@ dsl_dir_transfer_space(dsl_dir_t *dd, int64_t delta,
 	mutex_exit(&dd->dd_lock);
 }
 
-void
-dsl_dir_diduse_transfer_space(dsl_dir_t *dd, int64_t used,
+static void
+dsl_dir_diduse_transfer_space_impl(dsl_dir_t *dd, int64_t used,
     int64_t compressed, int64_t uncompressed, int64_t tonew,
-    dd_used_t oldtype, dd_used_t newtype, dmu_tx_t *tx)
+	dd_used_t oldtype, dd_used_t newtype, boolean_t nested, dmu_tx_t *tx)
 {
 	int64_t accounted_delta;
 
@@ -1630,7 +1652,7 @@ dsl_dir_diduse_transfer_space(dsl_dir_t *dd, int64_t used,
 
 	dmu_buf_will_dirty(dd->dd_dbuf, tx);
 
-	mutex_enter(&dd->dd_lock);
+	dsl_dir_lock_enter(dd, nested);
 	dsl_dir_phys_t *ddp = dsl_dir_phys(dd);
 	accounted_delta = parent_delta(dd, ddp->dd_used_bytes, used);
 	ASSERT(used >= 0 || ddp->dd_used_bytes >= -used);
@@ -1661,10 +1683,19 @@ dsl_dir_diduse_transfer_space(dsl_dir_t *dd, int64_t used,
 	mutex_exit(&dd->dd_lock);
 
 	if (dd->dd_parent != NULL) {
-		dsl_dir_diduse_transfer_space(dd->dd_parent,
+		dsl_dir_diduse_transfer_space_impl(dd->dd_parent,
 		    accounted_delta, compressed, uncompressed,
-		    used, DD_USED_CHILD_RSRV, DD_USED_CHILD, tx);
+		    used, DD_USED_CHILD_RSRV, DD_USED_CHILD, nested, tx);
 	}
+}
+
+void
+dsl_dir_diduse_transfer_space(dsl_dir_t *dd, int64_t used,
+    int64_t compressed, int64_t uncompressed, int64_t tonew,
+    dd_used_t oldtype, dd_used_t newtype, dmu_tx_t *tx)
+{
+	dsl_dir_diduse_transfer_space_impl(dd, used, compressed,
+	    uncompressed, tonew, oldtype, newtype, B_FALSE, tx);
 }
 
 typedef struct dsl_dir_set_qr_arg {
@@ -1833,8 +1864,8 @@ dsl_dir_set_reservation_sync_impl(dsl_dir_t *dd, uint64_t value, dmu_tx_t *tx)
 
 	if (dd->dd_parent != NULL) {
 		/* Roll up this additional usage into our ancestors */
-		dsl_dir_diduse_space(dd->dd_parent, DD_USED_CHILD_RSRV,
-		    delta, 0, 0, tx);
+		dsl_dir_diduse_space_impl(dd->dd_parent, DD_USED_CHILD_RSRV,
+		    delta, 0, 0, B_TRUE, tx);
 	}
 	mutex_exit(&dd->dd_lock);
 }
@@ -1916,7 +1947,6 @@ typedef struct dsl_dir_rename_arg {
 	const char *ddra_oldname;
 	const char *ddra_newname;
 	cred_t *ddra_cred;
-	proc_t *ddra_proc;
 } dsl_dir_rename_arg_t;
 
 typedef struct dsl_valid_rename_arg {
@@ -2095,8 +2125,7 @@ dsl_dir_rename_check(void *arg, dmu_tx_t *tx)
 		}
 
 		error = dsl_dir_transfer_possible(dd->dd_parent,
-		    newparent, fs_cnt, ss_cnt, myspace,
-		    ddra->ddra_cred, ddra->ddra_proc);
+		    newparent, fs_cnt, ss_cnt, myspace, ddra->ddra_cred);
 		if (error != 0) {
 			dsl_dir_rele(newparent, FTAG);
 			dsl_dir_rele(dd, FTAG);
@@ -2213,22 +2242,27 @@ dsl_dir_rename_sync(void *arg, dmu_tx_t *tx)
 int
 dsl_dir_rename(const char *oldname, const char *newname)
 {
+	cred_t *cr = CRED();
+	crhold(cr);
+
 	dsl_dir_rename_arg_t ddra;
 
 	ddra.ddra_oldname = oldname;
 	ddra.ddra_newname = newname;
-	ddra.ddra_cred = CRED();
-	ddra.ddra_proc = curproc;
+	ddra.ddra_cred = cr;
 
-	return (dsl_sync_task(oldname,
+	int err = dsl_sync_task(oldname,
 	    dsl_dir_rename_check, dsl_dir_rename_sync, &ddra,
-	    3, ZFS_SPACE_CHECK_RESERVED));
+	    3, ZFS_SPACE_CHECK_RESERVED);
+
+	crfree(cr);
+	return (err);
 }
 
 int
 dsl_dir_transfer_possible(dsl_dir_t *sdd, dsl_dir_t *tdd,
     uint64_t fs_cnt, uint64_t ss_cnt, uint64_t space,
-    cred_t *cr, proc_t *proc)
+    cred_t *cr)
 {
 	dsl_dir_t *ancestor;
 	int64_t adelta;
@@ -2242,11 +2276,11 @@ dsl_dir_transfer_possible(dsl_dir_t *sdd, dsl_dir_t *tdd,
 		return (SET_ERROR(ENOSPC));
 
 	err = dsl_fs_ss_limit_check(tdd, fs_cnt, ZFS_PROP_FILESYSTEM_LIMIT,
-	    ancestor, cr, proc);
+	    ancestor, cr);
 	if (err != 0)
 		return (err);
 	err = dsl_fs_ss_limit_check(tdd, ss_cnt, ZFS_PROP_SNAPSHOT_LIMIT,
-	    ancestor, cr, proc);
+	    ancestor, cr);
 	if (err != 0)
 		return (err);
 

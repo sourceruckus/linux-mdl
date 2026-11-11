@@ -23,6 +23,9 @@
 /* Define if you have [rt] */
 #define HAVE_AIO_H 1
 
+/* Define if your assembler supports .cfi_negate_ra_state. */
+/* #undef HAVE_AS_CFI_PSEUDO_OP */
+
 /* Define if host toolchain supports AVX */
 #define HAVE_AVX 1
 
@@ -188,6 +191,9 @@
 /* backing_dev_info is available through queue gendisk */
 #define HAVE_BLK_QUEUE_DISK_BDI 1
 
+/* blk_queue_rot() is available */
+/* #undef HAVE_BLK_QUEUE_ROT */
+
 /* blk_queue_secure_erase() is available */
 /* #undef HAVE_BLK_QUEUE_SECURE_ERASE */
 
@@ -197,15 +203,19 @@
 /* BLK_STS_RESV_CONFLICT is defined */
 #define HAVE_BLK_STS_RESV_CONFLICT 1
 
+/* Define if getgeo() in block_device_operations takes struct gendisk * as its
+   first arg */
+/* #undef HAVE_BLOCK_DEVICE_OPERATIONS_GETGEO_GENDISK */
+
 /* Define if release() in block_device_operations takes 1 arg */
 #define HAVE_BLOCK_DEVICE_OPERATIONS_RELEASE_1ARG 1
 
 /* Define if revalidate_disk() in block_device_operations */
 /* #undef HAVE_BLOCK_DEVICE_OPERATIONS_REVALIDATE_DISK */
 
-/* Define to 1 if you have the Mac OS X function CFLocaleCopyCurrent in the
-   CoreFoundation framework. */
-/* #undef HAVE_CFLOCALECOPYCURRENT */
+/* Define to 1 if you have the Mac OS X function
+   CFLocaleCopyPreferredLanguages in the CoreFoundation framework. */
+/* #undef HAVE_CFLOCALECOPYPREFERREDLANGUAGES */
 
 /* Define to 1 if you have the Mac OS X function CFPreferencesCopyAppValue in
    the CoreFoundation framework. */
@@ -226,6 +236,9 @@
 
 /* DECLARE_EVENT_CLASS() is available */
 #define HAVE_DECLARE_EVENT_CLASS 1
+
+/* dentry aliases are in d_u member */
+#define HAVE_DENTRY_D_U_ALIASES 1
 
 /* 3-arg dequeue_signal() takes a type argument */
 #define HAVE_DEQUEUE_SIGNAL_3ARG_TYPE 1
@@ -251,11 +264,17 @@
 /* dops->d_revalidate() takes 4 args */
 /* #undef HAVE_D_REVALIDATE_4ARGS */
 
+/* Define if d_set_d_op() is available */
+#define HAVE_D_SET_D_OP 1
+
 /* Define to 1 if you have the `execvpe' function. */
 #define HAVE_EXECVPE 1
 
 /* fault_in_iov_iter_readable() is available */
 #define HAVE_FAULT_IN_IOV_ITER_READABLE 1
+
+/* linux/filelock.h exists */
+#define HAVE_FILELOCK_HEADER 1
 
 /* file->f_version exists */
 /* #undef HAVE_FILE_F_VERSION */
@@ -263,11 +282,26 @@
 /* flush_dcache_page() is GPL-only */
 /* #undef HAVE_FLUSH_DCACHE_PAGE_GPL_ONLY */
 
+/* use __flush_workqueue() to flush delay workqueue */
+#define HAVE_FLUSH_DELAY_WORKQUEUE_INTERNAL 1
+
+/* use system_delay_wq for delay workqueue */
+#define HAVE_FLUSH_DELAY_WORKQUEUE_PERCPU 1
+
+/* follow_down() takes a flags parameter */
+#define HAVE_FOLLOW_DOWN_FLAGS 1
+
 /* Define if compiler supports -Wformat-overflow */
 #define HAVE_FORMAT_OVERFLOW 1
 
 /* fsync_bdev() is declared in include/blkdev.h */
 /* #undef HAVE_FSYNC_BDEV */
+
+/* fs_context exists */
+#define HAVE_FS_CONTEXT 1
+
+/* fs_parse() takes fs_parameter_spec directly */
+#define HAVE_FS_PARSE_TAKES_SPEC 1
 
 /* yes */
 #define HAVE_GENERIC_FADVISE 1
@@ -294,7 +328,7 @@
 #define HAVE_GETTEXT 1
 
 /* Define to 1 if you have the `gettid' function. */
-/* #undef HAVE_GETTID */
+#define HAVE_GETTID 1
 
 /* iops->get_acl() exists */
 /* #undef HAVE_GET_ACL */
@@ -317,17 +351,26 @@
 /* iops->setattr() takes struct mnt_idmap* */
 #define HAVE_IDMAP_IOPS_SETATTR 1
 
+/* id mapping mechanism is mnt_idmap */
+#define HAVE_IDMAP_MNTIDMAP 1
+
 /* APIs for idmapped mount are present */
 #define HAVE_IDMAP_MNT_API 1
 
 /* mnt_idmap does not have user_namespace */
 #define HAVE_IDMAP_NO_USERNS 1
 
+/* id mapping mechanism is user_namespace */
+/* #undef HAVE_IDMAP_USERNS */
+
 /* Define if compiler supports -Wimplicit-fallthrough */
 #define HAVE_IMPLICIT_FALLTHROUGH 1
 
 /* Define if compiler supports -Winfinite-recursion */
-/* #undef HAVE_INFINITE_RECURSION */
+#define HAVE_INFINITE_RECURSION 1
+
+/* inode_generic_drop() exists */
+/* #undef HAVE_INODE_GENERIC_DROP */
 
 /* inode_get_atime() exists in linux/fs.h */
 #define HAVE_INODE_GET_ATIME 1
@@ -356,6 +399,9 @@
 /* inode_set_mtime_to_ts() exists in linux/fs.h */
 #define HAVE_INODE_SET_MTIME_TO_TS 1
 
+/* inode_state_read_once() exists */
+/* #undef HAVE_INODE_STATE_READ_ONCE */
+
 /* timestamp_truncate() exists */
 #define HAVE_INODE_TIMESTAMP_TRUNCATE 1
 
@@ -367,6 +413,9 @@
 
 /* iops->create() takes struct user_namespace* */
 /* #undef HAVE_IOPS_CREATE_USERNS */
+
+/* iops->mkdir() returns struct dentry* */
+/* #undef HAVE_IOPS_MKDIR_DENTRY */
 
 /* iops->mkdir() takes struct mnt_idmap* */
 #define HAVE_IOPS_MKDIR_IDMAP 1
@@ -413,6 +462,9 @@
 /* iter_is_ubuf() is available */
 #define HAVE_ITER_IS_UBUF 1
 
+/* kasan_enabled() is GPL-only */
+/* #undef HAVE_KASAN_ENABLED_GPL_ONLY */
+
 /* kernel has kernel_fpu_* functions */
 #define HAVE_KERNEL_FPU 1
 
@@ -426,7 +478,7 @@
 /* #undef HAVE_KERNEL_FPU_INTERNAL_HEADER */
 
 /* Define if compiler supports -Winfinite-recursion */
-/* #undef HAVE_KERNEL_INFINITE_RECURSION */
+#define HAVE_KERNEL_INFINITE_RECURSION 1
 
 /* kernel defines intptr_t */
 #define HAVE_KERNEL_INTPTR_T 1
@@ -456,13 +508,13 @@
 #define HAVE_LIBCRYPTO 1
 
 /* Define if you have [tirpc] */
-/* #undef HAVE_LIBTIRPC */
+#define HAVE_LIBTIRPC 1
 
 /* Define if you have [udev] */
 #define HAVE_LIBUDEV 1
 
 /* Define if you have [unwind] */
-#define HAVE_LIBUNWIND 1
+/* #undef HAVE_LIBUNWIND */
 
 /* libunwind has unw_get_elf_filename */
 /* #undef HAVE_LIBUNWIND_ELF */
@@ -482,11 +534,11 @@
 /* Noting that make_request_fn() returns blk_qc_t */
 /* #undef HAVE_MAKE_REQUEST_FN_RET_QC */
 
-/* Define to 1 if you have the <memory.h> header file. */
-#define HAVE_MEMORY_H 1
-
 /* Define to 1 if you have the `mlockall' function. */
 #define HAVE_MLOCKALL 1
+
+/* 'flags' in 'struct page' is a struct */
+/* #undef HAVE_MM_PAGE_FLAGS_STRUCT */
 
 /* PG_error flag is available */
 /* #undef HAVE_MM_PAGE_FLAG_ERROR */
@@ -497,11 +549,20 @@
 /* page_size() is available */
 #define HAVE_MM_PAGE_SIZE 1
 
+/* mount_setattr() and struct mount_attr are available */
+#define HAVE_MOUNT_SETATTR 1
+
 /* Define if host toolchain supports MOVBE */
 #define HAVE_MOVBE 1
 
+/* Define if ns_type is accessible through ns_common */
+/* #undef HAVE_NS_COMMON_TYPE */
+
 /* folio_wait_bit() exists */
 #define HAVE_PAGEMAP_FOLIO_WAIT_BIT 1
+
+/* readahead_page() exists */
+#define HAVE_PAGEMAP_READAHEAD_PAGE 1
 
 /* part_to_dev() exists */
 /* #undef HAVE_PART_TO_DEV */
@@ -515,6 +576,9 @@
 /* pin_user_pages_unlocked() is available */
 #define HAVE_PIN_USER_PAGES_UNLOCKED 1
 
+/* posix_acl_to_xattr() allocates its result */
+/* #undef HAVE_POSIX_ACL_TO_XATTR_ALLOC */
+
 /* proc_handler ctl_table arg is const */
 #define HAVE_PROC_HANDLER_CTL_TABLE_CONST 1
 
@@ -522,7 +586,7 @@
 #define HAVE_PROC_OPS_STRUCT 1
 
 /* If available, contains the Python version number currently in use. */
-/* #undef HAVE_PYTHON */
+#define HAVE_PYTHON "3.12"
 
 /* qat is enabled and existed */
 /* #undef HAVE_QAT */
@@ -538,9 +602,6 @@
 
 /* register_sysctl_table exists */
 /* #undef HAVE_REGISTER_SYSCTL_TABLE */
-
-/* iops->rename() wants flags */
-/* #undef HAVE_RENAME_WANTS_FLAGS */
 
 /* revalidate_disk() is available */
 /* #undef HAVE_REVALIDATE_DISK */
@@ -569,11 +630,17 @@
 /* iops->set_acl() takes 4 args, arg2 is struct dentry * */
 /* #undef HAVE_SET_ACL_USERNS_DENTRY_ARG2 */
 
+/* Define if set_default_d_op() is available */
+/* #undef HAVE_SET_DEFAULT_D_OP */
+
 /* shrinker_register exists */
 #define HAVE_SHRINKER_REGISTER 1
 
 /* kernel_siginfo_t exists */
 #define HAVE_SIGINFO 1
+
+/* sops->free_inode() exists */
+#define HAVE_SOPS_FREE_INODE 1
 
 /* Define if host toolchain supports SSE */
 #define HAVE_SSE 1
@@ -596,11 +663,23 @@
 /* STACK_FRAME_NON_STANDARD is defined */
 #define HAVE_STACK_FRAME_NON_STANDARD 1
 
+/* STACK_FRAME_NON_STANDARD asm macro is defined */
+#define HAVE_STACK_FRAME_NON_STANDARD_ASM 1
+
 /* standalone <linux/stdarg.h> exists */
 #define HAVE_STANDALONE_LINUX_STDARG 1
 
+/* statx() is available */
+#define HAVE_STATX 1
+
+/* STATX_MNT_ID is available */
+#define HAVE_STATX_MNT_ID 1
+
 /* Define to 1 if you have the <stdint.h> header file. */
 #define HAVE_STDINT_H 1
+
+/* Define to 1 if you have the <stdio.h> header file. */
+#define HAVE_STDIO_H 1
 
 /* Define to 1 if you have the <stdlib.h> header file. */
 #define HAVE_STDLIB_H 1
@@ -612,10 +691,10 @@
 #define HAVE_STRING_H 1
 
 /* Define to 1 if you have the `strlcat' function. */
-/* #undef HAVE_STRLCAT */
+#define HAVE_STRLCAT 1
 
 /* Define to 1 if you have the `strlcpy' function. */
-/* #undef HAVE_STRLCPY */
+#define HAVE_STRLCPY 1
 
 /* submit_bio is member of struct block_device_operations */
 #define HAVE_SUBMIT_BIO_IN_BLOCK_DEVICE_OPERATIONS 1
@@ -625,6 +704,9 @@
 
 /* have super_block s_shrink pointer */
 #define HAVE_SUPER_BLOCK_S_SHRINK_PTR 1
+
+/* have super_block s_wb_err */
+#define HAVE_SUPER_BLOCK_S_WB_ERR 1
 
 /* sync_blockdev() is declared in include/blkdev.h */
 #define HAVE_SYNC_BLOCKDEV 1
@@ -637,6 +719,9 @@
 
 /* Define to 1 if you have the <sys/types.h> header file. */
 #define HAVE_SYS_TYPES_H 1
+
+/* timer_delete_sync is available */
+#define HAVE_TIMER_DELETE_SYNC 1
 
 /* i_op->tmpfile() uses old dentry signature */
 /* #undef HAVE_TMPFILE_DENTRY */
@@ -668,6 +753,9 @@
 /* iops->setattr() takes struct user_namespace* */
 /* #undef HAVE_USERNS_IOPS_SETATTR */
 
+/* Define if host toolchain supports VAES */
+#define HAVE_VAES 1
+
 /* fops->clone_file_range() is available */
 /* #undef HAVE_VFS_CLONE_FILE_RANGE */
 
@@ -686,6 +774,12 @@
 /* migrate_folio exists */
 #define HAVE_VFS_MIGRATE_FOLIO 1
 
+/* vfs_parse_fs_string() takes 3 args */
+/* #undef HAVE_VFS_PARSE_FS_STRING_3ARGS */
+
+/* vfs_path_lookup() is exported */
+/* #undef HAVE_VFS_PATH_LOOKUP_EXPORTED */
+
 /* address_space_operations->readpages exists */
 /* #undef HAVE_VFS_READPAGES */
 
@@ -701,11 +795,20 @@
 /* splice_copy_file_range() is available */
 #define HAVE_VFS_SPLICE_COPY_FILE_RANGE 1
 
+/* address_space_operations->writepage exists */
+#define HAVE_VFS_WRITEPAGE 1
+
 /* __vmalloc page flags exists */
 /* #undef HAVE_VMALLOC_PAGE_KERNEL */
 
+/* Define if host toolchain supports VPCLMULQDQ */
+#define HAVE_VPCLMULQDQ 1
+
 /* int (*writepage_t)() takes struct folio* */
 #define HAVE_WRITEPAGE_T_FOLIO 1
+
+/* write_cache_pages() is available */
+#define HAVE_WRITE_CACHE_PAGES 1
 
 /* xattr_handler->get() wants dentry and inode and flags */
 /* #undef HAVE_XATTR_GET_DENTRY_INODE_FLAGS */
@@ -734,20 +837,23 @@
 /* Define if you have [z] */
 #define HAVE_ZLIB 1
 
+/* libunwind is llvm libunwind */
+/* #undef IS_LIBUNWIND_LLVM */
+
 /* kernel exports FPU functions */
 #define KERNEL_EXPORTS_X86_FPU 1
 
 /* whether the chosen libfetch is to be loaded at run-time */
-#define LIBFETCH_DYNAMIC 0
+#define LIBFETCH_DYNAMIC 1
 
 /* libfetch is fetch(3) */
 #define LIBFETCH_IS_FETCH 0
 
 /* libfetch is libcurl */
-#define LIBFETCH_IS_LIBCURL 0
+#define LIBFETCH_IS_LIBCURL 1
 
 /* soname of chosen libfetch */
-#define LIBFETCH_SONAME ""
+#define LIBFETCH_SONAME "libcurl.so.4"
 
 /* Define to the sub-directory where libtool stores uninstalled libraries. */
 #define LT_OBJDIR ".libs/"
@@ -770,20 +876,22 @@
 /* pde_data() is PDE_DATA() */
 #define SPL_PDE_DATA pde_data
 
-/* True if ZFS is to be compiled for a FreeBSD system */
+/* Define to 1 if all of the C90 standard headers exist (not just the ones
+   required in a freestanding environment). This macro is provided for
+   backward compatibility; new code need not use it. */
 /* #undef SYSTEM_FREEBSD */
 
 /* True if ZFS is to be compiled for a Linux system */
 #define SYSTEM_LINUX 1
 
-/* zfs debugging enabled */
+/* Version number of package */
 /* #undef ZFS_DEBUG */
 
 /* /dev/zfs minor */
 #define ZFS_DEVICE_MINOR 249
 
 /* Define the project alias string. */
-#define ZFS_META_ALIAS "zfs-2.3.2-5_g858c42d1b"
+#define ZFS_META_ALIAS "zfs-2.4.4-5_gfd50ac6e5"
 
 /* Define the project author. */
 #define ZFS_META_AUTHOR "OpenZFS"
@@ -792,7 +900,7 @@
 /* #undef ZFS_META_DATA */
 
 /* Define the maximum compatible kernel version. */
-#define ZFS_META_KVER_MAX "6.14"
+#define ZFS_META_KVER_MAX "7.2"
 
 /* Define the minimum compatible kernel version. */
 #define ZFS_META_KVER_MIN "4.18"
@@ -813,12 +921,19 @@
 #define ZFS_META_NAME "zfs"
 
 /* Define the project release. */
-#define ZFS_META_RELEASE "5_g858c42d1b"
+#define ZFS_META_RELEASE "5_gfd50ac6e5"
 
 /* Define the project version. */
-#define ZFS_META_VERSION "2.3.2"
+#define ZFS_META_VERSION "2.4.4"
 
 /* count is located in percpu_ref.data */
 #define ZFS_PERCPU_REF_COUNT_IN_DATA 1
 
 
+
+#ifdef CONFIG_ZFS
+/* #undef ZFS_DEBUG */
+#ifdef CONFIG_ZFS_DEBUG
+#define ZFS_DEBUG 1
+#endif
+#endif

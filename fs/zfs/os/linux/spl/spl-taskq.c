@@ -37,6 +37,12 @@
 #include <sys/atomic.h>
 #include <sys/kstat.h>
 #include <linux/cpuhotplug.h>
+#include <linux/mod_compat.h>
+
+/* Linux 6.2 renamed timer_delete_sync(); point it at its old name for those. */
+#ifndef HAVE_TIMER_DELETE_SYNC
+#define	timer_delete_sync(t)	del_timer_sync(t)
+#endif
 
 typedef struct taskq_kstats {
 	/* static values, for completeness */
@@ -594,13 +600,22 @@ taskq_of_curthread(void)
 EXPORT_SYMBOL(taskq_of_curthread);
 
 /*
- * Cancel an already dispatched task given the task id.  Still pending tasks
- * will be immediately canceled, and if the task is active the function will
- * block until it completes.  Preallocated tasks which are canceled must be
- * freed by the caller.
+ * Cancel a dispatched task. Pending tasks are cancelled immediately.
+ * If the task is running, behavior depends on wait parameter:
+ *   - wait=B_TRUE: Block until task completes
+ *   - wait=B_FALSE: Return EBUSY immediately
+ *
+ * Return values:
+ *   0      - Cancelled before execution. Caller must release resources.
+ *   EBUSY  - Task running (wait=B_FALSE only). Will self-cleanup.
+ *   ENOENT - Not found, or completed after waiting. Already cleaned up.
+ *
+ * Note: wait=B_TRUE returns ENOENT (not EBUSY) after waiting because
+ * the task no longer exists. This distinguishes "cancelled before run"
+ * from "completed naturally" for proper resource management.
  */
 int
-taskq_cancel_id(taskq_t *tq, taskqid_t id)
+taskq_cancel_id(taskq_t *tq, taskqid_t id, boolean_t wait)
 {
 	taskq_ent_t *t;
 	int rc = ENOENT;
@@ -629,14 +644,31 @@ taskq_cancel_id(taskq_t *tq, taskqid_t id)
 
 		/*
 		 * The task_expire() function takes the tq->tq_lock so drop
-		 * drop the lock before synchronously cancelling the timer.
+		 * the lock before synchronously cancelling the timer.
+		 *
+		 * Always call timer_delete_sync() unconditionally. A
+		 * timer_pending() check would be insufficient and unsafe.
+		 * When a timer expires, it is immediately dequeued from the
+		 * timer wheel (timer_pending() returns FALSE), but the
+		 * callback (task_expire) may not run until later.
+		 *
+		 * The race window:
+		 * 1) Timer expires and is dequeued - timer_pending() now
+		 *    returns FALSE
+		 * 2) task_done() is called below, freeing the task, sets
+		 *    tqent_func = NULL and clears flags including CANCEL
+		 * 3) Timer callback finally runs, sees no CANCEL flag,
+		 *    queues task to prio_list
+		 * 4) Worker thread attempts to execute NULL tqent_func
+		 *    and panics
+		 *
+		 * timer_delete_sync() prevents this by ensuring the timer
+		 * callback completes before the task is freed.
 		 */
-		if (timer_pending(&t->tqent_timer)) {
-			spin_unlock_irqrestore(&tq->tq_lock, flags);
-			del_timer_sync(&t->tqent_timer);
-			spin_lock_irqsave_nested(&tq->tq_lock, flags,
-			    tq->tq_lock_class);
-		}
+		spin_unlock_irqrestore(&tq->tq_lock, flags);
+		timer_delete_sync(&t->tqent_timer);
+		spin_lock_irqsave_nested(&tq->tq_lock, flags,
+		    tq->tq_lock_class);
 
 		if (!(t->tqent_flags & TQENT_FLAG_PREALLOC))
 			task_done(tq, t);
@@ -646,8 +678,12 @@ taskq_cancel_id(taskq_t *tq, taskqid_t id)
 	spin_unlock_irqrestore(&tq->tq_lock, flags);
 
 	if (t == ERR_PTR(-EBUSY)) {
-		taskq_wait_id(tq, id);
-		rc = EBUSY;
+		if (wait) {
+			taskq_wait_id(tq, id);
+			rc = ENOENT;  /* Completed, no longer exists */
+		} else {
+			rc = EBUSY;   /* Still running */
+		}
 	}
 
 	return (rc);
@@ -1646,18 +1682,8 @@ spl_taskq_kstat_fini(void)
 
 static unsigned int spl_taskq_kick = 0;
 
-/*
- * 2.6.36 API Change
- * module_param_cb is introduced to take kernel_param_ops and
- * module_param_call is marked as obsolete. Also set and get operations
- * were changed to take a 'const struct kernel_param *'.
- */
 static int
-#ifdef module_param_cb
-param_set_taskq_kick(const char *val, const struct kernel_param *kp)
-#else
-param_set_taskq_kick(const char *val, struct kernel_param *kp)
-#endif
+param_set_taskq_kick(const char *val, zfs_kernel_param_t *kp)
 {
 	int ret;
 	taskq_t *tq = NULL;
@@ -1687,16 +1713,8 @@ param_set_taskq_kick(const char *val, struct kernel_param *kp)
 	return (ret);
 }
 
-#ifdef module_param_cb
-static const struct kernel_param_ops param_ops_taskq_kick = {
-	.set = param_set_taskq_kick,
-	.get = param_get_uint,
-};
-module_param_cb(spl_taskq_kick, &param_ops_taskq_kick, &spl_taskq_kick, 0644);
-#else
 module_param_call(spl_taskq_kick, param_set_taskq_kick, param_get_uint,
 	&spl_taskq_kick, 0644);
-#endif
 MODULE_PARM_DESC(spl_taskq_kick,
 	"Write nonzero to kick stuck taskqs to spawn more threads");
 

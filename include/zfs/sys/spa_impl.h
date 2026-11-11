@@ -55,14 +55,11 @@
 #include <sys/dsl_deadlist.h>
 #include <zfeature_common.h>
 
+#include "zfs_crrd.h"
+
 #ifdef	__cplusplus
 extern "C" {
 #endif
-
-typedef struct spa_alloc {
-	kmutex_t	spaa_lock;
-	avl_tree_t	spaa_tree;
-} ____cacheline_aligned spa_alloc_t;
 
 typedef struct spa_allocs_use {
 	kmutex_t	sau_lock;
@@ -224,6 +221,7 @@ struct spa {
 	 * Fields protected by spa_namespace_lock.
 	 */
 	char		spa_name[ZFS_MAX_DATASET_NAME_LEN];	/* pool name */
+	char		*spa_load_name;		/* unmodified pool name */
 	char		*spa_comment;		/* comment */
 	avl_node_t	spa_avl;		/* node in spa_namespace_avl */
 	nvlist_t	*spa_config;		/* last synced config */
@@ -251,6 +249,7 @@ struct spa {
 	metaslab_class_t *spa_log_class;	/* intent log data class */
 	metaslab_class_t *spa_embedded_log_class; /* log on normal vdevs */
 	metaslab_class_t *spa_special_class;	/* special allocation class */
+	metaslab_class_t *spa_special_embedded_log_class; /* log on special */
 	metaslab_class_t *spa_dedup_class;	/* dedup allocation class */
 	uint64_t	spa_first_txg;		/* first txg after spa_open() */
 	uint64_t	spa_final_txg;		/* txg of export/destroy */
@@ -267,18 +266,13 @@ struct spa {
 	uint64_t	spa_min_ashift;		/* of vdevs in normal class */
 	uint64_t	spa_max_ashift;		/* of vdevs in normal class */
 	uint64_t	spa_min_alloc;		/* of vdevs in normal class */
+	uint64_t	spa_max_alloc;		/* of vdevs in normal class */
 	uint64_t	spa_gcd_alloc;		/* of vdevs in normal class */
 	uint64_t	spa_config_guid;	/* config pool guid */
 	uint64_t	spa_load_guid;		/* spa_load initialized guid */
 	uint64_t	spa_last_synced_guid;	/* last synced guid */
 	list_t		spa_config_dirty_list;	/* vdevs with dirty config */
 	list_t		spa_state_dirty_list;	/* vdevs with dirty state */
-	/*
-	 * spa_allocs is an array, whose lengths is stored in spa_alloc_count.
-	 * There is one tree and one lock for each allocator, to help improve
-	 * allocation performance in write-heavy workloads.
-	 */
-	spa_alloc_t	*spa_allocs;
 	spa_allocs_use_t *spa_allocs_use;
 	int		spa_alloc_count;
 	int		spa_active_allocator;	/* selectable allocator */
@@ -302,6 +296,7 @@ struct spa {
 	void		*spa_cksum_tmpls[ZIO_CHECKSUM_FUNCTIONS];
 	uberblock_t	spa_ubsync;		/* last synced uberblock */
 	uberblock_t	spa_uberblock;		/* current uberblock */
+	boolean_t	spa_activity_check; 	/* activity check required */
 	boolean_t	spa_extreme_rewind;	/* rewind past deferred frees */
 	kmutex_t	spa_scrub_lock;		/* resilver/scrub lock */
 	uint64_t	spa_scrub_inflight;	/* in-flight scrub bytes */
@@ -353,6 +348,12 @@ struct spa {
 	uint64_t	spa_checkpoint_txg;	/* the txg of the checkpoint */
 	spa_checkpoint_info_t spa_checkpoint_info; /* checkpoint accounting */
 	zthr_t		*spa_checkpoint_discard_zthr;
+
+	kmutex_t	spa_txg_log_time_lock;	/* for spa_txg_log_time */
+	dbrrd_t		spa_txg_log_time;
+	uint64_t	spa_last_noted_txg;
+	uint64_t	spa_last_noted_txg_time;
+	uint64_t	spa_last_flush_txg_time;
 
 	space_map_t	*spa_syncing_log_sm;	/* current log space map */
 	avl_tree_t	spa_sm_logs_by_txg;

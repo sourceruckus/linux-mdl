@@ -91,20 +91,26 @@ dmu_write_direct_done(zio_t *zio)
 	dmu_sync_arg_t *dsa = zio->io_private;
 	dbuf_dirty_record_t *dr = dsa->dsa_dr;
 	dmu_buf_impl_t *db = dr->dr_dbuf;
+	dmu_tx_t *tx = dsa->dsa_tx;
 
 	abd_free(zio->io_abd);
 
 	mutex_enter(&db->db_mtx);
-	ASSERT3P(db->db_buf, ==, NULL);
-	ASSERT3P(dr->dt.dl.dr_data, ==, NULL);
-	ASSERT3P(db->db.db_data, ==, NULL);
+	ASSERT0P(db->db_buf);
+	ASSERT0P(dr->dt.dl.dr_data);
+	ASSERT0P(db->db.db_data);
 	db->db_state = DB_UNCACHED;
 	mutex_exit(&db->db_mtx);
 
+	/*
+	 * dmu_sync_done() owns dsa and frees it after publishing the final
+	 * override state.  The direct-I/O error path still needs the original
+	 * open-context tx to roll the dirty record back with dbuf_undirty().
+	 */
 	dmu_sync_done(zio, NULL, zio->io_private);
 
 	if (zio->io_error != 0) {
-		if (zio->io_flags & ZIO_FLAG_DIO_CHKSUM_ERR)
+		if (zio->io_post & ZIO_POST_DIO_CHKSUM_ERR)
 			ASSERT3U(zio->io_error, ==, EIO);
 
 		/*
@@ -120,7 +126,7 @@ dmu_write_direct_done(zio_t *zio)
 		 * calling dbuf_undirty().
 		 */
 		mutex_enter(&db->db_mtx);
-		VERIFY3B(dbuf_undirty(db, dsa->dsa_tx), ==, B_FALSE);
+		VERIFY3B(dbuf_undirty(db, tx), ==, B_FALSE);
 		mutex_exit(&db->db_mtx);
 	}
 
@@ -208,7 +214,7 @@ dmu_write_direct(zio_t *pio, dmu_buf_impl_t *db, abd_t *data, dmu_tx_t *tx)
 
 int
 dmu_write_abd(dnode_t *dn, uint64_t offset, uint64_t size,
-    abd_t *data, uint32_t flags, dmu_tx_t *tx)
+    abd_t *data, dmu_flags_t flags, dmu_tx_t *tx)
 {
 	dmu_buf_t **dbp;
 	spa_t *spa = dn->dn_objset->os_spa;
@@ -247,7 +253,7 @@ dmu_write_abd(dnode_t *dn, uint64_t offset, uint64_t size,
 
 int
 dmu_read_abd(dnode_t *dn, uint64_t offset, uint64_t size,
-    abd_t *data, uint32_t flags)
+    abd_t *data, dmu_flags_t flags)
 {
 	objset_t *os = dn->dn_objset;
 	spa_t *spa = os->os_spa;
@@ -351,7 +357,8 @@ error:
 
 #ifdef _KERNEL
 int
-dmu_read_uio_direct(dnode_t *dn, zfs_uio_t *uio, uint64_t size)
+dmu_read_uio_direct(dnode_t *dn, zfs_uio_t *uio, uint64_t size,
+    dmu_flags_t flags)
 {
 	offset_t offset = zfs_uio_offset(uio);
 	offset_t page_index = (offset - zfs_uio_soffset(uio)) >> PAGESHIFT;
@@ -362,7 +369,7 @@ dmu_read_uio_direct(dnode_t *dn, zfs_uio_t *uio, uint64_t size)
 
 	abd_t *data = abd_alloc_from_pages(&uio->uio_dio.pages[page_index],
 	    offset & (PAGESIZE - 1), size);
-	err = dmu_read_abd(dn, offset, size, data, DMU_DIRECTIO);
+	err = dmu_read_abd(dn, offset, size, data, flags);
 	abd_free(data);
 
 	if (err == 0)
@@ -372,7 +379,8 @@ dmu_read_uio_direct(dnode_t *dn, zfs_uio_t *uio, uint64_t size)
 }
 
 int
-dmu_write_uio_direct(dnode_t *dn, zfs_uio_t *uio, uint64_t size, dmu_tx_t *tx)
+dmu_write_uio_direct(dnode_t *dn, zfs_uio_t *uio, uint64_t size,
+    dmu_flags_t flags, dmu_tx_t *tx)
 {
 	offset_t offset = zfs_uio_offset(uio);
 	offset_t page_index = (offset - zfs_uio_soffset(uio)) >> PAGESHIFT;
@@ -383,7 +391,7 @@ dmu_write_uio_direct(dnode_t *dn, zfs_uio_t *uio, uint64_t size, dmu_tx_t *tx)
 
 	abd_t *data = abd_alloc_from_pages(&uio->uio_dio.pages[page_index],
 	    offset & (PAGESIZE - 1), size);
-	err = dmu_write_abd(dn, offset, size, data, DMU_DIRECTIO, tx);
+	err = dmu_write_abd(dn, offset, size, data, flags, tx);
 	abd_free(data);
 
 	if (err == 0)
@@ -393,5 +401,5 @@ dmu_write_uio_direct(dnode_t *dn, zfs_uio_t *uio, uint64_t size, dmu_tx_t *tx)
 }
 #endif /* _KERNEL */
 
-EXPORT_SYMBOL(dmu_read_uio_direct);
-EXPORT_SYMBOL(dmu_write_uio_direct);
+EXPORT_SYMBOL(dmu_read_abd);
+EXPORT_SYMBOL(dmu_write_abd);

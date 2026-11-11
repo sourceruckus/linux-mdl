@@ -24,7 +24,11 @@
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2013, Joyent, Inc. All rights reserved.
  * Copyright (C) 2016 Lawrence Livermore National Security, LLC.
- *
+ * Copyright (c) 2025, Rob Norris <robn@despairlabs.com>
+ * Copyright (c) 2026, TrueNAS.
+ */
+
+/*
  * For Linux the vast majority of this enforcement is already handled via
  * the standard Linux VFS permission checks.  However certain administrative
  * commands which bypass the standard mechanisms may need to make use of
@@ -35,28 +39,32 @@
 #include <linux/security.h>
 #include <linux/vfs_compat.h>
 
-/*
- * The passed credentials cannot be directly verified because Linux only
- * provides and interface to check the *current* process credentials.  In
- * order to handle this the capable() test is only run when the passed
- * credentials match the current process credentials or the kcred.  In
- * all other cases this function must fail and return the passed err.
- */
 static int
 priv_policy_ns(const cred_t *cr, int capability, int err,
     struct user_namespace *ns)
 {
-	if (cr != CRED() && (cr != kcred))
-		return (err);
+	/*
+	 * The passed credentials cannot be directly verified because Linux
+	 * only provides an interface to check the *current* process
+	 * credentials.  In order to handle this we check if the passed in
+	 * creds match the current process credentials or the kcred.  If not,
+	 * we swap the passed credentials into the current task, perform the
+	 * check, and then revert it before returning.
+	 */
+	const cred_t *old =
+	    (cr != CRED() && cr != kcred) ? override_creds(cr) : NULL;
 
 #if defined(CONFIG_USER_NS)
-	if (!(ns ? ns_capable(ns, capability) : capable(capability)))
+	if (ns ? ns_capable(ns, capability) : capable(capability))
 #else
-	if (!capable(capability))
+	if (capable(capability))
 #endif
-		return (err);
+		err = 0;
 
-	return (0);
+	if (old)
+		revert_creds(old);
+
+	return (err);
 }
 
 static int
@@ -82,21 +90,14 @@ priv_policy_user(const cred_t *cr, int capability, int err)
 }
 
 /*
- * Checks for operations that are either client-only or are used by
- * both clients and servers.
- */
-int
-secpolicy_nfs(const cred_t *cr)
-{
-	return (priv_policy(cr, CAP_SYS_ADMIN, EPERM));
-}
-
-/*
  * Catch all system configuration.
  */
 int
 secpolicy_sys_config(const cred_t *cr, boolean_t checkonly)
 {
+	/* pools can only be manipulated from the global zone */
+	if (crgetzoneid(cr) != GLOBAL_ZONEID)
+		return (EACCES);
 	return (priv_policy(cr, CAP_SYS_ADMIN, EPERM));
 }
 
@@ -236,6 +237,9 @@ secpolicy_vnode_setids_setgids(const cred_t *cr, gid_t gid, zidmap_t *mnt_ns,
 int
 secpolicy_zinject(const cred_t *cr)
 {
+	/* zinject is only in the global zone */
+	if (crgetzoneid(cr) != GLOBAL_ZONEID)
+		return (EACCES);
 	return (priv_policy(cr, CAP_SYS_ADMIN, EACCES));
 }
 
@@ -246,20 +250,15 @@ secpolicy_zinject(const cred_t *cr)
 int
 secpolicy_zfs(const cred_t *cr)
 {
+	/*
+	 * Note that CAP_SYS_ADMIN is effectively "root"-like privileges in
+	 * the given user namespace. Those happen to include mount control
+	 * (matching PRIV_SYS_MOUNT on illumos). There is not a narrower
+	 * permission available. It's important that callers do narrower
+	 * permission checks (eg zone checks) along with this call.
+	 *   -- robn, 2026-08-14
+	 */
 	return (priv_policy(cr, CAP_SYS_ADMIN, EACCES));
-}
-
-/*
- * Equivalent to secpolicy_zfs(), but works even if the cred_t is not that of
- * the current process.  Takes both cred_t and proc_t so that this can work
- * easily on all platforms.
- */
-int
-secpolicy_zfs_proc(const cred_t *cr, proc_t *proc)
-{
-	if (!has_capability(proc, CAP_SYS_ADMIN))
-		return (EACCES);
-	return (0);
 }
 
 void

@@ -38,12 +38,6 @@
 #include <sys/zstd/zstd.h>
 
 /*
- * If nonzero, every 1/X decompression attempts will fail, simulating
- * an undetected memory error.
- */
-static unsigned long zio_decompress_fail_fraction = 0;
-
-/*
  * Compression vectors.
  */
 zio_compress_info_t zio_compress_table[ZIO_COMPRESS_FUNCTIONS] = {
@@ -128,7 +122,7 @@ zio_compress_data(enum zio_compress c, abd_t *src, abd_t **dst, size_t s_len,
 	uint8_t complevel;
 	zio_compress_info_t *ci = &zio_compress_table[c];
 
-	ASSERT3U(ci->ci_compress, !=, NULL);
+	ASSERT3P(ci->ci_compress, !=, NULL);
 	ASSERT3U(s_len, >, 0);
 
 	complevel = ci->ci_level;
@@ -170,15 +164,6 @@ zio_decompress_data(enum zio_compress c, abd_t *src, abd_t *dst,
 		err = ci->ci_decompress_level(src, dst, s_len, d_len, level);
 	else
 		err = ci->ci_decompress(src, dst, s_len, d_len, ci->ci_level);
-
-	/*
-	 * Decompression shouldn't fail, because we've already verified
-	 * the checksum.  However, for extra protection (e.g. against bitflips
-	 * in non-ECC RAM), we handle this error (and test it).
-	 */
-	if (zio_decompress_fail_fraction != 0 &&
-	    random_in_range(zio_decompress_fail_fraction) == 0)
-		err = SET_ERROR(EINVAL);
 
 	return (err);
 }
