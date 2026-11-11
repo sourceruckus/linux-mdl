@@ -1,9 +1,8 @@
-# 1 "/scrap/drbd/drbd/drbd-headers/linux/drbd_limits.h"
+# 1 "/scrap/drbd/drbd/drbd-headers/uapi/linux/drbd_limits.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
-  drbd_limits.h
-  This file is part of DRBD by Philipp Reisner and Lars Ellenberg.
-*/
+ * Copyright (C) 2014, LINBIT HA-Solutions GmbH.
+ */
 
 /*
  * Our current limitations.
@@ -233,6 +232,7 @@
 #define DRBD_CSUMS_AFTER_CRASH_ONLY_DEF 0U
 #define DRBD_AUTO_PROMOTE_DEF	1U
 #define DRBD_BITMAP_DEF         1U
+#define DRBD_RESYNC_WITHOUT_REPLICATION_DEF 1U
 
 #define DRBD_NR_REQUESTS_MIN	4U
 #define DRBD_NR_REQUESTS_DEF	8000U
@@ -313,10 +313,16 @@
 #define DRBD_BLOCK_SIZE_DEF 512
 #define DRBD_BLOCK_SIZE_SCALE '1' /* Bytes */
 
+#define DRBD_DISCARD_GRANULARITY_SCALE '1'             /* Bytes */
+#define DRBD_DISCARD_GRANULARITY_MIN 0U                /* 0 = disable discards */
+#define DRBD_DISCARD_GRANULARITY_MAX (128U<<20)        /* 128 MiB, current DRBD_MAX_BATCH_BIO_SIZE */
+#define DRBD_DISCARD_GRANULARITY_DEF 0xFFFFFFFFU       /* sentinel: not configured; use legacy behavior */
+
 /* By default freeze IO, if set error all IOs as quick as possible */
 #define DRBD_ON_NO_QUORUM_DEF ONQ_SUSPEND_IO
 
 #define DRBD_ON_SUSP_PRI_OUTD_DEF SPO_DISCONNECT
+#define DRBD_DRBD8_COMPAT_MODE_DEF 0U
 
 #define DRBD_TLS_DEF 0U /* disabled by default */
 #define DRBD_TLS_PRIVKEY_DEF 0 /* disabled by default */
@@ -324,6 +330,8 @@
 #define DRBD_TLS_KEYRING_DEF 0 /* disabled by default */
 
 #define DRBD_LOAD_BALANCE_PATHS_DEF 0U
+
+#define DRBD_PEER_TIEBREAKER_DEF 1U
 
 #define DRBD_RDMA_CTRL_RCVBUF_SIZE_MIN  0U
 #define DRBD_RDMA_CTRL_RCVBUF_SIZE_MAX  (10U<<20)
@@ -334,5 +342,8 @@
 #define DRBD_RDMA_CTRL_SNDBUF_SIZE_MAX  (10U<<20)
 #define DRBD_RDMA_CTRL_SNDBUF_SIZE_DEF 0
 #define DRBD_RDMA_CTRL_SNDBUF_SIZE_SCALE '1'
+
+/* Enable bdev_freeze/lockfs by default */
+#define DRBD_SUSPEND_IO_BDEV_FREEZE_DEF 1U
 
 #endif

@@ -1,5 +1,9 @@
 # 1 "/scrap/drbd/drbd/drbd_interval.c"
 // SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Copyright (C) 2011, LINBIT HA-Solutions GmbH.
+ */
+
 #include <asm/bug.h>
 #include <linux/rbtree_augmented.h>
 #include "drbd_interval.h"

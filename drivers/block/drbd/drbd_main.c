@@ -1,18 +1,10 @@
 # 1 "/scrap/drbd/drbd/drbd_main.c"
 // SPDX-License-Identifier: GPL-2.0-only
 /*
-   drbd_main.c
-
-   This file is part of DRBD by Philipp Reisner and Lars Ellenberg.
-
-   Copyright (C) 2001-2008, LINBIT Information Technologies GmbH.
-   Copyright (C) 1999-2008, Philipp Reisner <philipp.reisner@linbit.com>.
-   Copyright (C) 2002-2008, Lars Ellenberg <lars.ellenberg@linbit.com>.
-
-   Thanks to Carter Burden, Bart Grantham and Gennadiy Nerubayev
-   from Logicworks, Inc. for making SDP replication support possible.
-
-
+ * Copyright (C) 1999-2008, Philipp Reisner <philipp.reisner@linbit.com>.
+ * Copyright (C) 2002-2008, Lars Ellenberg <lars.ellenberg@linbit.com>.
+ * Copyright (C) 2001-2008, LINBIT Information Technologies GmbH.
+ * Copyright (C) 2008, LINBIT HA-Solutions GmbH.
  */
 
 #define pr_fmt(fmt)	KBUILD_MODNAME ": " fmt
@@ -20,7 +12,6 @@
 #include <linux/module.h>
 #include <linux/jiffies.h>
 #include <linux/drbd.h>
-#include <linux/uaccess.h>
 #include <asm/types.h>
 #include <net/net_namespace.h>
 #include <net/sock.h>
@@ -30,17 +21,13 @@
 #include <linux/proc_fs.h>
 #include <linux/init.h>
 #include <linux/mm.h>
-#include <linux/memcontrol.h>
+#include <linux/memcontrol.h> /* needed on kernels <4.3 */
 #include <linux/mm_inline.h>
 #include <linux/slab.h>
-#include <linux/crc32c.h>
-#include <linux/reboot.h>
 #include <linux/notifier.h>
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
-#include <linux/unistd.h>
 #include <linux/vmalloc.h>
-#include <linux/device.h>
 #include <linux/dynamic_debug.h>
 #include <linux/libnvdimm.h>
 #include <linux/swab.h>
@@ -48,11 +35,12 @@
 
 #include <linux/drbd_limits.h>
 #include "drbd_int.h"
-#include "drbd_protocol.h"
+#include <linux/drbd_protocol.h>
 #include "drbd_req.h"
 #include "drbd_vli.h"
 #include "drbd_debugfs.h"
 #include "drbd_meta_data.h"
+#include "drbd_legacy_84.h"
 #include "drbd_dax_pmem.h"
 
 static int drbd_open(struct gendisk *gd, blk_mode_t mode);
@@ -60,8 +48,8 @@ static void drbd_release(struct gendisk *gd);
 static void md_sync_timer_fn(struct timer_list *t);
 static int w_bitmap_io(struct drbd_work *w, int unused);
 static int flush_send_buffer(struct drbd_connection *connection, enum drbd_stream drbd_stream);
-static u64 __set_bitmap_slots(struct drbd_device *device, u64 bitmap_uuid, u64 do_nodes) __must_hold(local);
-static u64 __test_bitmap_slots(struct drbd_device *device) __must_hold(local);
+static u64 __set_bitmap_slots(struct drbd_device *device, u64 bitmap_uuid, u64 do_nodes);
+static u64 __test_bitmap_slots(struct drbd_device *device);
 static void drbd_send_ping_ack_wf(struct work_struct *ws);
 static void __net_exit __drbd_net_exit(struct net *net);
 
@@ -133,6 +121,26 @@ static const struct kernel_param_ops param_ops_drbd_protocol_version = {
 
 unsigned int drbd_protocol_version_min = PRO_VERSION_8_MIN;
 module_param_named(protocol_version_min, drbd_protocol_version_min, drbd_protocol_version, 0644);
+
+static int param_set_max_parallel_resyncs(const char *s, const struct kernel_param *kp)
+{
+	int rv = param_set_uint(s, kp);
+
+	if (rv == 0)
+		drbd_apply_resync_max_parallel();
+	return rv;
+}
+
+static const struct kernel_param_ops param_ops_max_parallel_resyncs = {
+	.set = param_set_max_parallel_resyncs,
+	.get = param_get_uint,
+};
+
+unsigned int drbd_max_parallel_resyncs;	/* 0 = unlimited */
+module_param_cb(max_parallel_resyncs, &param_ops_max_parallel_resyncs,
+		&drbd_max_parallel_resyncs, 0644);
+MODULE_PARM_DESC(max_parallel_resyncs,
+	"Cap on volumes resyncing in parallel (0 = unlimited)");
 #define protocol_version_min_desc								\
 	"\n\t\tReject DRBD dialects older than this.\n\t\t"					\
 	"Supported: "										\
@@ -155,7 +163,7 @@ module_param_named(strict_names, drbd_strict_names, drbd_strict_names, 0644);
  * as member "struct gendisk *vdisk;"
  */
 struct idr drbd_devices;
-struct list_head drbd_resources;
+LIST_HEAD(drbd_resources);
 static DEFINE_SPINLOCK(drbd_devices_lock);
 DEFINE_MUTEX(resources_mutex);
 
@@ -166,6 +174,7 @@ struct kmem_cache *drbd_al_ext_cache;	/* activity log extents */
 mempool_t drbd_request_mempool;
 mempool_t drbd_ee_mempool;
 mempool_t drbd_md_io_page_pool;
+mempool_t drbd_buffer_page_pool;
 struct bio_set drbd_md_io_bio_set;
 struct bio_set drbd_io_bio_set;
 
@@ -179,25 +188,6 @@ static const struct block_device_operations drbd_ops = {
 static struct pernet_operations drbd_pernet_ops = {
 	.exit = __drbd_net_exit,
 };
-
-#ifdef __CHECKER__
-/* When checking with sparse, and this is an inline function, sparse will
-   give tons of false positives. When this is a real functions sparse works.
- */
-int _get_ldev_if_state(struct drbd_device *device, enum drbd_disk_state mins)
-{
-	int io_allowed;
-
-	atomic_inc(&device->local_cnt);
-	io_allowed = (device->disk_state[NOW] >= mins);
-	if (!io_allowed) {
-		if (atomic_dec_and_test(&device->local_cnt))
-			wake_up(&device->misc_wait);
-	}
-	return io_allowed;
-}
-
-#endif
 
 struct drbd_connection *__drbd_next_connection_ref(u64 *visited,
 						   struct drbd_connection *connection,
@@ -394,9 +384,8 @@ int tl_release(struct drbd_connection *connection,
 				continue;
 			/* probably a "send_out_of_sync", during Ahead/Behind mode,
 			 * while at least one volume already started to resync again.
-			 * I'd very much prefer these to be in their own epoch,
-			 * or better yet, "simultaneously" go from Ahead/Behind -> SyncSource/SyncTarget
-			 * but that is currently not the case. FIXME.
+			 * Or a write that was not replicated during a resync, and
+			 * replication has been enabled since it was submitted.
 			 */
 			if ((s & RQ_NET_MASK) && !(s & RQ_EXP_BARR_ACK))
 				continue;
@@ -845,12 +834,12 @@ unsigned int drbd_header_size(struct drbd_connection *connection)
 {
 	if (connection->agreed_pro_version >= 100) {
 		BUILD_BUG_ON(!IS_ALIGNED(sizeof(struct p_header100), 8));
-		return sizeof(struct p_header100);
+		return sizeof(struct p_header100); /* 16 */
 	} else {
 		BUILD_BUG_ON(sizeof(struct p_header80) !=
 			     sizeof(struct p_header95));
 		BUILD_BUG_ON(!IS_ALIGNED(sizeof(struct p_header80), 8));
-		return sizeof(struct p_header80);
+		return sizeof(struct p_header80); /* 8 */
 	}
 }
 
@@ -914,14 +903,17 @@ have_page:
 	sbuf->pos = page_address(sbuf->page);
 }
 
-static char *alloc_send_buffer(struct drbd_connection *connection, int size,
+static char * __must_check alloc_send_buffer(struct drbd_connection *connection, int size,
 			       enum drbd_stream drbd_stream)
 {
 	struct drbd_send_buffer *sbuf = &connection->send_buffer[drbd_stream];
 	char *page_start = page_address(sbuf->page);
+	int err;
 
 	if (sbuf->pos - page_start + size > PAGE_SIZE) {
-		flush_send_buffer(connection, drbd_stream);
+		err = flush_send_buffer(connection, drbd_stream);
+		if (err)
+			return ERR_PTR(err);
 		new_or_recycle_send_buffer_page(sbuf);
 	}
 
@@ -929,6 +921,15 @@ static char *alloc_send_buffer(struct drbd_connection *connection, int size,
 	sbuf->additional_size = 0;
 
 	return sbuf->pos;
+}
+
+/* If we called alloc_send_buffer(), possibly indirectly via __conn_prepare_command(),
+ * but then decide that we actually don't want to use it.
+ */
+static void cancel_send_buffer(struct drbd_connection *connection,
+		enum drbd_stream drbd_stream)
+{
+	connection->send_buffer[drbd_stream].allocated_size = 0;
 }
 
 /* Only used the shrink the previously allocated size. */
@@ -952,6 +953,7 @@ void *__conn_prepare_command(struct drbd_connection *connection, int size,
 {
 	struct drbd_transport *transport = &connection->transport;
 	int header_size;
+	void *p;
 
 	if (connection->cstate[NOW] < C_CONNECTING)
 		return NULL;
@@ -960,7 +962,10 @@ void *__conn_prepare_command(struct drbd_connection *connection, int size,
 		return NULL;
 
 	header_size = drbd_header_size(connection);
-	return alloc_send_buffer(connection, header_size + size, drbd_stream) + header_size;
+	p = alloc_send_buffer(connection, header_size + size, drbd_stream);
+	if (IS_ERR(p))
+		return NULL;
+	return p + header_size;
 }
 
 /**
@@ -1033,11 +1038,15 @@ static int flush_send_buffer(struct drbd_connection *connection, enum drbd_strea
 		(sbuf->additional_size ? MSG_MORE : 0);
 	offset = sbuf->unsent - (char *)page_address(sbuf->page);
 	err = tr_ops->send_page(transport, drbd_stream, sbuf->page, offset, size, flags);
-	if (!err) {
-		sbuf->unsent =
-		sbuf->pos += sbuf->allocated_size;      /* send buffer submitted! */
-	}
 
+	/* Advance past this range even when the send failed. send_page() may
+	 * have put part of it on the wire, so it must not be sent a second
+	 * time, and this stream is broken anyway. Retaining it would make
+	 * every later flush retry it and fail again, until the next connect
+	 * re-initializes the buffer.
+	 */
+	sbuf->unsent =
+	sbuf->pos += sbuf->allocated_size;      /* send buffer submitted! */
 	sbuf->allocated_size = 0;
 
 	return err;
@@ -1111,19 +1120,31 @@ void drbd_cork(struct drbd_connection *connection, enum drbd_stream stream)
 	mutex_unlock(&connection->mutex[stream]);
 }
 
-void drbd_uncork(struct drbd_connection *connection, enum drbd_stream stream)
+int drbd_uncork(struct drbd_connection *connection, enum drbd_stream stream)
 {
 	struct drbd_transport *transport = &connection->transport;
 	struct drbd_transport_ops *tr_ops = &transport->class->ops;
+	int err;
 
 	mutex_lock(&connection->mutex[stream]);
-	flush_send_buffer(connection, stream);
+	/* Without a transport there is nothing to flush and nobody to tell.
+	 * Dropping the cork state is all that is left to do, and reporting an
+	 * error would only tell the caller about the connection we already
+	 * know is gone.
+	 */
+	if (connection->cstate[NOW] < C_CONNECTING) {
+		clear_bit(CORKED + stream, &connection->flags);
+		mutex_unlock(&connection->mutex[stream]);
+		return 0;
+	}
 
-	clear_bit(CORKED + stream, &connection->flags);
-	/* only call into transport, if we expect it to work */
-	if (connection->cstate[NOW] >= C_CONNECTING)
+	err = flush_send_buffer(connection, stream);
+	if (!err) {
+		clear_bit(CORKED + stream, &connection->flags);
 		tr_ops->hint(transport, stream, UNCORK);
+	}
 	mutex_unlock(&connection->mutex[stream]);
+	return err;
 }
 
 int send_command(struct drbd_connection *connection, int vnr,
@@ -1151,6 +1172,38 @@ int drbd_send_ping(struct drbd_connection *connection)
 	return send_command(connection, -1, P_PING, CONTROL_STREAM | SFLAG_FLUSH);
 }
 
+/*
+ * send_ping_work and send_ping_ack_work run on global workqueues and do not
+ * otherwise keep the connection alive. Take a connection reference for each
+ * queued instance so the connection cannot be freed while a ping is still
+ * pending or running
+ */
+void drbd_queue_ping(struct drbd_connection *connection)
+{
+	bool queued;
+
+	kref_get(&connection->kref);
+	kref_debug_get(&connection->kref_debug, 19);
+	queued = schedule_work(&connection->send_ping_work);
+	if (!queued) {
+		kref_debug_put(&connection->kref_debug, 19);
+		kref_put(&connection->kref, drbd_destroy_connection);
+	}
+}
+
+void drbd_queue_ping_ack(struct drbd_connection *connection)
+{
+	bool queued;
+
+	kref_get(&connection->kref);
+	kref_debug_get(&connection->kref_debug, 19);
+	queued = queue_work(ping_ack_sender, &connection->send_ping_ack_work);
+	if (!queued) {
+		kref_debug_put(&connection->kref_debug, 19);
+		kref_put(&connection->kref, drbd_destroy_connection);
+	}
+}
+
 void drbd_send_ping_ack_wf(struct work_struct *ws)
 {
 	struct drbd_connection *connection =
@@ -1162,18 +1215,20 @@ void drbd_send_ping_ack_wf(struct work_struct *ws)
 		err = send_command(connection, -1, P_PING_ACK, CONTROL_STREAM | SFLAG_FLUSH);
 	if (err)
 		change_cstate(connection, C_NETWORK_FAILURE, CS_HARD);
+
+	kref_debug_put(&connection->kref_debug, 19);
+	kref_put(&connection->kref, drbd_destroy_connection);
 }
 
-int drbd_send_peer_ack(struct drbd_connection *connection,
-		struct drbd_peer_ack *peer_ack)
+int drbd_send_peer_ack(struct drbd_connection *connection, u64 mask, u64 dagtag_sector)
 {
 	struct p_peer_ack *p;
 
 	p = conn_prepare_command(connection, sizeof(*p), CONTROL_STREAM);
 	if (!p)
 		return -EIO;
-	p->mask = cpu_to_be64(peer_ack->mask);
-	p->dagtag = cpu_to_be64(peer_ack->dagtag_sector);
+	p->mask = cpu_to_be64(mask);
+	p->dagtag = cpu_to_be64(dagtag_sector);
 
 	return send_command(connection, -1, P_PEER_ACK, CONTROL_STREAM);
 }
@@ -1181,7 +1236,7 @@ int drbd_send_peer_ack(struct drbd_connection *connection,
 int drbd_send_sync_param(struct drbd_peer_device *peer_device)
 {
 	struct p_rs_param_95 *p;
-	int size;
+	int size, err;
 	const int apv = peer_device->connection->agreed_pro_version;
 	enum drbd_packet cmd;
 	struct net_conf *nc;
@@ -1236,7 +1291,23 @@ int drbd_send_sync_param(struct drbd_peer_device *peer_device)
 		strcpy(p->csums_alg, nc->csums_alg);
 	rcu_read_unlock();
 
-	return drbd_send_command(peer_device, cmd, DATA_STREAM);
+	err = drbd_send_command(peer_device, cmd, DATA_STREAM);
+
+	/* A peer with established replication adopts the verify-alg we
+	 * advertise, see receive_SyncParam(). Keep our record of the peer's
+	 * algorithm current. Must not be called with conf_update held.
+	 */
+	if (!err && apv >= 88 && peer_device->repl_state[NOW] != L_OFF) {
+		struct drbd_connection *connection = peer_device->connection;
+
+		mutex_lock(&connection->resource->conf_update);
+		nc = connection->transport.net_conf;
+		strscpy(connection->peer_verify_alg, nc->verify_alg,
+			sizeof(connection->peer_verify_alg));
+		mutex_unlock(&connection->resource->conf_update);
+	}
+
+	return err;
 }
 
 int __drbd_send_protocol(struct drbd_connection *connection, enum drbd_packet cmd)
@@ -1284,17 +1355,6 @@ int __drbd_send_protocol(struct drbd_connection *connection, enum drbd_packet cm
 	return __send_command(connection, -1, cmd, DATA_STREAM);
 }
 
-int drbd_send_protocol(struct drbd_connection *connection)
-{
-	int err;
-
-	mutex_lock(&connection->mutex[DATA_STREAM]);
-	err = __drbd_send_protocol(connection, P_PROTOCOL);
-	mutex_unlock(&connection->mutex[DATA_STREAM]);
-
-	return err;
-}
-
 static int _drbd_send_uuids(struct drbd_peer_device *peer_device, u64 uuid_flags)
 {
 	struct drbd_device *device = peer_device->device;
@@ -1320,7 +1380,7 @@ static int _drbd_send_uuids(struct drbd_peer_device *peer_device, u64 uuid_flags
 	peer_device->comm_bm_set = drbd_bm_total_weight(peer_device);
 	p->dirty_bits = cpu_to_be64(peer_device->comm_bm_set);
 
-	if (test_bit(DISCARD_MY_DATA, &peer_device->flags))
+	if (test_bit(DISCARD_MY_DATA, peer_device->flags))
 		uuid_flags |= UUID_FLAG_DISCARD_MY_DATA;
 	if (test_bit(CRASHED_PRIMARY, &device->flags))
 		uuid_flags |= UUID_FLAG_CRASHED_PRIMARY;
@@ -1340,7 +1400,7 @@ static int _drbd_send_uuids(struct drbd_peer_device *peer_device, u64 uuid_flags
 	return drbd_send_command(peer_device, P_UUIDS, DATA_STREAM);
 }
 
-static u64 __bitmap_uuid(struct drbd_device *device, int node_id) __must_hold(local)
+static u64 __bitmap_uuid(struct drbd_device *device, int node_id)
 {
 	struct drbd_peer_device *peer_device;
 	struct drbd_peer_md *peer_md = device->ldev->md.peers;
@@ -1381,7 +1441,7 @@ u64 drbd_collect_local_uuid_flags(struct drbd_peer_device *peer_device, u64 *aut
 	struct drbd_device *device = peer_device->device;
 	u64 uuid_flags = 0;
 
-	if (test_bit(DISCARD_MY_DATA, &peer_device->flags))
+	if (test_bit(DISCARD_MY_DATA, peer_device->flags))
 		uuid_flags |= UUID_FLAG_DISCARD_MY_DATA;
 	if (test_bit(CRASHED_PRIMARY, &device->flags))
 		uuid_flags |= UUID_FLAG_CRASHED_PRIMARY;
@@ -1393,6 +1453,9 @@ u64 drbd_collect_local_uuid_flags(struct drbd_peer_device *peer_device, u64 *aut
 		uuid_flags |= UUID_FLAG_PRIMARY_LOST_QUORUM;
 	if (drbd_device_stable(device, authoritative_mask))
 		uuid_flags |= UUID_FLAG_STABLE;
+	if (peer_device->connection->agreed_pro_version >= 125 &&
+	    drbd_bitmap_slot_decides(peer_device))
+		uuid_flags |= UUID_FLAG_BITMAP_AUTHORITATIVE;
 
 	return uuid_flags;
 }
@@ -1432,7 +1495,8 @@ static int _drbd_send_uuids110(struct drbd_peer_device *peer_device, u64 uuid_fl
 	int p_size = sizeof(*p);
 
 	if (!get_ldev_if_state(device, D_NEGOTIATING))
-		return drbd_send_current_uuid(peer_device, device->exposed_data_uuid,
+		return drbd_send_current_uuid(peer_device,
+					      diskless_primary_present_current_uuid(peer_device),
 					      drbd_weak_nodes_device(device));
 
 	peer_md = device->ldev->md.peers;
@@ -1448,10 +1512,13 @@ static int _drbd_send_uuids110(struct drbd_peer_device *peer_device, u64 uuid_fl
 	peer_device->comm_current_uuid = drbd_resolved_uuid(peer_device, &local_uuid_flags);
 	p->current_uuid = cpu_to_be64(peer_device->comm_current_uuid);
 
-	sent_one_unallocated = peer_device->connection->agreed_pro_version < 116;
+	/* advertise an unallocated day0 bitmap slot only if we actually have one */
+	sent_one_unallocated = peer_device->connection->agreed_pro_version < 116 ||
+		drbd_unallocated_index(device->ldev) == -1;
 	for (i = 0; i < DRBD_NODE_ID_MAX; i++) {
 		u64 val = __bitmap_uuid(device, i);
-		bool send_this = peer_md[i].flags & (MDF_HAVE_BITMAP | MDF_NODE_EXISTS);
+		bool send_this = test_bit(__MDF_HAVE_BITMAP, &peer_md[i].flags) ||
+			test_bit(__MDF_NODE_EXISTS, &peer_md[i].flags);
 		if (!send_this && !sent_one_unallocated &&
 		    i != my_node_id && i != peer_device->node_id && val) {
 			send_this = true;
@@ -1548,7 +1615,7 @@ void drbd_gen_and_send_sync_uuid(struct drbd_peer_device *peer_device)
 	if (uuid && uuid != UUID_JUST_CREATED)
 		uuid = uuid + UUID_NEW_BM_OFFSET;
 	else
-		get_random_bytes(&uuid, sizeof(u64));
+		uuid = get_random_u64();
 	drbd_uuid_set_bitmap(peer_device, uuid);
 	drbd_print_uuids(peer_device, "updated sync UUID");
 	drbd_md_sync(device);
@@ -1603,6 +1670,9 @@ int drbd_send_sizes(struct drbd_peer_device *peer_device,
 		p->qlim->io_opt = cpu_to_be32(bdev_io_opt(bdev));
 		p->qlim->discard_enabled = !!bdev_max_discard_sectors(bdev);
 		p->qlim->write_same_capable = 0;
+		if (connection->agreed_features & DRBD_FF_BM_BLOCK_SHIFT)
+			p->qlim->bm_block_shift_minus_12 =
+				device->bitmap->bm_block_shift - BM_BLOCK_SHIFT_4k;
 		put_ldev(device);
 	} else {
 		struct request_queue *q = device->rq_queue;
@@ -1829,6 +1899,93 @@ int drbd_send_peer_dagtag(struct drbd_connection *connection, struct drbd_connec
 	return send_command(connection, -1, P_PEER_DAGTAG, DATA_STREAM);
 }
 
+int drbd_send_flush_requests(struct drbd_connection *connection, u64 flush_sequence)
+{
+	struct p_flush_requests *p;
+
+	p = conn_prepare_command(connection, sizeof(*p), DATA_STREAM);
+	if (!p)
+		return -EIO;
+
+	p->flush_sequence = cpu_to_be64(flush_sequence);
+
+	return send_command(connection, -1, P_FLUSH_REQUESTS, DATA_STREAM);
+}
+
+int drbd_send_flush_forward(struct drbd_connection *connection, u64 flush_sequence,
+		int initiator_node_id)
+{
+	struct p_flush_forward *p;
+
+	p = conn_prepare_command(connection, sizeof(*p), CONTROL_STREAM);
+	if (!p)
+		return -EIO;
+
+	p->flush_sequence = cpu_to_be64(flush_sequence);
+	p->initiator_node_id = cpu_to_be32(initiator_node_id);
+
+	return send_command(connection, -1, P_FLUSH_FORWARD, CONTROL_STREAM);
+}
+
+int drbd_send_flush_requests_ack(struct drbd_connection *connection, u64 flush_sequence,
+		int primary_node_id)
+{
+	struct p_flush_ack *p;
+
+	p = conn_prepare_command(connection, sizeof(*p), DATA_STREAM);
+	if (!p)
+		return -EIO;
+
+	p->flush_sequence = cpu_to_be64(flush_sequence);
+	p->primary_node_id = cpu_to_be32(primary_node_id);
+
+	return send_command(connection, -1, P_FLUSH_REQUESTS_ACK, DATA_STREAM);
+}
+
+int drbd_send_enable_replication_next(struct drbd_peer_device *peer_device)
+{
+	struct p_enable_replication *p;
+	struct peer_device_conf *pdc;
+	bool resync_without_replication;
+
+	set_bit(PEER_REPLICATION_NEXT, peer_device->flags);
+	if (!(peer_device->connection->agreed_features & DRBD_FF_RESYNC_WITHOUT_REPLICATION))
+		return 0;
+
+	p = drbd_prepare_command(peer_device, sizeof(*p), DATA_STREAM);
+	if (!p)
+		return -EIO;
+
+	rcu_read_lock();
+	pdc = rcu_dereference(peer_device->conf);
+	resync_without_replication = pdc->resync_without_replication;
+	rcu_read_unlock();
+
+	if (resync_without_replication)
+		clear_bit(PEER_REPLICATION_NEXT, peer_device->flags);
+
+	p->enable = !resync_without_replication;
+	p->_pad1 = 0;
+	p->_pad2 = 0;
+
+	return drbd_send_command(peer_device, P_ENABLE_REPLICATION_NEXT, DATA_STREAM);
+}
+
+int drbd_send_enable_replication(struct drbd_peer_device *peer_device, bool enable)
+{
+	struct p_enable_replication *p;
+
+	p = drbd_prepare_command(peer_device, sizeof(*p), DATA_STREAM);
+	if (!p)
+		return -EIO;
+
+	p->enable = enable;
+	p->_pad1 = 0;
+	p->_pad2 = 0;
+
+	return drbd_send_command(peer_device, P_ENABLE_REPLICATION, DATA_STREAM);
+}
+
 static void dcbp_set_code(struct p_compressed_bm *p, enum drbd_bitmap_code code)
 {
 	BUG_ON(code & ~0xf);
@@ -1846,6 +2003,9 @@ static void dcbp_set_pad_bits(struct p_compressed_bm *p, int n)
 	p->encoding = (p->encoding & (~0x7 << 4)) | (n << 4);
 }
 
+/* For compat reasons, encode bitmap as if it was 4k per bit!
+ * Easy: just scale the run length.
+ */
 static int fill_bitmap_rle_bits(struct drbd_peer_device *peer_device,
 				struct p_compressed_bm *p,
 				unsigned int size,
@@ -1855,6 +2015,7 @@ static int fill_bitmap_rle_bits(struct drbd_peer_device *peer_device,
 	unsigned long plain_bits;
 	unsigned long tmp;
 	unsigned long rl;
+	unsigned long rl_4k;
 	unsigned len;
 	unsigned toggle;
 	int bits, use_rle;
@@ -1885,9 +2046,14 @@ static int fill_bitmap_rle_bits(struct drbd_peer_device *peer_device,
 	do {
 		tmp = (toggle == 0) ? _drbd_bm_find_next_zero(peer_device, c->bit_offset)
 				    : _drbd_bm_find_next(peer_device, c->bit_offset);
-		if (tmp == -1UL)
+		if (tmp == -1UL) {
 			tmp = c->bm_bits;
-		rl = tmp - c->bit_offset;
+			rl = tmp - c->bit_offset;
+			rl_4k = c->bm_bits_4k - (c->bit_offset << c->scale);
+		} else {
+			rl = tmp - c->bit_offset;
+			rl_4k = rl << c->scale;
+		}
 
 		if (toggle == 2) { /* first iteration */
 			if (rl == 0) {
@@ -1909,7 +2075,7 @@ static int fill_bitmap_rle_bits(struct drbd_peer_device *peer_device,
 			return -1;
 		}
 
-		bits = vli_encode_bits(&bs, rl);
+		bits = vli_encode_bits(&bs, rl_4k);
 		if (bits == -ENOBUFS) /* buffer full */
 			break;
 		if (bits <= 0) {
@@ -1924,7 +2090,7 @@ static int fill_bitmap_rle_bits(struct drbd_peer_device *peer_device,
 
 	len = bs.cur.b - p->code + !!bs.cur.bit;
 
-	if (plain_bits < (len << 3)) {
+	if (plain_bits << c->scale < (len << 3)) {
 		/* incompressible with this method.
 		 * we need to rewind both word and bit position. */
 		c->bit_offset -= plain_bits;
@@ -1943,11 +2109,39 @@ static int fill_bitmap_rle_bits(struct drbd_peer_device *peer_device,
 	return len;
 }
 
+/* Repeat extracted bits by "peeling off" words from the end.
+ * scale != 0 implies that repeat >= 2.
+ * Feel free to optimize ...
+ */
+static void repeat_bits(unsigned long *base, unsigned long num, unsigned int scale)
+{
+	unsigned long *src, *dst;
+	unsigned int repeat = 1 << scale;
+	unsigned int n;
+	int sbit, dbit, i;
+
+	for (n = num - 1; n > 0; n--) {
+		src = &base[n];
+		for (i = 0; i < repeat; i++) {
+			dst = &base[n*repeat + i];
+			*dst = 0;
+			for (dbit = 0; dbit < BITS_PER_LONG; dbit++) {
+				sbit = (i * BITS_PER_LONG + dbit) >> scale;
+				if (test_bit(sbit, src))
+					*dst |= 1UL << dbit;
+			}
+		}
+	}
+}
+
 /*
  * send_bitmap_rle_or_plain
  *
  * Return 0 when done, 1 when another iteration is needed, and a negative error
  * code upon failure.
+ *
+ * For compat reasons, send bitmap as if it was 4k per bit!
+ * Good thing that a "scaled" bitmap will always "compress".
  */
 static int
 send_bitmap_rle_or_plain(struct drbd_peer_device *peer_device, struct bm_xfer_ctx *c)
@@ -1955,15 +2149,21 @@ send_bitmap_rle_or_plain(struct drbd_peer_device *peer_device, struct bm_xfer_ct
 	struct drbd_device *device = peer_device->device;
 	unsigned int header_size = drbd_header_size(peer_device->connection);
 	struct p_compressed_bm *pc;
+	char *p;
 	int len, err;
 
-	pc = (struct p_compressed_bm *)
-		(alloc_send_buffer(peer_device->connection, DRBD_SOCKET_BUFFER_SIZE, DATA_STREAM) + header_size);
+	p = alloc_send_buffer(peer_device->connection, DRBD_SOCKET_BUFFER_SIZE, DATA_STREAM);
+	if (IS_ERR(p))
+		return -EIO;
+
+	pc = (struct p_compressed_bm *)(p + header_size);
 
 	len = fill_bitmap_rle_bits(peer_device, pc,
 			DRBD_SOCKET_BUFFER_SIZE - header_size - sizeof(*pc), c);
-	if (len < 0)
+	if (len < 0) {
+		cancel_send_buffer(peer_device->connection, DATA_STREAM);
 		return -EIO;
+	}
 
 	if (len) {
 		dcbp_set_code(pc, RLE_VLI_Bits);
@@ -1980,14 +2180,36 @@ send_bitmap_rle_or_plain(struct drbd_peer_device *peer_device, struct bm_xfer_ct
 		 * send a buffer full of plain text bits instead. */
 		unsigned int data_size;
 		unsigned long num_words;
+		unsigned long words_left = c->bm_words - c->word_offset;
 		unsigned long *pu = (unsigned long *)pc;
 
+		/* Only send full native bitmap words (actual granularity),
+		 * scaled to what they would look like at 4k granularity.
+		 * At maximum scale, which is (20 - 12), factor 256,
+		 * to transfer at least one word of unscaled bitmap,
+		 * we need data_size >= 256 (unsigned long) words,
+		 * that is >= 2048 byte. Which we always have.
+		 */
 		data_size = DRBD_SOCKET_BUFFER_SIZE - header_size;
-		num_words = min_t(size_t, data_size / sizeof(*pu),
-				  c->bm_words - c->word_offset);
+		data_size = ALIGN_DOWN(data_size, sizeof(*pu) * (1UL << c->scale));
+		num_words = (data_size / sizeof(*pu)) >> c->scale;
+		num_words = min_t(size_t, num_words, words_left);
+
 		len = num_words * sizeof(*pu);
-		if (len)
+		if (len) {
 			drbd_bm_get_lel(peer_device, c->word_offset, num_words, pu);
+
+			if (c->scale) {
+				repeat_bits(pu, num_words, c->scale);
+				len <<= c->scale;
+			}
+		} else if (words_left != 0) {
+			drbd_err(peer_device,
+				"failed to scale %lu words by %u while sending bitmap\n",
+				words_left, c->scale);
+			cancel_send_buffer(peer_device->connection, DATA_STREAM);
+			return -ERANGE;
+		}
 
 		resize_prepared_command(peer_device->connection, DATA_STREAM, len);
 		err = __send_command(peer_device->connection, device->vnr, P_BITMAP, DATA_STREAM);
@@ -2012,17 +2234,14 @@ send_bitmap_rle_or_plain(struct drbd_peer_device *peer_device, struct bm_xfer_ct
 }
 
 /* See the comment at receive_bitmap() */
-static int _drbd_send_bitmap(struct drbd_device *device,
+static bool _drbd_send_bitmap(struct drbd_device *device,
 			     struct drbd_peer_device *peer_device)
 {
 	struct bm_xfer_ctx c;
-	int err;
-
-	if (!expect(device, device->bitmap))
-		return false;
+	int res;
 
 	if (get_ldev(device)) {
-		if (drbd_md_test_peer_flag(peer_device, MDF_PEER_FULL_SYNC)) {
+		if (drbd_md_test_peer_flag(peer_device, __MDF_PEER_FULL_SYNC)) {
 			drbd_info(device, "Writing the whole bitmap, MDF_FullSync was set.\n");
 			drbd_bm_set_many_bits(peer_device, 0, -1UL);
 			if (drbd_bm_write(device, NULL)) {
@@ -2031,23 +2250,32 @@ static int _drbd_send_bitmap(struct drbd_device *device,
 				 * side that a full resync is required! */
 				drbd_err(device, "Failed to write bitmap to disk!\n");
 			} else {
-				drbd_md_clear_peer_flag(peer_device, MDF_PEER_FULL_SYNC);
+				drbd_md_clear_peer_flag(peer_device, __MDF_PEER_FULL_SYNC);
 				drbd_md_sync(device);
 			}
 		}
+		c = (struct bm_xfer_ctx) {
+			.bm_bits_4k = drbd_bm_bits_4k(device),
+			.bm_bits = drbd_bm_bits(device),
+			.bm_words = drbd_bm_words(device),
+			.scale = device->bitmap->bm_block_shift - BM_BLOCK_SHIFT_4k,
+		};
+
 		put_ldev(device);
+	} else {
+		return false;
 	}
 
-	c = (struct bm_xfer_ctx) {
-		.bm_bits = drbd_bm_bits(device),
-		.bm_words = drbd_bm_words(device),
-	};
-
 	do {
-		err = send_bitmap_rle_or_plain(peer_device, &c);
-	} while (err > 0);
+		if (get_ldev(device)) {
+			res = send_bitmap_rle_or_plain(peer_device, &c);
+			put_ldev(device);
+		} else {
+			return false;
+		}
+	} while (res > 0);
 
-	return err == 0;
+	return res == 0;
 }
 
 int drbd_send_bitmap(struct drbd_device *device, struct drbd_peer_device *peer_device)
@@ -2117,7 +2345,8 @@ static void *drbd_prepare_rs_req(struct drbd_peer_device *peer_device, enum drbd
 	struct p_block_req_common *req_common;
 
 	if (cmd == P_RS_DAGTAG_REQ || cmd == P_RS_CSUM_DAGTAG_REQ || cmd == P_RS_THIN_DAGTAG_REQ ||
-			cmd == P_OV_DAGTAG_REQ || cmd == P_OV_DAGTAG_REPLY) {
+			cmd == P_OV_DAGTAG_REQ || cmd == P_OV_DAGTAG_REPLY ||
+			cmd == P_RS_DAGTAG_WAIT_REQ) {
 		struct p_rs_req *p;
 		/* Due to the slightly complicated nested struct definition,
 		 * verify that the packet size is as expected. */
@@ -2168,156 +2397,67 @@ void *drbd_prepare_drequest_csum(struct drbd_peer_request *peer_req, enum drbd_p
 			dagtag_node_id, dagtag);
 }
 
-/* The idea of sendpage seems to be to put some kind of reference
- * to the page into the skb, and to hand it over to the NIC. In
- * this process get_page() gets called.
- *
- * As soon as the page was really sent over the network put_page()
- * gets called by some part of the network layer. [ NIC driver? ]
- *
- * [ get_page() / put_page() increment/decrement the count. If count
- *   reaches 0 the page will be freed. ]
- *
- * This works nicely with pages from FSs.
- * But this means that in protocol A we might signal IO completion too early!
- *
- * In order not to corrupt data during a resync we must make sure
- * that we do not reuse our own buffer pages (EEs) to early, therefore
- * we have the net_ee list.
- *
- * XFS seems to have problems, still, it submits pages with page_count == 0!
- * As a workaround, we disable sendpage on pages
- * with page_count == 0 or PageSlab.
- */
-static int _drbd_send_page(struct drbd_peer_device *peer_device, struct page *page,
-			    int offset, size_t size, unsigned msg_flags)
+
+static int __send_bio(struct drbd_peer_device *peer_device, struct bio *bio, unsigned int msg_flags)
 {
 	struct drbd_connection *connection = peer_device->connection;
 	struct drbd_transport *transport = &connection->transport;
 	struct drbd_transport_ops *tr_ops = &transport->class->ops;
 	int err;
 
-	err = tr_ops->send_page(transport, DATA_STREAM, page, offset, size, msg_flags);
-	if (!err)
-		peer_device->send_cnt += size >> 9;
-
-	return err;
-}
-
-static int _drbd_no_send_page(struct drbd_peer_device *peer_device, struct page *page,
-			      int offset, size_t size, unsigned msg_flags)
-{
-	struct drbd_connection *connection = peer_device->connection;
-	struct drbd_send_buffer *sbuf = &connection->send_buffer[DATA_STREAM];
-	char *from_base;
-	void *buffer2;
-	int err;
-
-	buffer2 = alloc_send_buffer(connection, size, DATA_STREAM);
-	from_base = kmap_atomic(page);
-	memcpy(buffer2, from_base + offset, size);
-	kunmap_atomic(from_base);
-
-	if (msg_flags & MSG_MORE) {
-		sbuf->pos += sbuf->allocated_size;
-		sbuf->allocated_size = 0;
-		err = 0;
-	} else {
-		err = flush_send_buffer(connection, DATA_STREAM);
+	err = flush_send_buffer(connection, DATA_STREAM);
+	if (!err) {
+		err = tr_ops->send_bio(transport, bio, msg_flags);
+		if (!err)
+			peer_device->send_cnt += bio->bi_iter.bi_size >> 9;
 	}
 
 	return err;
 }
 
-static int _drbd_send_bio(struct drbd_peer_device *peer_device, struct bio *bio)
+/* sendmsg(MSG_SPLICE_PAGES) (former (sendpage()) increases the page ref_count
+ * and hands it to the network stack. After the NIC DMA sends the data, it
+ * decreases that page's ref_count.
+ * We may not do this for protocol A, where we could complete a write operation
+ * before the network stack sends the data.
+ */
+static int
+drbd_send_bio(struct drbd_peer_device *peer_device, struct bio *bio, unsigned int msg_flags)
 {
-	struct drbd_connection *connection = peer_device->connection;
-	struct bio_vec bvec;
-	struct bvec_iter iter;
+	if (drbd_disable_sendpage)
+		msg_flags &= ~MSG_SPLICE_PAGES;
 
-	/* Flush send buffer and make sure PAGE_SIZE is available... */
-	alloc_send_buffer(connection, PAGE_SIZE, DATA_STREAM);
-	connection->send_buffer[DATA_STREAM].allocated_size = 0;
+	/* e.g. XFS meta- & log-data is in slab pages have !sendpage_ok(page) */
+	if (msg_flags & MSG_SPLICE_PAGES) {
+		struct bvec_iter iter;
+		struct bio_vec bvec;
 
-	/* hint all but last page with MSG_MORE */
-	bio_for_each_segment(bvec, bio, iter) {
-		int err;
-
-		err = _drbd_no_send_page(peer_device, bvec.bv_page,
-					 bvec.bv_offset, bvec.bv_len,
-					 bio_iter_last(bvec, iter) ? 0 : MSG_MORE);
-		if (err)
-			return err;
-
-		peer_device->send_cnt += bvec.bv_len >> 9;
-	}
-	return 0;
-}
-
-static int _drbd_send_zc_bio(struct drbd_peer_device *peer_device, struct bio *bio)
-{
-	struct bio_vec bvec;
-	struct bvec_iter iter;
-	bool no_zc = drbd_disable_sendpage;
-
-	/* e.g. XFS meta- & log-data is in slab pages, which have a
-	 * page_count of 0 and/or have PageSlab() set.
-	 * we cannot use send_page for those, as that does get_page();
-	 * put_page(); and would cause either a VM_BUG directly, or
-	 * __page_cache_release a page that would actually still be referenced
-	 * by someone, leading to some obscure delayed Oops somewhere else. */
-	if (!no_zc)
 		bio_for_each_segment(bvec, bio, iter) {
 			struct page *page = bvec.bv_page;
 
 			if (!sendpage_ok(page)) {
-				no_zc = true;
+				msg_flags &= ~MSG_SPLICE_PAGES;
 				break;
 			}
 		}
-
-	if (no_zc) {
-		return _drbd_send_bio(peer_device, bio);
-	} else {
-		struct drbd_connection *connection = peer_device->connection;
-		struct drbd_transport *transport = &connection->transport;
-		struct drbd_transport_ops *tr_ops = &transport->class->ops;
-		int err;
-
-		flush_send_buffer(connection, DATA_STREAM);
-
-		err = tr_ops->send_zc_bio(transport, bio);
-		if (!err)
-			peer_device->send_cnt += bio->bi_iter.bi_size >> 9;
-
-		return err;
 	}
+
+	return __send_bio(peer_device, bio, msg_flags);
 }
 
-static int _drbd_send_zc_ee(struct drbd_peer_device *peer_device,
-			    struct drbd_peer_request *peer_req)
+static int drbd_send_ee(struct drbd_peer_device *peer_device, struct drbd_peer_request *peer_req)
 {
-	struct page *page = peer_req->page_chain.head;
-	unsigned len = peer_req->i.size;
-	int err;
+	struct bio *bio;
+	int err = 0;
 
-	flush_send_buffer(peer_device->connection, DATA_STREAM);
-	/* hint all but last page with MSG_MORE */
-	page_chain_for_each(page) {
-		unsigned l = min_t(unsigned, len, PAGE_SIZE);
-		if (page_chain_offset(page) != 0 ||
-		    page_chain_size(page) != l) {
-			drbd_err(peer_device, "FIXME page %p offset %u len %u\n",
-				page, page_chain_offset(page), page_chain_size(page));
-		}
-
-		err = _drbd_send_page(peer_device, page, 0, l,
-				      page_chain_next(page) ? MSG_MORE : 0);
+	bio_list_for_each(bio, &peer_req->bios) {
+		err = __send_bio(peer_device, bio,
+				 peer_req->flags & EE_RELEASE_TO_MEMPOOL ? 0 : MSG_SPLICE_PAGES);
 		if (err)
-			return err;
-		len -= l;
+			break;
 	}
-	return 0;
+
+	return err;
 }
 
 /* see also wire_flags_to_bio() */
@@ -2344,8 +2484,9 @@ static u32 bio_flags_to_wire(struct drbd_connection *connection, struct bio *bio
 int drbd_send_dblock(struct drbd_peer_device *peer_device, struct drbd_request *req)
 {
 	struct drbd_device *device = peer_device->device;
-	char *const before = peer_device->connection->scratch_buffer.d.before;
-	char *const after = peer_device->connection->scratch_buffer.d.after;
+	struct drbd_connection *connection = peer_device->connection;
+	char *const before = connection->scratch_buffer.d.before;
+	char *const after = connection->scratch_buffer.d.after;
 	struct p_trim *trim = NULL;
 	struct p_data *p;
 	void *digest_out = NULL;
@@ -2362,8 +2503,8 @@ int drbd_send_dblock(struct drbd_peer_device *peer_device, struct drbd_request *
 		p = &trim->p_data;
 		trim->size = cpu_to_be32(req->i.size);
 	} else {
-		if (peer_device->connection->integrity_tfm)
-			digest_size = crypto_shash_digestsize(peer_device->connection->integrity_tfm);
+		if (connection->integrity_tfm)
+			digest_size = crypto_shash_digestsize(connection->integrity_tfm);
 
 		p = drbd_prepare_command(peer_device, sizeof(*p) + digest_size, DATA_STREAM);
 		if (!p)
@@ -2374,10 +2515,10 @@ int drbd_send_dblock(struct drbd_peer_device *peer_device, struct drbd_request *
 	p->sector = cpu_to_be64(req->i.sector);
 	p->block_id = (unsigned long)req;
 	p->seq_num = cpu_to_be32(atomic_inc_return(&peer_device->packet_seq));
-	dp_flags = bio_flags_to_wire(peer_device->connection, req->master_bio);
+	dp_flags = bio_flags_to_wire(connection, req->master_bio);
 	if (peer_device->repl_state[NOW] >= L_SYNC_SOURCE && peer_device->repl_state[NOW] <= L_PAUSED_SYNC_T)
 		dp_flags |= DP_MAY_SET_IN_SYNC;
-	if (peer_device->connection->agreed_pro_version >= 100) {
+	if (connection->agreed_pro_version >= 100) {
 		if (s & RQ_EXP_RECEIVE_ACK)
 			dp_flags |= DP_SEND_RECEIVE_ACK;
 		if (s & RQ_EXP_WRITE_ACK || dp_flags & DP_MAY_SET_IN_SYNC)
@@ -2386,19 +2527,19 @@ int drbd_send_dblock(struct drbd_peer_device *peer_device, struct drbd_request *
 	p->dp_flags = cpu_to_be32(dp_flags);
 
 	if (trim) {
-		err = __send_command(peer_device->connection, device->vnr,
+		err = __send_command(connection, device->vnr,
 				(dp_flags & DP_ZEROES) ? P_ZEROES : P_TRIM, DATA_STREAM);
 		goto out;
 	}
 
 	if (digest_size && digest_out) {
-		BUG_ON(digest_size > sizeof(peer_device->connection->scratch_buffer.d.before));
-		drbd_csum_bio(peer_device->connection->integrity_tfm, req->master_bio, before);
+		WARN_ON(digest_size > sizeof(connection->scratch_buffer.d.before));
+		drbd_csum_bio(connection->integrity_tfm, req->master_bio, before);
 		memcpy(digest_out, before, digest_size);
 	}
 
-	additional_size_command(peer_device->connection, DATA_STREAM, req->i.size);
-	err = __send_command(peer_device->connection, device->vnr, P_DATA, DATA_STREAM);
+	additional_size_command(connection, DATA_STREAM, req->i.size);
+	err = __send_command(connection, device->vnr, P_DATA, DATA_STREAM);
 	if (!err) {
 		/* For protocol A, we have to memcpy the payload into
 		 * socket buffers, as we may complete right away
@@ -2411,14 +2552,14 @@ int drbd_send_dblock(struct drbd_peer_device *peer_device, struct drbd_request *
 		 * out ok after sending on this side, but does not fit on the
 		 * receiving side, we sure have detected corruption elsewhere.
 		 */
-		if (!(s & (RQ_EXP_RECEIVE_ACK | RQ_EXP_WRITE_ACK)) || digest_size)
-			err = _drbd_send_bio(peer_device, req->master_bio);
-		else
-			err = _drbd_send_zc_bio(peer_device, req->master_bio);
+		bool proto_b_or_c = (s & (RQ_EXP_RECEIVE_ACK | RQ_EXP_WRITE_ACK));
+		int msg_flags =  proto_b_or_c && !digest_size ? MSG_SPLICE_PAGES : 0;
+
+		err = drbd_send_bio(peer_device, req->master_bio, msg_flags);
 
 		/* double check digest, sometimes buffers have been modified in flight. */
 		if (digest_size > 0) {
-			drbd_csum_bio(peer_device->connection->integrity_tfm, req->master_bio, after);
+			drbd_csum_bio(connection->integrity_tfm, req->master_bio, after);
 			if (memcmp(before, after, digest_size)) {
 				drbd_warn(device,
 					"Digest mismatch, buffer modified by upper layers during write: %llus +%u\n",
@@ -2427,7 +2568,7 @@ int drbd_send_dblock(struct drbd_peer_device *peer_device, struct drbd_request *
 		}
 	}
 out:
-	mutex_unlock(&peer_device->connection->mutex[DATA_STREAM]);
+	mutex_unlock(&connection->mutex[DATA_STREAM]);
 
 	return err;
 }
@@ -2439,12 +2580,13 @@ out:
 int drbd_send_block(struct drbd_peer_device *peer_device, enum drbd_packet cmd,
 		    struct drbd_peer_request *peer_req)
 {
+	struct drbd_connection *connection = peer_device->connection;
 	struct p_data *p;
 	int err;
 	int digest_size;
 
-	digest_size = peer_device->connection->integrity_tfm ?
-		      crypto_shash_digestsize(peer_device->connection->integrity_tfm) : 0;
+	digest_size = connection->integrity_tfm ?
+		      crypto_shash_digestsize(connection->integrity_tfm) : 0;
 
 	p = drbd_prepare_command(peer_device, sizeof(*p) + digest_size, DATA_STREAM);
 
@@ -2456,17 +2598,17 @@ int drbd_send_block(struct drbd_peer_device *peer_device, enum drbd_packet cmd,
 	p->dp_flags = 0;
 
 	/* Older peers expect block_id for P_RS_DATA_REPLY to be ID_SYNCER. */
-	if (peer_device->connection->agreed_pro_version < 122 && cmd == P_RS_DATA_REPLY)
+	if (connection->agreed_pro_version < 122 && cmd == P_RS_DATA_REPLY)
 		p->block_id = ID_SYNCER;
 
 	if (digest_size)
-		drbd_csum_pages(peer_device->connection->integrity_tfm, peer_req->page_chain.head, p + 1);
-	additional_size_command(peer_device->connection, DATA_STREAM, peer_req->i.size);
-	err = __send_command(peer_device->connection,
+		drbd_csum_bios(connection->integrity_tfm, &peer_req->bios, p + 1);
+	additional_size_command(connection, DATA_STREAM, peer_req->i.size);
+	err = __send_command(connection,
 			     peer_device->device->vnr, cmd, DATA_STREAM);
 	if (!err)
-		err = _drbd_send_zc_ee(peer_device, peer_req);
-	mutex_unlock(&peer_device->connection->mutex[DATA_STREAM]);
+		err = drbd_send_ee(peer_device, peer_req);
+	mutex_unlock(&connection->mutex[DATA_STREAM]);
 
 	return err;
 }
@@ -2743,7 +2885,7 @@ static void add_opener(struct drbd_device *device, bool did_auto_promote)
 		resource->auto_promoted_by.opened = now;
 		get_task_comm(resource->auto_promoted_by.comm, current);
 	}
-	opener = kmalloc(sizeof(*opener), GFP_NOIO);
+	opener = kmalloc_obj(*opener, GFP_NOIO);
 	if (!opener)
 		return;
 	get_task_comm(opener->comm, current);
@@ -2906,8 +3048,8 @@ restart:
 	rcu_read_lock();
 	idr_for_each_entry(&resource->devices, device, vnr) {
 		for_each_peer_device_rcu(peer_device, device) {
-			if (test_bit(GOT_NEG_ACK, &peer_device->flags)) {
-				clear_bit(GOT_NEG_ACK, &peer_device->flags);
+			if (test_bit(GOT_NEG_ACK, peer_device->flags)) {
+				clear_bit(GOT_NEG_ACK, peer_device->flags);
 				rcu_read_unlock();
 				wait_event(resource->state_wait, peer_device->disk_state[NOW] < D_UP_TO_DATE);
 				goto restart;
@@ -3058,6 +3200,7 @@ static void drbd_remove_all_paths(struct drbd_connection *connection)
 		list_del_rcu(&path->list);
 		write_unlock_irq(&resource->state_rwlock);
 
+		transport->class->ops.remove_path(path);
 		notify_path(connection, path, NOTIFY_DESTROY);
 		call_rcu(&path->rcu, drbd_reclaim_path);
 	}
@@ -3156,29 +3299,11 @@ static void drbd_set_defaults(struct drbd_device *device)
 	device->disk_state[NOW] = D_DISKLESS;
 }
 
-void drbd_cleanup_device(struct drbd_device *device)
-{
-	device->al_writ_cnt = 0;
-	device->bm_writ_cnt = 0;
-	device->read_cnt = 0;
-	device->writ_cnt = 0;
-
-	if (device->bitmap) {
-		/* maybe never allocated. */
-		drbd_bm_resize(device, 0, 1);
-		drbd_bm_free(device->bitmap);
-		device->bitmap = NULL;
-	}
-
-	clear_bit(AL_SUSPENDED, &device->flags);
-	drbd_set_defaults(device);
-}
-
-
 static void drbd_destroy_mempools(void)
 {
 	bioset_exit(&drbd_io_bio_set);
 	bioset_exit(&drbd_md_io_bio_set);
+	mempool_exit(&drbd_buffer_page_pool);
 	mempool_exit(&drbd_md_io_page_pool);
 	mempool_exit(&drbd_ee_mempool);
 	mempool_exit(&drbd_request_mempool);
@@ -3230,6 +3355,9 @@ static int drbd_create_mempools(void)
 	ret = mempool_init_page_pool(&drbd_md_io_page_pool, DRBD_MIN_POOL_PAGES, 0);
 	if (ret)
 		goto Enomem;
+	ret = mempool_init_page_pool(&drbd_buffer_page_pool, number, 0);
+	if (ret)
+		goto Enomem;
 
 	ret = mempool_init_slab_pool(&drbd_request_mempool, number,
 				     drbd_request_cache);
@@ -3249,7 +3377,7 @@ Enomem:
 
 static void free_peer_device(struct drbd_peer_device *peer_device)
 {
-	if (test_and_clear_bit(HOLDING_UUID_READ_LOCK, &peer_device->flags))
+	if (test_and_clear_bit(HOLDING_UUID_READ_LOCK, peer_device->flags))
 		up_read_non_owner(&peer_device->device->uuid_sem);
 
 	kfree(peer_device->rs_plan_s);
@@ -3262,10 +3390,8 @@ static void drbd_device_finalize_work_fn(struct work_struct *work)
 	struct drbd_device *device = container_of(work, struct drbd_device, finalize_work);
 	struct drbd_resource *resource = device->resource;
 
-	if (device->bitmap) {
-		drbd_bm_free(device->bitmap);
-		device->bitmap = NULL;
-	}
+	/* ldev_safe: no other contexts can access */
+	drbd_bm_free(device);
 
 	put_disk(device->vdisk);
 
@@ -3284,6 +3410,11 @@ void drbd_destroy_device(struct kref *kref)
 	/* cleanup stuff that may have been allocated during
 	 * device (re-)configuration or state changes */
 
+#ifdef CONFIG_DRBD_COMPAT_84
+	if (device->resource->res_opts.drbd8_compat_mode)
+		atomic_dec(&nr_drbd8_devices);
+#endif
+
 	free_openers(device);
 
 	lc_destroy(device->act_log);
@@ -3300,23 +3431,10 @@ void drbd_destroy_device(struct kref *kref)
 	schedule_work(&device->finalize_work);
 }
 
-static void free_page_pool(struct drbd_resource *resource)
-{
-	struct page *page;
-
-	while (resource->pp_pool) {
-		page = resource->pp_pool;
-		resource->pp_pool = page_chain_next(page);
-		__free_page(page);
-		resource->pp_vacant--;
-	}
-}
-
 void drbd_destroy_resource(struct kref *kref)
 {
 	struct drbd_resource *resource = container_of(kref, struct drbd_resource, kref);
 
-	free_page_pool(resource);
 	idr_destroy(&resource->devices);
 	free_cpumask_var(resource->cpu_mask);
 	kfree(resource->name);
@@ -3347,16 +3465,6 @@ static struct retry_worker {
 	struct list_head writes;
 } retry;
 
-void drbd_req_destroy_lock(struct kref *kref)
-{
-	struct drbd_request *req = container_of(kref, struct drbd_request, kref);
-	struct drbd_resource *resource = req->device->resource;
-
-	read_lock_irq(&resource->state_rwlock);
-	drbd_req_destroy(kref);
-	read_unlock_irq(&resource->state_rwlock);
-}
-
 static void do_retry(struct work_struct *ws)
 {
 	struct retry_worker *retry = container_of(ws, struct retry_worker, worker);
@@ -3369,6 +3477,7 @@ static void do_retry(struct work_struct *ws)
 
 	list_for_each_entry_safe(req, tmp, &writes, list) {
 		struct drbd_device *device = req->device;
+		struct drbd_resource *resource = device->resource;
 		struct bio *bio = req->master_bio;
 		unsigned long start_jif = req->start_jif;
 		bool expected;
@@ -3388,12 +3497,14 @@ static void do_retry(struct work_struct *ws)
 				req, atomic_read(&req->completion_ref),
 				req->local_rq_state);
 
-		/* We still need to put one kref associated with the
+		/* We still need to put one done reference associated with the
 		 * "completion_ref" going zero in the code path that queued it
 		 * here.  The request object may still be referenced by a
 		 * frozen local req->private_bio, in case we force-detached.
 		 */
-		kref_put(&req->kref, drbd_req_destroy_lock);
+		read_lock_irq(&resource->state_rwlock);
+		drbd_put_ref_tl_walk(req, 1, 0);
+		read_unlock_irq(&resource->state_rwlock);
 
 		/* A single suspended or otherwise blocking device may stall
 		 * all others as well. This code path is to recover from a
@@ -3413,9 +3524,13 @@ static void do_retry(struct work_struct *ws)
 /* called via drbd_req_put_completion_ref() */
 void drbd_restart_request(struct drbd_request *req)
 {
+	struct drbd_device *device = req->device;
+	struct drbd_resource *resource = device->resource;
+	bool susp = drbd_suspended(device);
 	unsigned long flags;
+
 	spin_lock_irqsave(&retry.lock, flags);
-	list_move_tail(&req->list, &retry.writes);
+	list_move_tail(&req->list, susp ? &resource->suspended_reqs : &retry.writes);
 	spin_unlock_irqrestore(&retry.lock, flags);
 
 	/* Drop the extra reference that would otherwise
@@ -3423,9 +3538,20 @@ void drbd_restart_request(struct drbd_request *req)
 	 * do_retry() needs to grab a new one. */
 	dec_ap_bio(req->device, bio_data_dir(req->master_bio));
 
-	queue_work(retry.wq, &retry.worker);
+	if (!susp)
+		queue_work(retry.wq, &retry.worker);
 }
 
+void drbd_restart_suspended_reqs(struct drbd_resource *resource)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&retry.lock, flags);
+	list_splice_init(&resource->suspended_reqs, &retry.writes);
+	spin_unlock_irqrestore(&retry.lock, flags);
+
+	queue_work(retry.wq, &retry.worker);
+}
 
 static void drbd_cleanup(void)
 {
@@ -3443,7 +3569,7 @@ static void drbd_cleanup(void)
 	if (retry.wq)
 		destroy_workqueue(retry.wq);
 
-	drbd_genl_unregister();
+	genl_unregister_family(&drbd_nl_family);
 	drbd_debugfs_cleanup();
 
 	unregister_pernet_device(&drbd_pernet_ops);
@@ -3579,9 +3705,16 @@ void drbd_flush_peer_acks(struct drbd_resource *resource)
 	spin_unlock_irq(&resource->peer_ack_lock);
 }
 
+# 5 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_main.c.patch"
+# 3707 "/scrap/drbd/drbd/drbd_main.c"
 static void peer_ack_timer_fn(struct timer_list *t)
 {
+# 3710 "/scrap/drbd/drbd/drbd_main.c"
+# 8 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_main.c.patch"
+# 3715 "/scrap/drbd/drbd/build-6.12.116-mdl+/drbd_main.c"
 	struct drbd_resource *resource = from_timer(resource, t, peer_ack_timer);
+# 9 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_main.c.patch"
+# 3710 "/scrap/drbd/drbd/drbd_main.c"
 
 	drbd_flush_peer_acks(resource);
 }
@@ -3695,11 +3828,8 @@ struct drbd_resource *drbd_create_resource(const char *name,
 					   struct res_opts *res_opts)
 {
 	struct drbd_resource *resource;
-	struct page *page;
-	const int page_pool_count = DRBD_MAX_BIO_SIZE/PAGE_SIZE;
-	int i;
 
-	resource = kzalloc(sizeof(struct drbd_resource), GFP_KERNEL);
+	resource = kzalloc_obj(struct drbd_resource);
 	if (!resource)
 		goto fail;
 	resource->name = kstrdup(name, GFP_KERNEL);
@@ -3719,9 +3849,10 @@ struct drbd_resource *drbd_create_resource(const char *name,
 	INIT_LIST_HEAD(&resource->peer_ack_work.list);
 	resource->peer_ack_work.cb = w_queue_peer_ack;
 	timer_setup(&resource->peer_ack_timer, peer_ack_timer_fn, 0);
+	spin_lock_init(&resource->initiator_flush_lock);
 	sema_init(&resource->state_sem, 1);
 	resource->role[NOW] = R_SECONDARY;
-	resource->max_node_id = res_opts->node_id;
+	resource->max_node_id = res_opts->drbd8_compat_mode ? 1 : res_opts->node_id;
 	resource->twopc_reply.initiator_node_id = -1;
 	mutex_init(&resource->conf_update);
 	mutex_init(&resource->adm_mutex);
@@ -3739,27 +3870,19 @@ struct drbd_resource *drbd_create_resource(const char *name,
 	spin_lock_init(&resource->current_tle_lock);
 	drbd_debugfs_resource_add(resource);
 	resource->cached_min_aggreed_protocol_version = drbd_protocol_version_min;
-	resource->members = NODE_MASK(res_opts->node_id);
+	/* members is a bit mask of the "seen" nodes in this resource.
+	 * In drbd8 compatibility mode, we only have one peer, so we can
+	 * set this to 1. */
+	resource->members = res_opts->drbd8_compat_mode ? 1 : NODE_MASK(res_opts->node_id);
 	INIT_WORK(&resource->empty_twopc, drbd_empty_twopc_work_fn);
+	INIT_WORK(&resource->resume_twopc, drbd_resume_twopc_work_fn);
+	INIT_LIST_HEAD(&resource->suspended_reqs);
 
 	ratelimit_state_init(&resource->ratelimit[D_RL_R_GENERIC], 5*HZ, 10);
 
-	/* drbd's page pool */
-	init_waitqueue_head(&resource->pp_wait);
-
-	spin_lock_init(&resource->pp_lock);
-
-	for (i = 0; i < page_pool_count; i++) {
-		page = alloc_page(GFP_HIGHUSER);
-		if (!page)
-			goto fail_free_pages;
-		set_page_chain_next_offset_size(page, resource->pp_pool, 0, 0);
-		resource->pp_pool = page;
-	}
-	resource->pp_vacant = page_pool_count;
 
 	if (set_resource_options(resource, res_opts, "create-resource"))
-		goto fail_free_pages;
+		goto fail_free_name;
 
 	drbd_thread_start(&resource->worker);
 
@@ -3767,8 +3890,6 @@ struct drbd_resource *drbd_create_resource(const char *name,
 
 	return resource;
 
-fail_free_pages:
-	free_page_pool(resource);
 fail_free_name:
 	kfree(resource->name);
 fail_free_resource:
@@ -3794,7 +3915,7 @@ struct drbd_connection *drbd_create_connection(struct drbd_resource *resource,
 	if (drbd_alloc_send_buffers(connection))
 		goto fail;
 
-	connection->current_epoch = kzalloc(sizeof(struct drbd_epoch), GFP_KERNEL);
+	connection->current_epoch = kzalloc_obj(struct drbd_epoch);
 	if (!connection->current_epoch)
 		goto fail;
 
@@ -3828,14 +3949,18 @@ struct drbd_connection *drbd_create_connection(struct drbd_resource *resource,
 	connection->receiver.connection = connection;
 	drbd_thread_init(resource, &connection->sender, drbd_sender, "sender");
 	connection->sender.connection = connection;
+	spin_lock_init(&connection->primary_flush_lock);
+	spin_lock_init(&connection->flush_ack_lock);
 	spin_lock_init(&connection->peer_reqs_lock);
+	spin_lock_init(&connection->send_oos_lock);
 	INIT_LIST_HEAD(&connection->peer_requests);
 	INIT_LIST_HEAD(&connection->peer_reads);
+	INIT_LIST_HEAD(&connection->send_oos);
 	INIT_LIST_HEAD(&connection->connections);
 	INIT_LIST_HEAD(&connection->done_ee);
 	INIT_LIST_HEAD(&connection->dagtag_wait_ee);
-	INIT_LIST_HEAD(&connection->resync_ack_ee);
-	INIT_LIST_HEAD(&connection->net_ee);
+	INIT_LIST_HEAD(&connection->source_wait_ee);
+	INIT_LIST_HEAD(&connection->dagtag_wait_reqs);
 	INIT_LIST_HEAD(&connection->remove_net_list);
 	init_waitqueue_head(&connection->ee_wait);
 
@@ -3843,6 +3968,10 @@ struct drbd_connection *drbd_create_connection(struct drbd_resource *resource,
 	kref_debug_init(&connection->kref_debug, &connection->kref, &kref_class_connection);
 
 	INIT_WORK(&connection->peer_ack_work, drbd_send_peer_ack_wf);
+	INIT_LIST_HEAD(&connection->send_oos_work.list);
+	connection->send_oos_work.cb = drbd_send_out_of_sync_wf;
+	INIT_LIST_HEAD(&connection->flush_ack_work.list);
+	connection->flush_ack_work.cb = drbd_flush_ack_wf;
 	INIT_WORK(&connection->send_acks_work, drbd_send_acks_wf);
 	INIT_WORK(&connection->send_ping_ack_work, drbd_send_ping_ack_wf);
 	INIT_WORK(&connection->send_ping_work, drbd_send_ping_wf);
@@ -3856,6 +3985,8 @@ struct drbd_connection *drbd_create_connection(struct drbd_resource *resource,
 	kref_debug_get(&resource->kref_debug, 3);
 	connection->resource = resource;
 	connection->after_reconciliation.lost_node_id = -1;
+	connection->reconcile_handshake.lost_node_id = -1;
+	connection->reconcile_handshake.sent_lost_node = false;
 
 	connection->reassemble_buffer.buffer = connection->reassemble_buffer_bytes.bytes;
 
@@ -3890,6 +4021,7 @@ void drbd_transport_shutdown(struct drbd_connection *connection, enum drbd_tr_fr
 	mutex_lock(&connection->mutex[DATA_STREAM]);
 	mutex_lock(&connection->mutex[CONTROL_STREAM]);
 
+	/* Ignore send errors, if any: we are shutting down. */
 	flush_send_buffer(connection, DATA_STREAM);
 	flush_send_buffer(connection, CONTROL_STREAM);
 
@@ -3913,13 +4045,12 @@ void drbd_destroy_path(struct kref *kref)
 	struct drbd_connection *connection =
 		container_of(path->transport, struct drbd_connection, transport);
 
-	connection->transport.class->ops.remove_path(path);
-
 	kref_debug_put(&connection->kref_debug, 17);
 	kref_put(&connection->kref, drbd_destroy_connection);
 	kfree(path);
 }
 
+/* The last ref might be dropped from atomic context, no sleeping functions here */
 void drbd_destroy_connection(struct kref *kref)
 {
 	struct drbd_connection *connection = container_of(kref, struct drbd_connection, kref);
@@ -3951,7 +4082,7 @@ struct drbd_peer_device *create_peer_device(struct drbd_device *device, struct d
 	struct drbd_peer_device *peer_device;
 	int err;
 
-	peer_device = kzalloc(sizeof(struct drbd_peer_device), GFP_KERNEL);
+	peer_device = kzalloc_obj(struct drbd_peer_device);
 	if (!peer_device)
 		return NULL;
 
@@ -3959,6 +4090,8 @@ struct drbd_peer_device *create_peer_device(struct drbd_device *device, struct d
 	peer_device->device = device;
 	peer_device->disk_state[NOW] = D_UNKNOWN;
 	peer_device->repl_state[NOW] = L_OFF;
+	peer_device->replication[NOW] = true;
+	peer_device->peer_replication[NOW] = true;
 	spin_lock_init(&peer_device->peer_seq_lock);
 
 	ratelimit_state_init(&peer_device->ratelimit[D_RL_PD_GENERIC], 5*HZ, /* no burst */ 1);
@@ -3977,8 +4110,6 @@ struct drbd_peer_device *create_peer_device(struct drbd_device *device, struct d
 
 	INIT_LIST_HEAD(&peer_device->propagate_uuids_work.list);
 	peer_device->propagate_uuids_work.cb = w_send_uuids;
-
-	spin_lock_init(&peer_device->resync_next_bit_lock);
 
 	atomic_set(&peer_device->ap_pending_cnt, 0);
 	atomic_set(&peer_device->unacked_cnt, 0);
@@ -4005,12 +4136,14 @@ static void drbd_ldev_destroy(struct work_struct *ws)
 {
 	struct drbd_device *device = container_of(ws, struct drbd_device, ldev_destroy_work);
 
+	/* ldev_safe: destroying the bitmap */
+	drbd_bm_free(device);
 	lc_destroy(device->act_log);
 	device->act_log = NULL;
-	__acquire(local);
+	/* ldev_safe: destroying ldev */
 	drbd_backing_dev_free(device, device->ldev);
+	/* ldev_safe: final teardown, no other user possible */
 	device->ldev = NULL;
-	__release(local);
 
 	clear_bit(GOING_DISKLESS, &device->flags);
 	wake_up(&device->misc_wait);
@@ -4060,11 +4193,6 @@ enum drbd_ret_code drbd_create_device(struct drbd_config_context *adm_ctx, unsig
 	int vnr = adm_ctx->volume;
 	enum drbd_ret_code err = ERR_NOMEM;
 	bool locked = false;
-	struct queue_limits lim = {
-		.features = BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA |
-			    BLK_FEAT_ROTATIONAL |
-			    BLK_FEAT_STABLE_WRITES,
-	};
 
 	lockdep_assert_held(&resource->conf_update);
 
@@ -4073,7 +4201,7 @@ enum drbd_ret_code drbd_create_device(struct drbd_config_context *adm_ctx, unsig
 		return ERR_MINOR_OR_VOLUME_EXISTS;
 
 	/* GFP_KERNEL, we are outside of all write-out paths */
-	device = kzalloc(sizeof(struct drbd_device), GFP_KERNEL);
+	device = kzalloc_obj(struct drbd_device);
 	if (!device)
 		return ERR_NOMEM;
 	kref_init(&device->kref);
@@ -4105,6 +4233,7 @@ enum drbd_ret_code drbd_create_device(struct drbd_config_context *adm_ctx, unsig
 	spin_lock_init(&device->timing_lock);
 #endif
 	spin_lock_init(&device->al_lock);
+	spin_lock_init(&device->gen_obligation_lock);
 
 	spin_lock_init(&device->pending_completion_lock);
 	INIT_LIST_HEAD(&device->pending_master_completion[0]);
@@ -4113,6 +4242,7 @@ enum drbd_ret_code drbd_create_device(struct drbd_config_context *adm_ctx, unsig
 	INIT_LIST_HEAD(&device->pending_completion[1]);
 	INIT_LIST_HEAD(&device->openers);
 	spin_lock_init(&device->openers_lock);
+	spin_lock_init(&device->peer_req_bio_completion_lock);
 
 	atomic_set(&device->pending_bitmap_work.n, 0);
 	spin_lock_init(&device->pending_bitmap_work.q_lock);
@@ -4127,13 +4257,14 @@ enum drbd_ret_code drbd_create_device(struct drbd_config_context *adm_ctx, unsig
 
 	init_rwsem(&device->uuid_sem);
 
-	disk = blk_alloc_disk(&lim, NUMA_NO_NODE);
+	disk = blk_alloc_disk(NULL, NUMA_NO_NODE);
 	if (IS_ERR(disk)) {
 		err = PTR_ERR(disk);
 		goto out_no_disk;
 	}
 
 	INIT_WORK(&device->ldev_destroy_work, drbd_ldev_destroy);
+	INIT_WORK(&device->try_get_resynced_work, drbd_try_get_resynced_work_fn);
 
 	device->vdisk = disk;
 	device->rq_queue = disk->queue;
@@ -4150,9 +4281,9 @@ enum drbd_ret_code drbd_create_device(struct drbd_config_context *adm_ctx, unsig
 	if (!device->md_io.page)
 		goto out_no_io_page;
 
-	device->bitmap = drbd_bm_alloc();
-	if (!device->bitmap)
-		goto out_no_bitmap;
+	/* Just put in some sane default; should never be used. */
+	device->last_bm_block_shift = BM_BLOCK_SHIFT_MIN;
+
 	spin_lock_init(&device->interval_lock);
 	device->read_requests = RB_ROOT;
 	device->requests = RB_ROOT;
@@ -4232,6 +4363,9 @@ enum drbd_ret_code drbd_create_device(struct drbd_config_context *adm_ctx, unsig
 	device->have_quorum[OLD] =
 	device->have_quorum[NEW] =
 		(resource->res_opts.quorum == QOU_OFF);
+	/* Real quorum, recomputed on the first state change. */
+	device->quorum[OLD] =
+	device->quorum[NEW] = false;
 
 	for_each_peer_device(peer_device, device) {
 		connection = peer_device->connection;
@@ -4279,8 +4413,6 @@ out_no_peer_device:
 		kfree(peer_device);
 	}
 
-	drbd_bm_free(device->bitmap);
-out_no_bitmap:
 	__free_page(device->md_io.page);
 out_no_io_page:
 	put_disk(disk);
@@ -4357,7 +4489,7 @@ static void shutdown_connect_timer(struct drbd_connection *connection)
 
 void del_connect_timer(struct drbd_connection *connection)
 {
-	if (del_timer_sync(&connection->connect_timer)) {
+	if (timer_delete_sync(&connection->connect_timer)) {
 		kref_debug_put(&connection->kref_debug, 11);
 		kref_put(&connection->kref, drbd_destroy_connection);
 	}
@@ -4394,10 +4526,6 @@ void drbd_unregister_connection(struct drbd_connection *connection)
 	rr = drbd_free_peer_reqs(connection, &connection->done_ee);
 	if (rr)
 		drbd_err(connection, "%d EEs in done list found!\n", rr);
-
-	rr = drbd_free_peer_reqs(connection, &connection->net_ee);
-	if (rr)
-		drbd_err(connection, "%d EEs in net list found!\n", rr);
 
 	drbd_transport_shutdown(connection, DESTROY_TRANSPORT);
 	drbd_put_send_buffers(connection);
@@ -4456,21 +4584,19 @@ static int __init drbd_init(void)
 	drbd_proc = NULL; /* play safe for drbd_cleanup */
 	idr_init(&drbd_devices);
 
-	INIT_LIST_HEAD(&drbd_resources);
-
 	err = register_pernet_device(&drbd_pernet_ops);
 	if (err) {
 		pr_err("unable to register net namespace handlers\n");
 		goto fail;
 	}
 
-	drbd_enable_netns();
-	err = drbd_genl_register();
+	err = genl_register_family(&drbd_nl_family);
 	if (err) {
 		pr_err("unable to register generic netlink family\n");
 		goto fail;
 	}
 
+	err = -ENOMEM;
 	ping_ack_sender = alloc_workqueue("drbd_pas",
 			WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_HIGHPRI, 0);
 	if (!ping_ack_sender)
@@ -4502,9 +4628,14 @@ static int __init drbd_init(void)
 
 	pr_info("initialized. "
 	       "Version: " REL_VERSION " (api:%d/proto:%d-%d)\n",
-	       GENL_MAGIC_VERSION, PRO_VERSION_MIN, PRO_VERSION_MAX);
+	       DRBD_FAMILY_VERSION, PRO_VERSION_MIN, PRO_VERSION_MAX);
 	pr_info("%s\n", drbd_buildtag());
 	pr_info("registered as block device major %d\n", DRBD_MAJOR);
+
+#ifdef CONFIG_DRBD_COMPAT_84
+	atomic_set(&nr_drbd8_devices, 0);
+#endif
+
 	return 0; /* Success! */
 
 fail:
@@ -4519,25 +4650,26 @@ fail:
 /* meta data management */
 
 static
-void drbd_md_encode(struct drbd_device *device, struct meta_data_on_disk_9 *buffer)
+void drbd_md_encode_9(struct drbd_device *device, struct meta_data_on_disk_9 *buffer)
 {
 	int i;
 
 	buffer->effective_size = cpu_to_be64(device->ldev->md.effective_size);
 	buffer->current_uuid = cpu_to_be64(device->ldev->md.current_uuid);
 	buffer->members = cpu_to_be64(device->ldev->md.members);
+	buffer->features = cpu_to_be64(DRBD_MD_FEATURES);
 	buffer->flags = cpu_to_be32(device->ldev->md.flags);
 	buffer->magic = cpu_to_be32(DRBD_MD_MAGIC_09);
 
 	buffer->md_size_sect  = cpu_to_be32(device->ldev->md.md_size_sect);
 	buffer->al_offset     = cpu_to_be32(device->ldev->md.al_offset);
 	buffer->al_nr_extents = cpu_to_be32(device->act_log->nr_elements);
-	buffer->bm_bytes_per_bit = cpu_to_be32(BM_BLOCK_SIZE);
+	buffer->bm_bytes_per_bit = cpu_to_be32(device->ldev->md.bm_block_size);
 	buffer->device_uuid = cpu_to_be64(device->ldev->md.device_uuid);
 
 	buffer->bm_offset = cpu_to_be32(device->ldev->md.bm_offset);
 	buffer->la_peer_max_bio_size = cpu_to_be32(device->device_conf.max_bio_size);
-	buffer->bm_max_peers = cpu_to_be32(device->bitmap->bm_max_peers);
+	buffer->bm_max_peers = cpu_to_be32(device->ldev->md.max_peers);
 	buffer->node_id = cpu_to_be32(device->ldev->md.node_id);
 	for (i = 0; i < DRBD_NODE_ID_MAX; i++) {
 		struct drbd_peer_md *peer_md = &device->ldev->md.peers[i];
@@ -4553,6 +4685,18 @@ void drbd_md_encode(struct drbd_device *device, struct meta_data_on_disk_9 *buff
 
 	buffer->al_stripes = cpu_to_be32(device->ldev->md.al_stripes);
 	buffer->al_stripe_size_4k = cpu_to_be32(device->ldev->md.al_stripe_size_4k);
+
+	if (device->bitmap == NULL)
+		for (i = 0; i < DRBD_PEERS_MAX; i++)
+			buffer->peers[i].flags |= cpu_to_be32(MDF_PEER_FULL_SYNC);
+}
+
+static void drbd_md_encode(struct drbd_device *device, void *buffer)
+{
+	if (test_bit(LEGACY_84_MD, &device->flags))
+		drbd_md_encode_84(device, buffer);
+	else
+		drbd_md_encode_9(device, buffer);
 }
 
 int drbd_md_write(struct drbd_device *device, struct meta_data_on_disk_9 *buffer)
@@ -4560,16 +4704,25 @@ int drbd_md_write(struct drbd_device *device, struct meta_data_on_disk_9 *buffer
 	sector_t sector;
 	int err;
 
-	if (drbd_md_dax_active(device->ldev)) {
-		drbd_md_encode(device, drbd_dax_md_addr(device->ldev));
-		arch_wb_cache_pmem(drbd_dax_md_addr(device->ldev),
-				   sizeof(struct meta_data_on_disk_9));
-		return 0;
-	}
-
 	memset(buffer, 0, sizeof(*buffer));
 
 	drbd_md_encode(device, buffer);
+
+	if (drbd_md_dax_active(device->ldev)) {
+		struct meta_data_on_disk_9 *md_on_pmem = drbd_dax_md_addr(device->ldev);
+
+		/* Copy the encoded super block, rather than encoding into
+		 * persistent memory directly. That way the reserved fields are
+		 * zeroed here as well, so that a field which a later version
+		 * places there is cleared by this version. Copying also leaves
+		 * every byte at either its old or its new value, whereas
+		 * zeroing in place would make the meta data unreadable should a
+		 * crash hit that window.
+		 */
+		memcpy(md_on_pmem, buffer, sizeof(*buffer));
+		arch_wb_cache_pmem(md_on_pmem, sizeof(*buffer));
+		return 0;
+	}
 
 	D_ASSERT(device, drbd_md_ss(device->ldev) == device->ldev->md.md_offset);
 	sector = device->ldev->md.md_offset;
@@ -4601,11 +4754,22 @@ static int __drbd_md_sync(struct drbd_device *device, bool maybe)
 	if (!get_ldev_if_state(device, D_DETACHING))
 		return -EIO;
 
+	/*
+	 * A disk that failed may take this write or not, by chance. Keep the
+	 * last superblock it did take rather than let that chance decide.
+	 */
+	if (device->disk_state[NOW] == D_FAILED ||
+	    (device->disk_state[NOW] == D_DETACHING &&
+	     test_bit(FORCE_DETACH, &device->flags))) {
+		timer_delete(&device->md_sync_timer);
+		goto out;
+	}
+
 	buffer = drbd_md_get_buffer(device, __func__);
 	if (!buffer)
 		goto out;
 
-	del_timer(&device->md_sync_timer);
+	timer_delete(&device->md_sync_timer);
 	/* timer may be rearmed by drbd_md_mark_dirty() now. */
 
 	if (test_and_clear_bit(MD_DIRTY, &device->flags) || !maybe) {
@@ -4645,7 +4809,7 @@ void drbd_md_mark_dirty(struct drbd_device *device)
 		mod_timer(&device->md_sync_timer, jiffies + 5*HZ);
 }
 
-void _drbd_uuid_push_history(struct drbd_device *device, u64 val) __must_hold(local)
+void _drbd_uuid_push_history(struct drbd_device *device, u64 val)
 {
 	struct drbd_md *md = &device->ldev->md;
 	int node_id, i;
@@ -4657,6 +4821,12 @@ void _drbd_uuid_push_history(struct drbd_device *device, u64 val) __must_hold(lo
 
 	if (val == (md->current_uuid & ~UUID_PRIMARY))
 		return;
+
+	/* day0 UUID: keep in history even if also held in a bitmap slot */
+	if (md->history_uuids[0] == 0) {
+		md->history_uuids[0] = val;
+		return;
+	}
 
 	for (node_id = 0; node_id < DRBD_NODE_ID_MAX; node_id++) {
 		if (node_id == md->node_id)
@@ -4675,7 +4845,7 @@ void _drbd_uuid_push_history(struct drbd_device *device, u64 val) __must_hold(lo
 	md->history_uuids[i] = val;
 }
 
-u64 _drbd_uuid_pull_history(struct drbd_peer_device *peer_device) __must_hold(local)
+u64 _drbd_uuid_pull_history(struct drbd_peer_device *peer_device)
 {
 	struct drbd_device *device = peer_device->device;
 	struct drbd_md *md = &device->ldev->md;
@@ -4702,17 +4872,38 @@ static void __drbd_uuid_set_current(struct drbd_device *device, u64 val)
 	drbd_uuid_set_exposed(device, val, false);
 }
 
-static void __drbd_uuid_set_bitmap(struct drbd_peer_device *peer_device, u64 val)
+/* Assign a peer's bitmap UUID, with its dagtag and MDF_PEER_DIVERGENCE_BITMAP.
+ * A bitmap_uuid of 0 means the bitmap is unused.
+ */
+void drbd_set_peer_bitmap_uuid(struct drbd_peer_md *peer_md, u64 bitmap_uuid, u64 dagtag)
+{
+	u64 previous = peer_md->bitmap_uuid;
+
+	peer_md->bitmap_uuid = bitmap_uuid;
+	peer_md->bitmap_dagtag = bitmap_uuid ? dagtag : 0;
+	/* Mark it a divergence bitmap only when we begin tracking a fresh one
+	 * (0 -> non-0).  A non-0 -> non-0 re-assignment rebases a bitmap that a
+	 * resync already owns onto a new data generation; that bitmap is a
+	 * convergence bitmap and its flag, cleared at resync start, must stay
+	 * cleared.  This relies on a resync's bitmap UUID being non-zero
+	 * throughout -- see drbd_run_resync().
+	 */
+	if (bitmap_uuid && !previous)
+		set_bit(__MDF_PEER_DIVERGENCE_BITMAP, &peer_md->flags);
+	else if (!bitmap_uuid)
+		clear_bit(__MDF_PEER_DIVERGENCE_BITMAP, &peer_md->flags);
+}
+
+void __drbd_uuid_set_bitmap(struct drbd_peer_device *peer_device, u64 val)
 {
 	struct drbd_device *device = peer_device->device;
 	struct drbd_peer_md *peer_md = &device->ldev->md.peers[peer_device->node_id];
 
 	drbd_md_mark_dirty(device);
-	peer_md->bitmap_uuid = val;
-	peer_md->bitmap_dagtag = val ? device->resource->dagtag_sector : 0;
+	drbd_set_peer_bitmap_uuid(peer_md, val, device->resource->dagtag_sector);
 }
 
-void _drbd_uuid_set_current(struct drbd_device *device, u64 val) __must_hold(local)
+void _drbd_uuid_set_current(struct drbd_device *device, u64 val)
 {
 	unsigned long flags;
 
@@ -4721,7 +4912,7 @@ void _drbd_uuid_set_current(struct drbd_device *device, u64 val) __must_hold(loc
 	spin_unlock_irqrestore(&device->ldev->md.uuid_lock, flags);
 }
 
-void _drbd_uuid_set_bitmap(struct drbd_peer_device *peer_device, u64 val) __must_hold(local)
+void _drbd_uuid_set_bitmap(struct drbd_peer_device *peer_device, u64 val)
 {
 	struct drbd_device *device = peer_device->device;
 	unsigned long flags;
@@ -4734,7 +4925,7 @@ void _drbd_uuid_set_bitmap(struct drbd_peer_device *peer_device, u64 val) __must
 }
 
 /* call holding down_write(uuid_sem) */
-void drbd_uuid_set_bitmap(struct drbd_peer_device *peer_device, u64 uuid) __must_hold(local)
+void drbd_uuid_set_bitmap(struct drbd_peer_device *peer_device, u64 uuid)
 {
 	struct drbd_device *device = peer_device->device;
 	unsigned long flags;
@@ -4748,7 +4939,43 @@ void drbd_uuid_set_bitmap(struct drbd_peer_device *peer_device, u64 uuid) __must
 	spin_unlock_irqrestore(&device->ldev->md.uuid_lock, flags);
 }
 
-static u64 rotate_current_into_bitmap(struct drbd_device *device, u64 weak_nodes, u64 dagtag) __must_hold(local)
+/**
+ * drbd_uuid_is_day0() - Check if device is in "day0" UUID state
+ * @device: DRBD device (caller must hold ldev reference)
+ *
+ * Returns true if the current UUID appears to be a "day0" UUID:
+ * a real UUID value was set (e.g. by linstor during create-md),
+ * but no UUID rotation has ever happened (all history and bitmap
+ * UUIDs are still zero).
+ *
+ * The same notion of day0 as a day0 peer slot (see struct drbd_peer_md), seen
+ * differently: here, the local current UUID is still day0; there, a bitmap
+ * tracks divergence since day0.
+ */
+bool drbd_uuid_is_day0(struct drbd_device *device)
+{
+	struct drbd_md *md = &device->ldev->md;
+	int i;
+
+	if ((md->current_uuid & ~UUID_PRIMARY) == UUID_JUST_CREATED ||
+	    md->current_uuid == 0)
+		return false;
+
+	for (i = 0; i < ARRAY_SIZE(md->history_uuids); i++)
+		if (md->history_uuids[i])
+			return false;
+
+	for (i = 0; i < DRBD_NODE_ID_MAX; i++) {
+		if (i == md->node_id)
+			continue;
+		if (md->peers[i].bitmap_uuid)
+			return false;
+	}
+
+	return true;
+}
+
+static u64 rotate_current_into_bitmap(struct drbd_device *device, u64 weak_nodes, u64 dagtag)
 {
 	struct drbd_peer_md *peer_md = device->ldev->md.peers;
 	struct drbd_peer_device *peer_device;
@@ -4760,10 +4987,13 @@ static u64 rotate_current_into_bitmap(struct drbd_device *device, u64 weak_nodes
 	 * actually set a new bitmap uuid */
 	u64 got_new_bitmap_uuid = 0;
 
-	if (device->ldev->md.current_uuid != UUID_JUST_CREATED)
+	if (device->ldev->md.current_uuid != UUID_JUST_CREATED) {
 		prev_c_uuid = device->ldev->md.current_uuid;
-	else
-		get_random_bytes(&prev_c_uuid, sizeof(u64));
+	} else {
+		prev_c_uuid = get_random_u64();
+		drbd_info(device, "Bitmap UUID for initial resync: %016llX\n",
+			  (unsigned long long)prev_c_uuid);
+	}
 
 	rcu_read_lock();
 	for_each_peer_device_rcu(peer_device, device) {
@@ -4776,18 +5006,23 @@ static u64 rotate_current_into_bitmap(struct drbd_device *device, u64 weak_nodes
 		if (bm_uuid && bm_uuid != prev_c_uuid)
 			continue;
 
+		/* Defensive: a sync source's bitmap is a convergence bitmap, so
+		 * never establish a divergence bitmap on it.
+		 */
+		if (bm_uuid == 0 && is_sync_source_state(peer_device, NOW))
+			continue;
+
 		pdsk = peer_device->disk_state[NOW];
 
 		/* Create a new current UUID for a peer that is diskless but usually has a backing disk.
 		 * Do not create a new current UUID for a CONNECTED intentional diskless peer.
 		 * Create one for an intentional diskless peer that is currently away. */
-		if (pdsk == D_DISKLESS && !(peer_md[node_id].flags & MDF_HAVE_BITMAP))
+		if (pdsk == D_DISKLESS && !test_bit(__MDF_HAVE_BITMAP, &peer_md[node_id].flags))
 			continue;
 
 		if ((pdsk <= D_UNKNOWN && pdsk != D_NEGOTIATING) ||
 		    (NODE_MASK(node_id) & weak_nodes)) {
-			peer_md[node_id].bitmap_uuid = prev_c_uuid;
-			peer_md[node_id].bitmap_dagtag = dagtag;
+			drbd_set_peer_bitmap_uuid(&peer_md[node_id], prev_c_uuid, dagtag);
 			drbd_md_mark_dirty(device);
 			got_new_bitmap_uuid |= NODE_MASK(node_id);
 		}
@@ -4811,11 +5046,10 @@ static u64 rotate_current_into_bitmap(struct drbd_device *device, u64 weak_nodes
 			slot_nr = find_first_zero_bit((unsigned long *)&slot_mask, sizeof(slot_mask) * BITS_PER_BYTE);
 			__set_bit(slot_nr, (unsigned long *)&slot_mask);
 		}
-		peer_md[node_id].bitmap_uuid = prev_c_uuid;
-		peer_md[node_id].bitmap_dagtag = dagtag;
+		drbd_set_peer_bitmap_uuid(&peer_md[node_id], prev_c_uuid, dagtag);
 		drbd_md_mark_dirty(device);
 		/* count, but only if that bitmap index exists. */
-		if (slot_nr < device->bitmap->bm_max_peers)
+		if (slot_nr < device->ldev->md.max_peers)
 			got_new_bitmap_uuid |= NODE_MASK(node_id);
 	}
 	rcu_read_unlock();
@@ -4858,34 +5092,43 @@ u64 drbd_weak_nodes_device(struct drbd_device *device)
 }
 
 
-static bool __new_current_uuid_prepare(struct drbd_device *device, bool forced) __must_hold(local)
+static enum drbd_mint_outcome __new_current_uuid_prepare(struct drbd_device *device, bool forced)
 {
 	u64 got_new_bitmap_uuid, val, old_current_uuid;
+	bool day0;
 	int err;
 
 	spin_lock_irq(&device->ldev->md.uuid_lock);
+	day0 = drbd_uuid_is_day0(device);
 	got_new_bitmap_uuid = rotate_current_into_bitmap(device,
 					forced ? initial_resync_nodes(device) : 0,
 					device->resource->dagtag_sector);
 
-	if (!got_new_bitmap_uuid) {
+	/* No slot to rotate the current UUID into, and not the first bump:
+	 * every absent peer already sees a current UUID it does not have, so
+	 * the divergence is recorded and a further one records nothing.
+	 */
+	if (!got_new_bitmap_uuid && !day0) {
 		spin_unlock_irq(&device->ldev->md.uuid_lock);
-		return false;
+		return MINT_UNNECESSARY;
 	}
 
 	old_current_uuid = device->ldev->md.current_uuid;
-	get_random_bytes(&val, sizeof(u64));
+	val = get_random_u64();
 	__drbd_uuid_set_current(device, val);
+	/* first bump: retire day0 into history (after __drbd_uuid_set_current) */
+	if (day0)
+		_drbd_uuid_push_history(device, old_current_uuid);
 	spin_unlock_irq(&device->ldev->md.uuid_lock);
 
 	/* get it to stable storage _now_ */
 	err = drbd_md_sync(device);
 	if (err) {
 		_drbd_uuid_set_current(device, old_current_uuid);
-		return false;
+		return MINT_FAILED;
 	}
 
-	return true;
+	return MINT_MINTED;
 }
 
 static void __new_current_uuid_info(struct drbd_device *device, u64 weak_nodes)
@@ -4894,7 +5137,7 @@ static void __new_current_uuid_info(struct drbd_device *device, u64 weak_nodes)
 		  device->ldev->md.current_uuid, weak_nodes);
 }
 
-static void __new_current_uuid_send(struct drbd_device *device, u64 weak_nodes, bool forced) __must_hold(local)
+static void __new_current_uuid_send(struct drbd_device *device, u64 weak_nodes, bool forced)
 {
 	struct drbd_peer_device *peer_device;
 	u64 im;
@@ -4905,72 +5148,167 @@ static void __new_current_uuid_send(struct drbd_device *device, u64 weak_nodes, 
 	}
 }
 
-static void __drbd_uuid_new_current_send(struct drbd_device *device, bool forced) __must_hold(local)
+static enum drbd_mint_outcome __drbd_uuid_new_current_send(struct drbd_device *device, bool forced)
 {
+	enum drbd_mint_outcome outcome;
 	u64 weak_nodes;
 
 	down_write(&device->uuid_sem);
-	if (!__new_current_uuid_prepare(device, forced)) {
+	outcome = __new_current_uuid_prepare(device, forced);
+	if (outcome != MINT_MINTED) {
 		up_write(&device->uuid_sem);
-		return;
+		return outcome;
 	}
 	downgrade_write(&device->uuid_sem);
+	/* New data generation: separate pre- and post-bump writes into distinct
+	 * write epochs (see the diskless path in drbd_uuid_new_current).
+	 */
+	start_new_tl_epoch(device->resource);
 	weak_nodes = drbd_weak_nodes_device(device);
 	__new_current_uuid_info(device, weak_nodes);
 	__new_current_uuid_send(device, weak_nodes, forced);
 	up_read(&device->uuid_sem);
+
+	return MINT_MINTED;
 }
 
-static void __drbd_uuid_new_current_holding_uuid_sem(struct drbd_device *device) __must_hold(local)
+static void __drbd_uuid_new_current_holding_uuid_sem(struct drbd_device *device)
 {
 	u64 weak_nodes;
 
-	if (!__new_current_uuid_prepare(device, false))
+	if (__new_current_uuid_prepare(device, false) != MINT_MINTED)
 		return;
 	weak_nodes = drbd_weak_nodes_device(device);
 	__new_current_uuid_info(device, weak_nodes);
 }
 
-static bool peer_can_fill_a_bitmap_slot(struct drbd_peer_device *peer_device)
+static bool peer_can_fill_a_bitmap_slot(struct drbd_peer_device *peer_device,
+					bool intentional_diskless)
 {
 	struct drbd_device *device = peer_device->device;
-	const bool intentional_diskless = device->device_conf.intentional_diskless;
 	const int my_node_id = device->resource->res_opts.node_id;
 	int node_id;
 
 	for (node_id = 0; node_id < DRBD_NODE_ID_MAX; node_id++) {
+		struct drbd_peer_device *p2;
 		if (node_id == peer_device->node_id)
 			continue;
-		if (peer_device->bitmap_uuids[node_id] == 0) {
-			struct drbd_peer_device *p2;
-			p2 = peer_device_by_node_id(peer_device->device, node_id);
-			if (p2 && !want_bitmap(p2))
-				continue;
-
-			if (node_id == my_node_id && intentional_diskless)
-				continue;
-
-			return true;
-		}
+		if (peer_device->bitmap_uuids[node_id] != 0)
+			continue;
+		/* bitmap_uuids[my_node_id] is the peer's record of *us*, from the
+		 * handshake.  When intentionally diskless (bitmap=no) the peer
+		 * never rotates into it, so it is perpetually zero and never
+		 * fillable -- skip it.  A detached (bitmap=yes) primary keeps
+		 * MDF_HAVE_BITMAP on the peer, so the slot self-corrects after a
+		 * bump and a zero there is a real signal of divergence to resync
+		 * on reattach -- do not skip it.
+		 */
+		if (node_id == my_node_id && intentional_diskless)
+			continue;
+		p2 = peer_device_by_node_id(device, node_id);
+		/* Diskless peers (bitmap=no) have no bitmap slot tracking
+		 * changes; rotate_current_into_bitmap() skips them.
+		 */
+		if (p2 && !want_bitmap(p2))
+			continue;
+		return true;
 	}
 
 	return false;
 }
 
+/* For an intentionally-diskless primary (bitmap=no): returns true if the peer
+ * reports no prior bump -- i.e. the very first write session, or a prior
+ * bump's entries have since been cleared by resync -- so a new generation must
+ * be signalled.  We scan peer_device->bitmap_uuids[n], the connected peer's
+ * peer_md[n].bitmap_uuid from the handshake; holding no disk, that is all we
+ * have.
+ *
+ * The peer's record of *us* (bitmap_uuids[my_node_id]) is useless here: the
+ * peer has no MDF_HAVE_BITMAP for us, so it is perpetually zero and the slot
+ * scan in peer_can_fill_a_bitmap_slot() skips it, missing the first-write /
+ * 2-node case.  (A merely-detached primary keeps MDF_HAVE_BITMAP on the peer,
+ * so that slot self-corrects and the slot scan handles it without this helper.)
+ * We instead detect prior bumps through THIRD PARTY configured peers
+ * (n != my_node_id, n != peer_device->node_id): rotate_current_into_bitmap()
+ * on the receiving peer records the old current UUID in each absent or weak
+ * peer's slot.
+ *
+ * Once such entries are present this returns false, and the bump path calls
+ * a_lost_peer_is_on_same_cur_uuid() to handle an absent peer's current UUID
+ * being lost after a restart.
+ */
+static bool diskless_primary_needs_uuid_bump(struct drbd_peer_device *peer_device)
+{
+	struct drbd_device *device = peer_device->device;
+	const int my_node_id = device->resource->res_opts.node_id;
+	int n;
+
+	for (n = 0; n < DRBD_NODE_ID_MAX; n++) {
+		struct drbd_peer_device *pn;
+
+		if (n == peer_device->node_id || n == my_node_id)
+			continue;
+		/* Skip peer_md entries for node IDs not in the current cluster
+		 * configuration.  When a peer is removed from a cluster its
+		 * peer_md[n].bitmap_uuid on remaining nodes is preserved for
+		 * potential re-join, so a non-zero entry there records a bump
+		 * from when that peer was still a member -- not evidence that a
+		 * bump is needed now.
+		 */
+		pn = peer_device_by_node_id(device, n);
+		if (!pn)
+			continue;
+		/* A bitmap_uuid of (u64)-1 is a sentinel emitted by
+		 * drbd_bitmap_uuid_for_node() when peer_md[n].bitmap_uuid is
+		 * physically zero but we are currently a sync target from that
+		 * peer at a different generation.  It is not evidence of a prior
+		 * UUID bump.
+		 */
+		if (peer_device->bitmap_uuids[n] != (u64)-1 &&
+		    peer_device->bitmap_uuids[n] != 0)
+			return false;
+	}
+	return true;
+}
+
 static bool diskfull_peers_need_new_cur_uuid(struct drbd_device *device)
 {
+	const bool intentional_diskless = device->device_conf.intentional_diskless;
 	struct drbd_peer_device *peer_device;
 	bool rv = false;
 
 	rcu_read_lock();
 	for_each_peer_device_rcu(peer_device, device) {
+		/* In protocol < 110 (DRBD 8, strictly two peers), the primary
+		 * does not generate or send a new current UUID.  Instead the
+		 * secondary detects the new primary session and creates the UUID
+		 * on its own side.  Nothing for us to do here.
+		 */
 		if (peer_device->connection->agreed_pro_version < 110)
 			continue;
 
 		/* Only an up-to-date peer persists a new current uuid! */
 		if (peer_device->disk_state[NOW] < D_UP_TO_DATE)
 			continue;
-		if (peer_can_fill_a_bitmap_slot(peer_device)) {
+
+		/* peer_can_fill_a_bitmap_slot() scans the connected peer's
+		 * bitmap_uuid records (from the handshake, not our own metadata):
+		 * a zero slot for a configured bitmap peer means that peer is on
+		 * our generation and a bump marks a new divergence.  Authoritative
+		 * even for a diskless primary -- it catches a peer an absent third
+		 * party resynced to our generation behind our back, which our own
+		 * UUID memory misses.  A detached primary stays bitmap=yes, so the
+		 * peer's record of us self-corrects after a bump and the scan
+		 * decides on its own.
+		 *
+		 * An intentionally-diskless primary is bitmap=no: the peer's
+		 * record of us stays zero and is skipped, so the scan misses the
+		 * first-write / 2-node case; diskless_primary_needs_uuid_bump()
+		 * covers that from third-party slots instead.
+		 */
+		if (peer_can_fill_a_bitmap_slot(peer_device, intentional_diskless) ||
+		    (intentional_diskless && diskless_primary_needs_uuid_bump(peer_device))) {
 			rv = true;
 			break;
 		}
@@ -4988,11 +5326,33 @@ static bool a_lost_peer_is_on_same_cur_uuid(struct drbd_device *device)
 	rcu_read_lock();
 	for_each_peer_device_rcu(peer_device, device) {
 		enum drbd_disk_state pdsk = peer_device->disk_state[NOW];
+		enum drbd_repl_state repl = peer_device->repl_state[NOW];
 
-		if (pdsk >= D_INCONSISTENT && pdsk <= D_UNKNOWN &&
-		    (device->exposed_data_uuid & ~UUID_PRIMARY) ==
-		    (peer_device->current_uuid & ~UUID_PRIMARY) &&
-		    !(peer_device->uuid_flags & UUID_FLAG_SYNC_TARGET)) {
+		/* We don't need to create a new data generation for a directly connected peer */
+		if (repl >= L_ESTABLISHED ||
+		    pdsk < D_INCONSISTENT || pdsk > D_UNKNOWN)
+			continue;
+
+		/* Or if UUID_FLAG_SYNC_TARGET is set */
+		if (peer_device->uuid_flags & UUID_FLAG_SYNC_TARGET)
+			continue;
+
+		/* If the peer is unreachable and we know it was at the same data
+		 * generation, we must bump so it can detect the divergence on
+		 * reconnect.
+		 *
+		 * If current_uuid is zero, we have no memory of the peer's current
+		 * UUID (e.g. after a restart).  The peer may have caught up to our
+		 * current generation in the interim -- for example, it reconnected
+		 * after a prior bump, synced, then disconnected again before we
+		 * restarted.  Without a bump, that peer would see no UUID divergence
+		 * on reconnect: a suspended primary resumes into a split-brain, a
+		 * secondary skips the resync its diverged data requires.
+		 * Bump conservatively.
+		 */
+		if (((device->exposed_data_uuid & ~UUID_PRIMARY) ==
+		     (peer_device->current_uuid & ~UUID_PRIMARY)) ||
+		     peer_device->current_uuid == 0) {
 			rv = true;
 			break;
 		}
@@ -5007,26 +5367,150 @@ static bool a_lost_peer_is_on_same_cur_uuid(struct drbd_device *device)
  * @device:	DRBD device.
  * @forced:	Force UUID creation
  *
- * Creates a new current UUID, and rotates the old current UUID into
- * the bitmap slot. Causes an incremental resync upon next connect.
+ * For a diskful device, rotates the old current UUID into peer_md[n].bitmap_uuid
+ * for every absent or weak peer, generates a fresh current UUID, persists it,
+ * and notifies connected peers via P_UUIDS110.  Causes an incremental resync
+ * on reconnect for peers that missed writes.
+ *
+ * For a diskless device, generates a fresh exposed_data_uuid and sends
+ * P_CURRENT_UUID to connected peers if a bump is warranted.  The decision
+ * is made by two complementary helpers:
+ *
+ *   diskfull_peers_need_new_cur_uuid(): bump if a connected diskful peer's
+ *     metadata shows that some peer still sits on our generation.
+ *
+ *   a_lost_peer_is_on_same_cur_uuid(): bump if an absent peer is, or might
+ *     be, on our generation.
+ *
+ * Key scenarios (A = diskless primary, B = diskful secondary connected,
+ *                C = third peer, UUID0/1/2 = successive current UUIDs):
+ *
+ * S1. 2-node (A, B), A promotes:
+ *     Only the connected peer B exists -> bump.
+ *
+ * S2. 3-node (A, B, C diskful absent), first write:
+ *     C has not recorded a bump from us, so it still sits on our generation
+ *     -> bump (UUID0->UUID1).  C resyncs when it reconnects.
+ *
+ * S3. 3-node, second write (C still absent at UUID0):
+ *     We already know C diverged on the first bump (UUID0 != UUID1) -> no
+ *     bump.  C still sees UUID1 != UUID0 and resyncs on reconnect.
+ *
+ * S4. 3-node, A restarts, promotes (C still absent; C may be at UUID0 or UUID1):
+ *     A has lost its knowledge of C's UUID across the restart -> bump.
+ *     Necessary because C may have caught up to UUID1 and disconnected again
+ *     before A restarted; without the bump, C at UUID1 would see no UUID
+ *     divergence -- a suspended primary resumes into a split-brain, a
+ *     secondary skips the resync its diverged data requires.
+ *
+ * S5. 3-node, C synced to UUID1 then disconnected; A still running:
+ *     C is back on our current generation -> bump (UUID1->UUID2).  Without it,
+ *     C at UUID1 would reconnect and see no divergence.
+ *
+ * S6. 4-node (A diskless primary; B, C diskful connected; D diskful absent),
+ *     a third party resyncs D behind A's back:
+ *     A's first write bumps to UUID1, taken by B and C; D is absent.  A resync
+ *     C->D then completes out of A's sight, so D is on UUID1 but A never
+ *     learned of it.  On A's next write D still sits on our generation and must
+ *     be marked diverged -> bump (UUID1->UUID2).  D detects the divergence on
+ *     reconnect.  A's own per-peer UUID memory cannot see a resync a third node
+ *     performed on an absent peer; only the connected peers' metadata can.
+ *
+ * The combined behaviour for an absent peer D:
+ * - First write session: bump triggered because exposed_data_uuid matches
+ *   D's last-known UUID.
+ * - Subsequent write sessions in the same primary up-cycle: no bump --
+ *   the primary already knows D's stale UUID differs from exposed, so D
+ *   will detect the change on reconnect regardless.
+ * - After the primary restarts: bump again via the current_uuid == 0
+ *   path, since the primary no longer has any knowledge of D's state.
+ *
+ * Return: what the attempt did, see enum drbd_mint_outcome.  MINT_DEFERRED and
+ * MINT_FAILED are retryable and leave the obligation with the caller;
+ * MINT_MINTED and MINT_UNNECESSARY meet it.  MINT_EXPOSED moved the obligation
+ * to UNCONFIRMED itself, where the confirm meets it.
  */
-void drbd_uuid_new_current(struct drbd_device *device, bool forced)
+enum drbd_mint_outcome drbd_uuid_new_current(struct drbd_device *device, bool forced)
 {
 	if (get_ldev_if_state(device, D_UP_TO_DATE)) {
-		__drbd_uuid_new_current_send(device, forced);
+		enum drbd_mint_outcome outcome;
+
+		/* gen-rotate reason: per call site (promotion=OTHER, others DEGRADE).
+		 * Diskful: persists md.current_uuid synchronously -> self-confirms.
+		 */
+		outcome = __drbd_uuid_new_current_send(device, forced);
 		put_ldev(device);
-	} else if (diskfull_peers_need_new_cur_uuid(device) ||
-		   a_lost_peer_is_on_same_cur_uuid(device)) {
+		return outcome;
+	}
+
+	if (diskfull_peers_need_new_cur_uuid(device) ||
+	    a_lost_peer_is_on_same_cur_uuid(device)) {
+		/* gen-rotate reason: DEGRADE (diskless primary lost a diskful peer);
+		 * no local disk -> not self-confirming, relies on peer acks.
+		 */
 		struct drbd_peer_device *peer_device;
 		/* The peers will store the new current UUID... */
 		u64 current_uuid, weak_nodes;
-		get_random_bytes(&current_uuid, sizeof(u64));
+
+		/* At most one unconfirmed generation (and one predecessor) exists
+		 * at a time.  The obligation state enforces that on its own: an
+		 * event arriving while one is unconfirmed re-arms instead, and the
+		 * mint executor is not dispatched from UNCONFIRMED.  A caller that
+		 * mints without going through the executor still needs the decline.
+		 */
+		if (drbd_gen_obligation_state(device) == GEN_OBL_UNCONFIRMED)
+			return MINT_DEFERRED;
+
+		current_uuid = get_random_u64();
 		if (device->resource->role[NOW] == R_PRIMARY)
 			current_uuid |= UUID_PRIMARY;
 		else
 			current_uuid &= ~UUID_PRIMARY;
 
+		/* A new data generation begins here: close the current write
+		 * epoch so that writes issued under the old current UUID and
+		 * writes issued under the new one never share an epoch.  The
+		 * post-bump epoch's barrier-ack then tells us a peer actually
+		 * persisted the new generation (a confirmation the diskless
+		 * primary otherwise lacks).
+		 */
+		start_new_tl_epoch(device->resource);
+
 		down_write(&device->uuid_sem);
+		/* Keep the generation we are leaving as the predecessor, tagged with
+		 * the epoch the new one begins in, so a peer that reconnects on it can
+		 * be recognised and replayed forward instead of rejected.
+		 */
+		device->exposed_data_uuid_predecessor = device->exposed_data_uuid;
+		device->exposed_gen_epoch = atomic_read(&device->resource->current_tle_nr);
+
+		/* Publish ordering (paired with the smp_rmb() in
+		 * drbd_maybe_release_rotated_gen()):
+		 *
+		 *     set per-peer CURRENT_UUID_UNCONFIRMED (all peers)
+		 *     smp_wmb()
+		 *     obligation -> UNCONFIRMED           <- the gate, last
+		 *     send P_CURRENT_UUID                 <- only after the gate
+		 *
+		 * Marks before gate: a releaser reads gate then marks, so it
+		 * cannot see the gate set with a survivor's mark already clear.
+		 */
+		for_each_peer_device(peer_device, device) {
+			if (peer_device->repl_state[NOW] >= L_ESTABLISHED)
+				set_bit(CURRENT_UUID_UNCONFIRMED, peer_device->flags);
+		}
+		smp_wmb(); /* marks before gate; paired with smp_rmb() in releaser */
+		/* Entered from MINTING by the mint executor, from NONE or ARMED by a
+		 * caller that mints the obligation itself, and from DISCHARGED when a
+		 * suspended resource armed none.  Not a dispatch guard: that is the
+		 * ARMED -> MINTING transition.
+		 */
+		drbd_gen_obligation_transition(device,
+					       GEN_OBL_IN(GEN_OBL_MINTING) |
+					       GEN_OBL_IN(GEN_OBL_NONE) |
+					       GEN_OBL_IN(GEN_OBL_ARMED) |
+					       GEN_OBL_IN(GEN_OBL_DISCHARGED),
+					       GEN_OBL_UNCONFIRMED, 0, 0);
 		drbd_uuid_set_exposed(device, current_uuid, false);
 		downgrade_write(&device->uuid_sem);
 		drbd_info(device, "sending new current UUID: %016llX\n", current_uuid);
@@ -5034,21 +5518,80 @@ void drbd_uuid_new_current(struct drbd_device *device, bool forced)
 		weak_nodes = drbd_weak_nodes_device(device);
 		for_each_peer_device(peer_device, device) {
 			if (peer_device->repl_state[NOW] >= L_ESTABLISHED) {
-				drbd_send_current_uuid(peer_device, current_uuid, weak_nodes);
+				/* Optimistically assume the peer received and persisted the
+				 * new current UUID.  It stays marked unconfirmed (above): if
+				 * the peer never actually got it (lost P_CURRENT_UUID, stalled
+				 * backend) and later reconnects on the old generation, the
+				 * handshake must trust the peer's reported UUID over this
+				 * optimistic value -- otherwise the diskless primary would
+				 * treat the peer as UpToDate at a generation no one persisted.
+				 */
 				peer_device->current_uuid = current_uuid;
+				drbd_send_current_uuid(peer_device, current_uuid, weak_nodes);
 			}
 		}
 		up_read(&device->uuid_sem);
+
+		/* We just opened an unconfirmed data generation.  The
+		 * confirm-before-complete IO hold needs no action here: it engages
+		 * lazily, per write, when a write in this generation is acked while still
+		 * unconfirmed (see hold_completion_for_unconfirmed_gen in drbd_req.c), and
+		 * is released by the in-order barrier ack (NEW_UUID_CONFIRMED).
+		 */
+		return MINT_EXPOSED;
 	}
+
+	/* Without local UpToDate data the two helpers above decide, and neither
+	 * found a peer that could still sit on our generation.
+	 */
+	return MINT_UNNECESSARY;
 }
 
 void drbd_uuid_new_current_by_user(struct drbd_device *device)
 {
 	struct drbd_peer_device *peer_device;
+	u64 peer_mask = 0;
+	int node_id;
 
 	down_write(&device->uuid_sem);
-	for_each_peer_device(peer_device, device)
+	for_each_peer_device(peer_device, device) {
 		drbd_uuid_set_bitmap(peer_device, 0); /* Rotate UI_BITMAP to History 1, etc... */
+		peer_mask |= NODE_MASK(peer_device->node_id);
+	}
+
+	/* rotate_current_into_bitmap()'s second loop skips peer_md entries
+	 * whose bitmap_uuid is non-zero but does not match prev_c_uuid (the
+	 * "stale" case: a previous bump wrote a UUID into the slot and a
+	 * subsequent bump left it unchanged).  Such a stale value can later
+	 * cause a false RULE_BITMAP_SELF match in drbd_sync_handshake() --
+	 * SYNC_SOURCE_USE_BITMAP against an empty bitmap -- silently skipping
+	 * a resync the peer actually needs.
+	 *
+	 * For every node_id that is not a currently configured peer (and
+	 * therefore not already handled by drbd_uuid_set_bitmap() above),
+	 * apply the same treatment: push the old UUID to history so that
+	 * reconnect handshakes can still find it, and zero the slot.  With
+	 * bitmap_uuid == 0 the second loop in rotate_current_into_bitmap()
+	 * treats the entry as fresh and advances it to prev_c_uuid together
+	 * with all other absent peers.
+	 */
+	spin_lock_irq(&device->ldev->md.uuid_lock);
+	for (node_id = 0; node_id < DRBD_NODE_ID_MAX; node_id++) {
+		struct drbd_peer_md *pm = &device->ldev->md.peers[node_id];
+		u64 bm_uuid;
+
+		if (node_id == device->ldev->md.node_id)
+			continue;
+		if (peer_mask & NODE_MASK(node_id))
+			continue; /* covered by for_each_peer_device above */
+		bm_uuid = pm->bitmap_uuid;
+		if (!bm_uuid)
+			continue;
+		drbd_set_peer_bitmap_uuid(pm, 0, 0);
+		drbd_md_mark_dirty(device);
+		_drbd_uuid_push_history(device, bm_uuid);
+	}
+	spin_unlock_irq(&device->ldev->md.uuid_lock);
 
 	if (get_ldev(device)) {
 		__drbd_uuid_new_current_holding_uuid_sem(device);
@@ -5076,7 +5619,7 @@ static void drbd_propagate_uuids(struct drbd_device *device, u64 nodes)
 	rcu_read_unlock();
 }
 
-void drbd_uuid_received_new_current(struct drbd_peer_device *from_pd, u64 val, u64 weak_nodes) __must_hold(local)
+void drbd_uuid_received_new_current(struct drbd_peer_device *from_pd, u64 val, u64 weak_nodes)
 {
 	struct drbd_device *device = from_pd->device;
 	u64 dagtag = atomic64_read(&from_pd->connection->last_dagtag_sector);
@@ -5106,9 +5649,28 @@ void drbd_uuid_received_new_current(struct drbd_peer_device *from_pd, u64 val, u
 	}
 	rcu_read_unlock();
 
+	/* Cleared above when we are a resync target: the UUID is now recorded
+	 * in the sync source's peer-device and adopted at resync end.
+	 */
+	if (!set_current)
+		drbd_warn(from_pd, "received new current UUID: %016llX weak_nodes=%016llX (deferred to resync end)\n",
+			  val, weak_nodes);
+
+	/* Neither up to date nor a resync target: this generation can not be
+	 * adopted, and no resync end will adopt it later either.
+	 */
+	if (set_current && device->disk_state[NOW] != D_UP_TO_DATE) {
+		drbd_warn(from_pd, "not adopting new current UUID %016llX on %s disk\n",
+			  val, drbd_disk_str(device->disk_state[NOW]));
+		set_current = false;
+	}
+
 	if (set_current) {
 		u64 old_current = device->ldev->md.current_uuid;
 		u64 upd;
+
+		drbd_warn(from_pd, "received new current UUID: %016llX weak_nodes=%016llX\n",
+			  val, weak_nodes);
 
 		if (device->disk_state[NOW] == D_UP_TO_DATE)
 			recipients |= rotate_current_into_bitmap(device, weak_nodes, dagtag);
@@ -5138,7 +5700,7 @@ void drbd_uuid_received_new_current(struct drbd_peer_device *from_pd, u64 val, u
 	up_read(&device->uuid_sem);
 }
 
-static u64 __set_bitmap_slots(struct drbd_device *device, u64 bitmap_uuid, u64 do_nodes) __must_hold(local)
+static u64 __set_bitmap_slots(struct drbd_device *device, u64 bitmap_uuid, u64 do_nodes)
 {
 	struct drbd_peer_md *peer_md = device->ldev->md.peers;
 	u64 modified = 0;
@@ -5149,14 +5711,13 @@ static u64 __set_bitmap_slots(struct drbd_device *device, u64 bitmap_uuid, u64 d
 			continue;
 		if (!(do_nodes & NODE_MASK(node_id)))
 			continue;
-		if (!(peer_md[node_id].flags & MDF_HAVE_BITMAP))
+		if (!test_bit(__MDF_HAVE_BITMAP, &peer_md[node_id].flags))
 			continue;
 		if (peer_md[node_id].bitmap_uuid != bitmap_uuid) {
 			u64 previous_bitmap_uuid = peer_md[node_id].bitmap_uuid;
 			/* drbd_info(device, "XXX bitmap[node_id=%d] = %llX\n", node_id, bitmap_uuid); */
-			peer_md[node_id].bitmap_uuid = bitmap_uuid;
-			peer_md[node_id].bitmap_dagtag =
-				bitmap_uuid ? device->resource->dagtag_sector : 0;
+			drbd_set_peer_bitmap_uuid(&peer_md[node_id], bitmap_uuid,
+					     device->resource->dagtag_sector);
 			_drbd_uuid_push_history(device, previous_bitmap_uuid);
 			drbd_md_mark_dirty(device);
 			modified |= NODE_MASK(node_id);
@@ -5166,7 +5727,7 @@ static u64 __set_bitmap_slots(struct drbd_device *device, u64 bitmap_uuid, u64 d
 	return modified;
 }
 
-static u64 __test_bitmap_slots(struct drbd_device *device) __must_hold(local)
+static u64 __test_bitmap_slots(struct drbd_device *device)
 {
 	struct drbd_peer_md *peer_md = device->ldev->md.peers;
 	int node_id;
@@ -5184,7 +5745,7 @@ static u64 __test_bitmap_slots(struct drbd_device *device) __must_hold(local)
    SyncSource had. It might be that in the mean time some peers sent more
    recent UUIDs to me. Remove all peers that are on the same UUID as I am
    now from the set of nodes */
-static u64 __test_bitmap_slots_of_peer(struct drbd_peer_device *peer_device) __must_hold(local)
+static u64 __test_bitmap_slots_of_peer(struct drbd_peer_device *peer_device)
 {
 	u64 set_bitmap_slots = 0;
 	int node_id;
@@ -5219,17 +5780,67 @@ peers_with_current_uuid(struct drbd_device *device, u64 current_uuid)
 	return nodes;
 }
 
-void drbd_uuid_resync_starting(struct drbd_peer_device *peer_device) __must_hold(local)
+/* Prepare a sync target's peer slot at resync start: rotate our current UUID
+ * into the bitmap, then leave divergence.  As a resync proceeds, bits in the
+ * bitmap towards the peer are cleared -- on both the sync source and the sync
+ * target.  From then on the bitmap only records the blocks not yet in sync, so
+ * it is a convergence bitmap and must no longer be copied to another peer slot.
+ * Clear the flag after rotate_current_into_bitmap(), which may (re-)set it on
+ * this slot, and persist it before any bit is cleared.  Both under one
+ * uuid_lock hold, as the other rotate_current_into_bitmap() callers do, so that
+ * a concurrent UUID update can not re-establish divergence on this slot.
+ *
+ * The caller persists the cleared flag with drbd_md_sync_if_dirty().
+ * WARNING: Bits may already be cleared while that write is in flight, so a
+ * crash in that window can leave a partially cleared bitmap on disk with the
+ * flag still set.  The bitmap would then be taken for a divergence bitmap and
+ * could be copied to another peer slot.
+ */
+void drbd_uuid_resync_starting(struct drbd_peer_device *peer_device)
 {
 	struct drbd_device *device = peer_device->device;
+	unsigned long flags;
 
-	peer_device->rs_start_uuid = drbd_current_uuid(device);
 	if (peer_device->uuid_flags & UUID_FLAG_CRASHED_PRIMARY)
-		set_bit(SYNC_SRC_CRASHED_PRI, &peer_device->flags);
+		set_bit(SYNC_SRC_CRASHED_PRI, peer_device->flags);
+
+	spin_lock_irqsave(&device->ldev->md.uuid_lock, flags);
+	peer_device->rs_start_uuid = drbd_current_uuid(device);
 	rotate_current_into_bitmap(device, 0, device->resource->dagtag_sector);
+	clear_bit(__MDF_PEER_DIVERGENCE_BITMAP,
+		  &device->ldev->md.peers[peer_device->node_id].flags);
+	drbd_md_mark_dirty(device);
+	spin_unlock_irqrestore(&device->ldev->md.uuid_lock, flags);
 }
 
-u64 drbd_uuid_resync_finished(struct drbd_peer_device *peer_device) __must_hold(local)
+/* Prepare a sync source's peer slot at resync start.  The bitmap UUID must be
+ * non-zero throughout the resync.  A divergent-generation resync already has a
+ * non-zero bitmap UUID.  A same-current forced full resync -- the peer ran
+ * "invalidate", so source and target still share a current UUID yet the whole
+ * device is out of sync -- has no handshake to set it, so set it to our current
+ * UUID here.
+ *
+ * Then leave divergence, as drbd_uuid_resync_starting() does for the target.
+ * Both under one uuid_lock hold.
+ */
+void drbd_uuid_resync_starting_source(struct drbd_peer_device *peer_device)
+{
+	struct drbd_device *device = peer_device->device;
+	struct drbd_peer_md *peer_md = &device->ldev->md.peers[peer_device->node_id];
+	unsigned long flags;
+
+	spin_lock_irqsave(&device->ldev->md.uuid_lock, flags);
+	if (peer_md->bitmap_uuid == 0 &&
+	    (peer_device->current_uuid & ~UUID_PRIMARY) ==
+	    (drbd_current_uuid(device) & ~UUID_PRIMARY))
+		drbd_set_peer_bitmap_uuid(peer_md, drbd_current_uuid(device),
+					  device->resource->dagtag_sector);
+	clear_bit(__MDF_PEER_DIVERGENCE_BITMAP, &peer_md->flags);
+	drbd_md_mark_dirty(device);
+	spin_unlock_irqrestore(&device->ldev->md.uuid_lock, flags);
+}
+
+u64 drbd_uuid_resync_finished(struct drbd_peer_device *peer_device)
 {
 	struct drbd_device *device = peer_device->device;
 	unsigned long flags;
@@ -5288,7 +5899,7 @@ static const char *name_of_node_id(struct drbd_resource *resource, int node_id)
 	return connection ? rcu_dereference(connection->transport.net_conf)->name : "";
 }
 
-static void forget_bitmap(struct drbd_device *device, int node_id) __must_hold(local)
+static void forget_bitmap(struct drbd_device *device, int node_id)
 {
 	int bitmap_index = device->ldev->md.peers[node_id].bitmap_index;
 	const char *name;
@@ -5311,7 +5922,7 @@ static void forget_bitmap(struct drbd_device *device, int node_id) __must_hold(l
 	spin_lock_irq(&device->ldev->md.uuid_lock);
 }
 
-static void copy_bitmap(struct drbd_device *device, int from_id, int to_id) __must_hold(local)
+static void copy_bitmap(struct drbd_device *device, int from_id, int to_id)
 {
 	struct drbd_peer_device *peer_device = peer_device_by_node_id(device, to_id);
 	struct drbd_peer_md *peer_md = device->ldev->md.peers;
@@ -5320,8 +5931,8 @@ static void copy_bitmap(struct drbd_device *device, int from_id, int to_id) __mu
 	int to_index = peer_md[to_id].bitmap_index;
 	const char *from_name, *to_name;
 
-	peer_md[to_id].bitmap_uuid = peer_md[from_id].bitmap_uuid;
-	peer_md[to_id].bitmap_dagtag = peer_md[from_id].bitmap_dagtag;
+	drbd_set_peer_bitmap_uuid(&peer_md[to_id], peer_md[from_id].bitmap_uuid,
+			     peer_md[from_id].bitmap_dagtag);
 	_drbd_uuid_push_history(device, previous_bitmap_uuid);
 
 	/* Pretending that the updated UUID was sent is a hack.
@@ -5339,31 +5950,49 @@ static void copy_bitmap(struct drbd_device *device, int from_id, int to_id) __mu
 	drbd_suspend_io(device, WRITE_ONLY);
 	drbd_bm_lock(device, "copy_bitmap()", BM_LOCK_ALL);
 	drbd_bm_copy_slot(device, from_index, to_index);
+	/* the copy carries the reason the bits were set for */
+	if (test_bit(__MDF_PEER_BITMAP_AUTHORITATIVE, &peer_md[from_id].flags) &&
+	    _drbd_bm_total_weight(device, to_index) != 0)
+		set_bit(__MDF_PEER_BITMAP_AUTHORITATIVE, &peer_md[to_id].flags);
+	else
+		clear_bit(__MDF_PEER_BITMAP_AUTHORITATIVE, &peer_md[to_id].flags);
+	peer_md[to_id].placeholder_src = peer_md[from_id].placeholder_src;
+	peer_md[to_id].placeholder_src_complete = peer_md[from_id].placeholder_src_complete;
 	drbd_bm_unlock(device);
 	drbd_resume_io(device);
 	drbd_md_mark_dirty(device);
 	spin_lock_irq(&device->ldev->md.uuid_lock);
 }
 
-static int find_node_id_by_bitmap_uuid(struct drbd_device *device, u64 bm_uuid) __must_hold(local)
+/* Find a peer slot holding the given bitmap UUID, to be used as a copy source.
+ * Prefer, in order:
+ *   1. a divergence bitmap with an allocated bitmap (MDF_HAVE_BITMAP);
+ *   2. any other divergence bitmap (e.g. a day0 slot);
+ *   3. any matching slot, so callers can still distinguish "UUID unknown" (-1)
+ *      from "UUID known but only as a convergence bitmap being cleared by a
+ *      resync", which cannot be copied from.
+ */
+static int find_node_id_by_bitmap_uuid(struct drbd_device *device, u64 bm_uuid)
 {
 	struct drbd_peer_md *peer_md = device->ldev->md.peers;
-	int node_id;
+	int node_id, any = -1, divergence = -1;
 
 	bm_uuid &= ~UUID_PRIMARY;
 
 	for (node_id = 0; node_id < DRBD_NODE_ID_MAX; node_id++) {
-		if ((peer_md[node_id].bitmap_uuid & ~UUID_PRIMARY) == bm_uuid &&
-		    peer_md[node_id].flags & MDF_HAVE_BITMAP)
+		if ((peer_md[node_id].bitmap_uuid & ~UUID_PRIMARY) != bm_uuid)
+			continue;
+		if (any == -1)
+			any = node_id;
+		if (!is_divergence_bitmap(&peer_md[node_id]))
+			continue;
+		if (test_bit(__MDF_HAVE_BITMAP, &peer_md[node_id].flags))
 			return node_id;
+		if (divergence == -1)
+			divergence = node_id;
 	}
 
-	for (node_id = 0; node_id < DRBD_NODE_ID_MAX; node_id++) {
-		if ((peer_md[node_id].bitmap_uuid & ~UUID_PRIMARY) == bm_uuid)
-			return node_id;
-	}
-
-	return -1;
+	return divergence != -1 ? divergence : any;
 }
 
 static bool node_connected(struct drbd_resource *resource, int node_id)
@@ -5380,7 +6009,7 @@ static bool node_connected(struct drbd_resource *resource, int node_id)
 	return r;
 }
 
-static bool detect_copy_ops_on_peer(struct drbd_peer_device *peer_device) __must_hold(local)
+static bool detect_copy_ops_on_peer(struct drbd_peer_device *peer_device)
 {
 	struct drbd_device *device = peer_device->device;
 	struct drbd_peer_md *peer_md = device->ldev->md.peers;
@@ -5429,7 +6058,13 @@ found:
 		return false;
 	}
 
-	if (!(peer_md[from_id].flags & MDF_HAVE_BITMAP))
+	if (!test_bit(__MDF_HAVE_BITMAP, &peer_md[from_id].flags))
+		return false;
+
+	/* Only copy from a divergence bitmap, never from a convergence bitmap
+	 * that is being cleared by an ongoing resync.
+	 */
+	if (!is_divergence_bitmap(&peer_md[from_id]))
 		return false;
 
 	if (from_id != node_id1 &&
@@ -5447,7 +6082,7 @@ found:
 	return modified;
 }
 
-void drbd_uuid_detect_finished_resyncs(struct drbd_peer_device *peer_device) __must_hold(local)
+void drbd_uuid_detect_finished_resyncs(struct drbd_peer_device *peer_device)
 {
 	u64 peer_current_uuid = peer_device->current_uuid & ~UUID_PRIMARY;
 	struct drbd_device *device = peer_device->device;
@@ -5459,7 +6094,8 @@ void drbd_uuid_detect_finished_resyncs(struct drbd_peer_device *peer_device) __m
 	int node_id;
 
 	current_equal = peer_current_uuid == (drbd_resolved_uuid(peer_device, NULL) & ~UUID_PRIMARY) &&
-		!(peer_device->uuid_flags & UUID_FLAG_SYNC_TARGET);
+		!(peer_device->uuid_flags & UUID_FLAG_SYNC_TARGET) &&
+		!(peer_device->comm_uuid_flags & UUID_FLAG_SYNC_TARGET);
 
 	spin_lock_irq(&device->ldev->md.uuid_lock);
 
@@ -5469,13 +6105,33 @@ void drbd_uuid_detect_finished_resyncs(struct drbd_peer_device *peer_device) __m
 
 		if (bm_towards_me != 0 && bm_to_peer == 0 &&
 		    bm_towards_me != peer_current_uuid) {
-			drbd_info(peer_device, "Peer missed end of resync\n");
-			set_bit(RS_PEER_MISSED_END, &peer_device->flags);
+			if (peer_device->comm_bm_set == 0 && peer_device->dirty_bits == 0) {
+				drbd_info(peer_device, "Peer missed end of resync, 0 to sync\n");
+				if (peer_device->connection->agreed_pro_version < 124)
+					set_bit(RS_PEER_MISSED_END, peer_device->flags);
+			} else {
+				drbd_info(peer_device, "Peer missed end of resync\n");
+				set_bit(RS_PEER_MISSED_END, peer_device->flags);
+			}
 		}
 		if (bm_towards_me == 0 && bm_to_peer != 0 &&
 		    bm_to_peer != peer_current_uuid) {
-			drbd_info(peer_device, "Missed end of resync as sync-source\n");
-			set_bit(RS_SOURCE_MISSED_END, &peer_device->flags);
+			if (peer_device->comm_bm_set == 0 && peer_device->dirty_bits == 0) {
+				int peer_node_id = peer_device->node_id;
+				u64 previous = peer_md[peer_node_id].bitmap_uuid;
+
+				drbd_info(peer_device,
+					"Missed end of resync as sync-source, no bits to sync\n");
+				drbd_set_peer_bitmap_uuid(&peer_md[peer_node_id], 0, 0);
+				_drbd_uuid_push_history(device, previous);
+				peer_device->comm_bitmap_uuid = 0;
+				drbd_md_mark_dirty(device);
+				if (peer_device->connection->agreed_pro_version < 124)
+					set_bit(RS_SOURCE_MISSED_END, peer_device->flags);
+			} else {
+				drbd_info(peer_device, "Missed end of resync as sync-source\n");
+				set_bit(RS_SOURCE_MISSED_END, peer_device->flags);
+			}
 		}
 		spin_unlock_irq(&device->ldev->md.uuid_lock);
 		return;
@@ -5487,7 +6143,8 @@ void drbd_uuid_detect_finished_resyncs(struct drbd_peer_device *peer_device) __m
 		if (node_id == device->ldev->md.node_id)
 			continue;
 
-		if (!(peer_md[node_id].flags & MDF_HAVE_BITMAP) && !(peer_md[node_id].flags & MDF_NODE_EXISTS))
+		if (!test_bit(__MDF_HAVE_BITMAP, &peer_md[node_id].flags) &&
+		    !test_bit(__MDF_NODE_EXISTS, &peer_md[node_id].flags))
 			continue;
 
 		pd2 = peer_device_by_node_id(device, node_id);
@@ -5499,11 +6156,11 @@ void drbd_uuid_detect_finished_resyncs(struct drbd_peer_device *peer_device) __m
 
 			if (current_equal) {
 				u64 previous_bitmap_uuid = peer_md[node_id].bitmap_uuid;
-				peer_md[node_id].bitmap_uuid = 0;
+				drbd_set_peer_bitmap_uuid(&peer_md[node_id], 0, 0);
 				_drbd_uuid_push_history(device, previous_bitmap_uuid);
 				if (node_id == peer_device->node_id)
 					drbd_print_uuids(peer_device, "updated UUIDs");
-				else if (peer_md[node_id].flags & MDF_HAVE_BITMAP)
+				else if (test_bit(__MDF_HAVE_BITMAP, &peer_md[node_id].flags))
 					forget_bitmap(device, node_id);
 				else
 					drbd_info(device, "Clearing bitmap UUID for node %d\n",
@@ -5514,10 +6171,11 @@ void drbd_uuid_detect_finished_resyncs(struct drbd_peer_device *peer_device) __m
 
 			from_node_id = find_node_id_by_bitmap_uuid(device, peer_current_uuid);
 			if (from_node_id != -1 && node_id != from_node_id &&
+			    is_divergence_bitmap(&peer_md[from_node_id]) &&
 			    dagtag_newer(peer_md[from_node_id].bitmap_dagtag,
 					 peer_md[node_id].bitmap_dagtag)) {
-				if (peer_md[node_id].flags & MDF_HAVE_BITMAP &&
-				    peer_md[from_node_id].flags & MDF_HAVE_BITMAP)
+				if (test_bit(__MDF_HAVE_BITMAP, &peer_md[node_id].flags) &&
+				    test_bit(__MDF_HAVE_BITMAP, &peer_md[from_node_id].flags))
 					copy_bitmap(device, from_node_id, node_id);
 				else
 					drbd_info(device, "Node %d synced up to node %d.\n",
@@ -5543,7 +6201,7 @@ void drbd_uuid_detect_finished_resyncs(struct drbd_peer_device *peer_device) __m
 }
 
 int drbd_bmio_set_all_n_write(struct drbd_device *device,
-			      struct drbd_peer_device *peer_device) __must_hold(local)
+			      struct drbd_peer_device *peer_device)
 {
 	drbd_bm_set_all(device);
 	return drbd_bm_write(device, NULL);
@@ -5557,18 +6215,18 @@ int drbd_bmio_set_all_n_write(struct drbd_device *device,
  * Sets all bits in the bitmap towards one peer and writes the whole bitmap to stable storage.
  */
 int drbd_bmio_set_n_write(struct drbd_device *device,
-			  struct drbd_peer_device *peer_device) __must_hold(local)
+			  struct drbd_peer_device *peer_device)
 {
 	int rv = -EIO;
 
-	drbd_md_set_peer_flag(peer_device, MDF_PEER_FULL_SYNC);
+	drbd_md_set_peer_flag(peer_device, __MDF_PEER_FULL_SYNC);
 	drbd_md_sync(device);
 	drbd_bm_set_many_bits(peer_device, 0, -1UL);
 
 	rv = drbd_bm_write(device, NULL);
 
 	if (!rv) {
-		drbd_md_clear_peer_flag(peer_device, MDF_PEER_FULL_SYNC);
+		drbd_md_clear_peer_flag(peer_device, __MDF_PEER_FULL_SYNC);
 		drbd_md_sync(device);
 	}
 
@@ -5583,7 +6241,7 @@ int drbd_bmio_set_n_write(struct drbd_device *device,
  * Sets all bits in all allocated bitmap slots and writes it to stable storage.
  */
 int drbd_bmio_set_allocated_n_write(struct drbd_device *device,
-				    struct drbd_peer_device *peer_device) __must_hold(local)
+				    struct drbd_peer_device *peer_device)
 {
 	const int my_node_id = device->resource->res_opts.node_id;
 	struct drbd_md *md = &device->ldev->md;
@@ -5611,7 +6269,7 @@ int drbd_bmio_set_allocated_n_write(struct drbd_device *device,
  * Clears all bits in the bitmap and writes the whole bitmap to stable storage.
  */
 int drbd_bmio_clear_all_n_write(struct drbd_device *device,
-			    struct drbd_peer_device *peer_device) __must_hold(local)
+			    struct drbd_peer_device *peer_device)
 {
 	drbd_resume_al(device);
 	drbd_bm_clear_all(device);
@@ -5619,7 +6277,7 @@ int drbd_bmio_clear_all_n_write(struct drbd_device *device,
 }
 
 int drbd_bmio_clear_one_peer(struct drbd_device *device,
-			     struct drbd_peer_device *peer_device) __must_hold(local)
+			     struct drbd_peer_device *peer_device)
 {
 	drbd_bm_clear_many_bits(peer_device, 0, -1UL);
 	return drbd_bm_write(device, NULL);
@@ -5694,7 +6352,7 @@ void drbd_queue_bitmap_io(struct drbd_device *device,
 
 	D_ASSERT(device, current == device->resource->worker.task);
 
-	bm_io_work = kmalloc(sizeof(*bm_io_work), GFP_NOIO);
+	bm_io_work = kmalloc_obj(*bm_io_work, GFP_NOIO);
 	if (!bm_io_work) {
 		if (done)
 			done(device, peer_device, -ENOMEM);
@@ -5767,6 +6425,9 @@ int drbd_bitmap_io(struct drbd_device *device,
 
 	D_ASSERT(device, current != device->resource->worker.task);
 
+	if (!device->bitmap)
+		return 0;
+
 	if (do_suspend_io)
 		drbd_suspend_io(device, WRITE_ONLY);
 
@@ -5788,44 +6449,24 @@ int drbd_bitmap_io(struct drbd_device *device,
 	return rv;
 }
 
-void drbd_md_set_flag(struct drbd_device *device, enum mdf_flag flag) __must_hold(local)
-{
-	if ((device->ldev->md.flags & flag) != flag) {
-		drbd_md_mark_dirty(device);
-		device->ldev->md.flags |= flag;
-	}
-}
-
 void drbd_md_set_peer_flag(struct drbd_peer_device *peer_device,
-			   enum mdf_peer_flag flag) __must_hold(local)
+			   enum mdf_peer_flag_bit flag_bit)
 {
 	struct drbd_device *device = peer_device->device;
 	struct drbd_md *md = &device->ldev->md;
 
-	if (!(md->peers[peer_device->node_id].flags & flag)) {
+	if (!test_and_set_bit(flag_bit, &md->peers[peer_device->node_id].flags))
 		drbd_md_mark_dirty(device);
-		md->peers[peer_device->node_id].flags |= flag;
-	}
-}
-
-void drbd_md_clear_flag(struct drbd_device *device, enum mdf_flag flag) __must_hold(local)
-{
-	if ((device->ldev->md.flags & flag) != 0) {
-		drbd_md_mark_dirty(device);
-		device->ldev->md.flags &= ~flag;
-	}
 }
 
 void drbd_md_clear_peer_flag(struct drbd_peer_device *peer_device,
-			     enum mdf_peer_flag flag) __must_hold(local)
+			     enum mdf_peer_flag_bit flag_bit)
 {
 	struct drbd_device *device = peer_device->device;
 	struct drbd_md *md = &device->ldev->md;
 
-	if (md->peers[peer_device->node_id].flags & flag) {
+	if (test_and_clear_bit(flag_bit, &md->peers[peer_device->node_id].flags))
 		drbd_md_mark_dirty(device);
-		md->peers[peer_device->node_id].flags &= ~flag;
-	}
 }
 
 int drbd_md_test_flag(struct drbd_backing_dev *bdev, enum mdf_flag flag)
@@ -5833,19 +6474,60 @@ int drbd_md_test_flag(struct drbd_backing_dev *bdev, enum mdf_flag flag)
 	return (bdev->md.flags & flag) != 0;
 }
 
-bool drbd_md_test_peer_flag(struct drbd_peer_device *peer_device, enum mdf_peer_flag flag)
+/* The last out-of-sync bit toward this slot is gone, and with it the reason
+ * the bits were set for.  Called under the bitmap lock, with the disk attached.
+ */
+void drbd_md_slot_emptied(struct drbd_device *device, int bitmap_index)
+{
+	struct drbd_peer_md *peer_md = device->ldev->md.peers;
+	int node_id;
+
+	for (node_id = 0; node_id < DRBD_NODE_ID_MAX; node_id++) {
+		if (peer_md[node_id].bitmap_index != bitmap_index)
+			continue;
+		peer_md[node_id].placeholder_src = 0;
+		peer_md[node_id].placeholder_src_complete = true;
+		if (test_and_clear_bit(__MDF_PEER_BITMAP_AUTHORITATIVE, &peer_md[node_id].flags))
+			drbd_md_mark_dirty(device);
+	}
+}
+
+/* Every bit standing toward a peer may be one that peer lacks: a crashed
+ * Primary's activity log replay marks the crash window toward all of them.
+ */
+void drbd_md_set_bitmaps_authoritative(struct drbd_device *device)
+{
+	struct drbd_peer_md *peer_md = device->ldev->md.peers;
+	int node_id;
+
+	for (node_id = 0; node_id < DRBD_NODE_ID_MAX; node_id++) {
+		if (!test_bit(__MDF_HAVE_BITMAP, &peer_md[node_id].flags))
+			continue;
+		if (_drbd_bm_total_weight(device, peer_md[node_id].bitmap_index) == 0)
+			continue;
+		if (!test_and_set_bit(__MDF_PEER_BITMAP_AUTHORITATIVE, &peer_md[node_id].flags))
+			drbd_md_mark_dirty(device);
+	}
+}
+
+bool drbd_md_test_peer_flag(struct drbd_peer_device *peer_device, enum mdf_peer_flag_bit flag_bit)
 {
 	struct drbd_md *md = &peer_device->device->ldev->md;
 
 	if (peer_device->bitmap_index == -1)
 		return false;
 
-	return md->peers[peer_device->node_id].flags & flag;
+	return test_bit(flag_bit, &md->peers[peer_device->node_id].flags);
 }
 
 static void md_sync_timer_fn(struct timer_list *t)
 {
+# 6518 "/scrap/drbd/drbd/drbd_main.c"
+# 17 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_main.c.patch"
+# 6528 "/scrap/drbd/drbd/build-6.12.116-mdl+/drbd_main.c"
 	struct drbd_device *device = from_timer(device, t, md_sync_timer);
+# 18 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_main.c.patch"
+# 6518 "/scrap/drbd/drbd/drbd_main.c"
 	drbd_device_post_work(device, MD_SYNC);
 }
 
@@ -5892,13 +6574,13 @@ u64 directly_connected_nodes(struct drbd_resource *resource, enum which_state wh
 	return directly_connected;
 }
 
-static sector_t bm_sect_to_max_capacity(unsigned int bm_max_peers, sector_t bm_sect)
+static sector_t bm_sect_to_max_capacity(const struct drbd_md *md, sector_t bm_sect)
 {
 	/* we do our meta data IO in 4k units */
 	u64 bm_bytes = ALIGN_DOWN(bm_sect << SECTOR_SHIFT, 4096);
-	u64 bm_bytes_per_peer = div_u64(bm_bytes, bm_max_peers);
+	u64 bm_bytes_per_peer = div_u64(bm_bytes, md->max_peers);
 	u64 bm_bits_per_peer = bm_bytes_per_peer * BITS_PER_BYTE;
-	return BM_BIT_TO_SECT(bm_bits_per_peer);
+	return bm_bits_per_peer << (md->bm_block_shift - SECTOR_SHIFT);
 }
 
 
@@ -5916,7 +6598,8 @@ static sector_t bm_sect_to_max_capacity(unsigned int bm_max_peers, sector_t bm_s
 sector_t drbd_get_max_capacity(
 		struct drbd_device *device, struct drbd_backing_dev *bdev, bool warn)
 {
-	unsigned int bm_max_peers = device->bitmap->bm_max_peers;
+	unsigned int bm_max_peers = bdev->md.max_peers;
+	unsigned int bm_block_size = bdev->md.bm_block_size;
 	sector_t backing_bdev_capacity = drbd_get_capacity(bdev->backing_bdev);
 	sector_t bm_sect;
 	sector_t backing_capacity_remaining;
@@ -5938,7 +6621,7 @@ sector_t drbd_get_max_capacity(
 		backing_capacity_remaining = backing_bdev_capacity;
 	}
 
-	metadata_limit = bm_sect_to_max_capacity(bm_max_peers, bm_sect);
+	metadata_limit = bm_sect_to_max_capacity(&bdev->md, bm_sect);
 
 	dynamic_drbd_dbg(device,
 			"Backing device capacity: %llus, remaining: %llus, bitmap sectors: %llus\n",
@@ -5946,8 +6629,8 @@ sector_t drbd_get_max_capacity(
 			(unsigned long long) backing_capacity_remaining,
 			(unsigned long long) bm_sect);
 	dynamic_drbd_dbg(device,
-			"Max peers: %u, metadata limit: %llus, hard limit: %llus\n",
-			bm_max_peers,
+			"Max peers: %u, bytes_per_bit: %u, metadata limit: %llus, hard limit: %llus\n",
+			bm_max_peers, bm_block_size,
 			(unsigned long long) metadata_limit,
 			(unsigned long long) DRBD_MAX_SECTORS);
 
@@ -5977,7 +6660,7 @@ sector_t drbd_partition_data_capacity(struct drbd_device *device)
 
 	rcu_read_lock();
 	for_each_peer_device_rcu(peer_device, device) {
-		if (test_bit(HAVE_SIZES, &peer_device->flags)) {
+		if (test_bit(HAVE_SIZES, peer_device->flags)) {
 			dynamic_drbd_dbg(peer_device, "d_size: %llus\n",
 					(unsigned long long)peer_device->d_size);
 			capacity = min_not_zero(capacity, peer_device->d_size);
@@ -6043,6 +6726,7 @@ _drbd_fault_str(unsigned int type) {
 		[DRBD_FAULT_BM_ALLOC] = "BM allocation",
 		[DRBD_FAULT_AL_EE] = "EE allocation",
 		[DRBD_FAULT_RECEIVE] = "receive data corruption",
+		[DRBD_FAULT_BIO_TOO_SMALL] = "BIO too small",
 	};
 
 	return (type < DRBD_FAULT_MAX) ? _faults[type] : "**Unknown**";

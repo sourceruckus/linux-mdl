@@ -1,19 +1,22 @@
 # 1 "/scrap/drbd/drbd/drbd_dax_pmem.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * Copyright (C) 2017, LINBIT HA-Solutions GmbH.
+ */
 #ifndef DRBD_DAX_H
 #define DRBD_DAX_H
 
 #include <linux/kconfig.h>
 
-#if IS_ENABLED(CONFIG_DEV_DAX_PMEM) && !defined(DAX_PMEM_IS_INCOMPLETE)
+#if IS_ENABLED(CONFIG_DEV_DAX_PMEM)
 
-int drbd_dax_open(struct drbd_backing_dev *);
-void drbd_dax_close(struct drbd_backing_dev *);
-int drbd_dax_map(struct drbd_backing_dev *);
+int drbd_dax_open(struct drbd_backing_dev *bdev);
+void drbd_dax_close(struct drbd_backing_dev *bdev);
+int drbd_dax_map(struct drbd_backing_dev *bdev);
 void drbd_dax_al_update(struct drbd_device *device, struct lc_element *al_ext);
-void drbd_dax_al_begin_io_commit(struct drbd_device *);
+void drbd_dax_al_begin_io_commit(struct drbd_device *device);
 int drbd_dax_al_initialize(struct drbd_device *device);
-void *drbd_dax_bitmap(struct drbd_device *, unsigned long);
+void *drbd_dax_bitmap(struct drbd_device *device, unsigned long want);
 
 static inline bool drbd_md_dax_active(struct drbd_backing_dev *bdev)
 {

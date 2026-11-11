@@ -1,5 +1,9 @@
 # 1 "/scrap/drbd/drbd/drbd_interval.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * Copyright (C) 2011, LINBIT HA-Solutions GmbH.
+ */
+
 #ifndef __DRBD_INTERVAL_H
 #define __DRBD_INTERVAL_H
 
@@ -24,14 +28,13 @@ enum drbd_interval_type {
 #define INTERVAL_TYPE_MASK(type) (1 << (type))
 
 enum drbd_interval_flags {
+	/* Whether this peer request may be sent. */
+	INTERVAL_READY_TO_SEND,
+
 	/*
-	 * Whether this peer request has been sent yet. For resync writes, the
-	 * flag is set before sending.
-	 *
-	 * For resync reads, this flag is set after sending and is used to
+	 * Used for resync reads. This flag is set after sending and is used to
 	 * manage the lifetime of the request. When INTERVAL_SENT is not set,
-	 * the sending path still has a reference to the request. This
-	 * reference counting is protected by peer_reqs_lock.
+	 * the sending path still has a reference to the request.
 	 */
 	INTERVAL_SENT,
 
@@ -63,6 +66,23 @@ enum drbd_interval_flags {
 
 	/* For resync requests: whether this was canceled while waiting for conflict resolution. */
 	INTERVAL_CANCELED,
+
+	/*
+	 * For local requests: whether this is done.
+	 *
+	 * Included here instead of in local_rq_state to allow access with
+	 * atomic bit operations instead of taking rq_lock.
+	 */
+	INTERVAL_DONE,
+
+	/*
+	 * For local requests: when we put the AL extent for this request, it
+	 * was the last in that extent.
+	 *
+	 * Included here instead of in local_rq_state to allow access with
+	 * atomic bit operations instead of taking rq_lock.
+	 */
+	INTERVAL_AL_EXTENT_LAST,
 };
 
 /* Intervals used to manage conflicts between application requests and various
@@ -90,7 +110,7 @@ enum drbd_interval_flags {
  * are simply cancelled. Futhermore, they do not lock out other requests;
  * instead they are simply marked as having conflicts and ignored.
  *
- * Application request intervals are retained even when they are
+ * Application write request intervals are retained even when they are
  * "INTERVAL_COMPLETED", so that they can be used to look up remote replies
  * that are still pending.
  */
@@ -128,6 +148,11 @@ static inline bool drbd_interval_is_verify(struct drbd_interval *i)
 	return i->type == INTERVAL_OV_READ_SOURCE || i->type == INTERVAL_OV_READ_TARGET;
 }
 
+static inline bool drbd_interval_is_local(struct drbd_interval *i)
+{
+	return i->type == INTERVAL_LOCAL_READ || i->type == INTERVAL_LOCAL_WRITE;
+}
+
 static inline void drbd_clear_interval(struct drbd_interval *i)
 {
 	RB_CLEAR_NODE(&i->rb);
@@ -138,16 +163,17 @@ static inline bool drbd_interval_empty(struct drbd_interval *i)
 	return RB_EMPTY_NODE(&i->rb);
 }
 
-extern const char *drbd_interval_type_str(struct drbd_interval *i);
-extern bool drbd_insert_interval(struct rb_root *, struct drbd_interval *);
-extern bool drbd_contains_interval(struct rb_root *, sector_t,
-				   struct drbd_interval *);
-extern void drbd_remove_interval(struct rb_root *, struct drbd_interval *);
-extern struct drbd_interval *drbd_find_overlap(struct rb_root *, sector_t,
-					unsigned int);
-extern struct drbd_interval *drbd_next_overlap(struct drbd_interval *, sector_t,
-					unsigned int);
-extern void drbd_update_interval_size(struct drbd_interval *, unsigned int);
+const char *drbd_interval_type_str(struct drbd_interval *i);
+bool drbd_insert_interval(struct rb_root *root, struct drbd_interval *this);
+bool drbd_contains_interval(struct rb_root *root, sector_t sector,
+			    struct drbd_interval *interval);
+void drbd_remove_interval(struct rb_root *root, struct drbd_interval *this);
+struct drbd_interval *drbd_find_overlap(struct rb_root *root, sector_t sector,
+					unsigned int size);
+struct drbd_interval *drbd_next_overlap(struct drbd_interval *i,
+					sector_t sector, unsigned int size);
+void drbd_update_interval_size(struct drbd_interval *this,
+			       unsigned int new_size);
 
 #define drbd_for_each_overlap(i, root, sector, size)		\
 	for (i = drbd_find_overlap(root, sector, size);		\

@@ -1,5 +1,9 @@
 # 1 "/scrap/drbd/drbd/drbd_debugfs.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * Copyright (C) 2014, LINBIT HA-Solutions GmbH.
+ */
+
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/debugfs.h>

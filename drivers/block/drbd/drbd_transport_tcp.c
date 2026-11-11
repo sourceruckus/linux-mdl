@@ -1,14 +1,8 @@
 # 1 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 // SPDX-License-Identifier: GPL-2.0-only
 /*
-   drbd_transport_tcp.c
-
-   This file is part of DRBD.
-
-   Copyright (C) 2014-2017, LINBIT HA-Solutions GmbH.
-
-
-*/
+ * Copyright (C) 2014, LINBIT HA-Solutions GmbH.
+ */
 
 #include <linux/module.h>
 #include <linux/errno.h>
@@ -20,14 +14,16 @@
 #include <linux/tcp.h>
 #include <linux/highmem.h>
 #include <linux/bio.h>
-#include <linux/drbd_genl_api.h>
+#include <linux/drbd.h>
+#include <uapi/linux/drbd_genl.h>
+#include <linux/drbd_nl_gen.h>
 #include <linux/drbd_config.h>
 #include <linux/tls.h>
 #include <net/tcp.h>
 #include <net/handshake.h>
 #include <net/tls.h>
 #include <net/tls_prot.h>
-#include "drbd_protocol.h"
+#include <linux/drbd_protocol.h>
 #include "drbd_transport.h"
 
 
@@ -48,8 +44,8 @@ MODULE_VERSION(REL_VERSION);
  * We use this to try to keep "idle" TCP sessions "alive".
  * Default to send a probe every 23 seconds.
  */
-#define DRBD_KEEP_IDLE	(23*HZ)
-#define DRBD_KEEP_INTVL (23*HZ)
+#define DRBD_KEEP_IDLE	23
+#define DRBD_KEEP_INTVL 23
 #define DRBD_KEEP_CNT	9
 static unsigned int drbd_keepcnt = DRBD_KEEP_CNT;
 module_param_named(keepcnt, drbd_keepcnt, uint, 0664);
@@ -59,7 +55,7 @@ module_param_named(keepidle, drbd_keepidle, uint, 0664);
 MODULE_PARM_DESC(keepidle, "see tcp(7) tcp_keepalive_time; set TCP_KEEPIDLE for data sockets; default: 23s");
 static unsigned int drbd_keepintvl = DRBD_KEEP_INTVL;
 module_param_named(keepintvl, drbd_keepintvl, uint, 0664);
-MODULE_PARM_DESC(keepintvtl, "see tcp(7) tcp_keepalive_intvl; set TCP_KEEPINTVL for data sockets; default: 23s");
+MODULE_PARM_DESC(keepintvl, "see tcp(7) tcp_keepalive_intvl; set TCP_KEEPINTVL for data sockets; default: 23s");
 
 static struct workqueue_struct *dtt_csocket_recv;
 
@@ -81,14 +77,13 @@ struct drbd_tcp_transport {
 	struct work_struct control_data_ready_work;
 	void (*original_control_sk_state_change)(struct sock *sk);
 	void (*original_control_sk_data_ready)(struct sock *sk);
+	wait_queue_head_t wait; /* woken if a connection came in on any of our paths */
 };
 
 struct dtt_listener {
 	struct drbd_listener listener;
 	void (*original_sk_state_change)(struct sock *sk);
 	struct socket *s_listen;
-
-	wait_queue_head_t wait; /* woken if a connection came in */
 };
 
 /* Since each path might have a different local IP address, each
@@ -106,6 +101,7 @@ struct dtt_path {
 	struct list_head sockets; /* sockets passed to me by other receiver threads */
 };
 
+
 static int dtt_init(struct drbd_transport *transport);
 static void dtt_free(struct drbd_transport *transport, enum drbd_tr_free_op free_op);
 static void dtt_socket_free(struct socket **sock);
@@ -116,14 +112,14 @@ static int dtt_prepare_connect(struct drbd_transport *transport);
 static int dtt_connect(struct drbd_transport *transport);
 static void dtt_finish_connect(struct drbd_transport *transport);
 static int dtt_recv(struct drbd_transport *transport, enum drbd_stream stream, void **buf, size_t size, int flags);
-static int dtt_recv_pages(struct drbd_transport *transport, struct drbd_page_chain_head *chain, size_t size);
+static int dtt_recv_bio(struct drbd_transport *transport, struct bio_list *bios, size_t size);
 static void dtt_stats(struct drbd_transport *transport, struct drbd_transport_stats *stats);
 static int dtt_net_conf_change(struct drbd_transport *transport, struct net_conf *new_net_conf);
 static void dtt_set_rcvtimeo(struct drbd_transport *transport, enum drbd_stream stream, long timeout);
 static long dtt_get_rcvtimeo(struct drbd_transport *transport, enum drbd_stream stream);
 static int dtt_send_page(struct drbd_transport *transport, enum drbd_stream, struct page *page,
-		int offset, size_t size, unsigned msg_flags);
-static int dtt_send_zc_bio(struct drbd_transport *, struct bio *bio);
+		int offset, size_t size, unsigned int msg_flags);
+static int dtt_send_bio(struct drbd_transport *, struct bio *bio, unsigned int msg_flags);
 static bool dtt_stream_ok(struct drbd_transport *transport, enum drbd_stream stream);
 static bool dtt_hint(struct drbd_transport *transport, enum drbd_stream stream, enum drbd_tr_hints hint);
 static void dtt_debugfs_show(struct drbd_transport *transport, struct seq_file *m);
@@ -147,13 +143,13 @@ static struct drbd_transport_class tcp_transport_class = {
 		.connect = dtt_connect,
 		.finish_connect = dtt_finish_connect,
 		.recv = dtt_recv,
-		.recv_pages = dtt_recv_pages,
+		.recv_bio = dtt_recv_bio,
 		.stats = dtt_stats,
 		.net_conf_change = dtt_net_conf_change,
 		.set_rcvtimeo = dtt_set_rcvtimeo,
 		.get_rcvtimeo = dtt_get_rcvtimeo,
 		.send_page = dtt_send_page,
-		.send_zc_bio = dtt_send_zc_bio,
+		.send_bio = dtt_send_bio,
 		.stream_ok = dtt_stream_ok,
 		.hint = dtt_hint,
 		.debugfs_show = dtt_debugfs_show,
@@ -172,6 +168,7 @@ static int dtt_init(struct drbd_transport *transport)
 	enum drbd_stream i;
 
 	spin_lock_init(&tcp_transport->control_recv_lock);
+	init_waitqueue_head(&tcp_transport->wait);
 	tcp_transport->transport.class = &tcp_transport_class;
 	for (i = DATA_STREAM; i <= CONTROL_STREAM ; i++) {
 		void *buffer = (void *)__get_free_page(GFP_KERNEL);
@@ -224,7 +221,7 @@ static void dtt_free(struct drbd_transport *transport, enum drbd_tr_free_op free
 			drbd_path_event(transport, drbd_path);
 	}
 
-	del_timer_sync(&tcp_transport->control_timer);
+	timer_delete_sync(&tcp_transport->control_timer);
 
 	if (free_op == DESTROY_TRANSPORT) {
 		for (i = DATA_STREAM; i <= CONTROL_STREAM; i++) {
@@ -358,41 +355,40 @@ static int dtt_recv(struct drbd_transport *transport, enum drbd_stream stream, v
 	return rv;
 }
 
-static int dtt_recv_pages(struct drbd_transport *transport, struct drbd_page_chain_head *chain, size_t size)
+
+static int dtt_recv_bio(struct drbd_transport *transport, struct bio_list *bios, size_t size)
 {
 	struct drbd_tcp_transport *tcp_transport =
 		container_of(transport, struct drbd_tcp_transport, transport);
 	struct socket *socket = tcp_transport->stream[DATA_STREAM];
+	size_t remaining = size;
 	struct page *page;
 	int err;
 
 	if (!socket)
 		return -ENOTCONN;
 
-	drbd_alloc_page_chain(transport, chain, DIV_ROUND_UP(size, PAGE_SIZE), GFP_TRY);
-	page = chain->head;
-	if (!page)
-		return -ENOMEM;
+	do {
+		size_t len;
 
-	page_chain_for_each(page) {
-		size_t len = min_t(int, size, PAGE_SIZE);
-		void *data = kmap(page);
-		err = dtt_recv_short(socket, data, len, 0);
-		kunmap(page);
-		set_page_chain_offset(page, 0);
-		set_page_chain_size(page, len);
+		page = drbd_alloc_pages(transport, GFP_KERNEL, remaining);
+		if (!page)
+			return -ENOMEM;
+		len = min(PAGE_SIZE << compound_order(page), remaining);
+
+		err = dtt_recv_short(socket, page_address(page), len, 0);
+		if (err <= 0)
+			goto fail;
+		remaining -= err;
+		err = drbd_bio_add_page(transport, bios, page, len, 0);
 		if (err < 0)
 			goto fail;
-		size -= err;
-	}
-	if (unlikely(size)) {
-		tr_warn(transport, "Not enough data received; missing %zu bytes\n", size);
-		err = -ENODATA;
-		goto fail;
-	}
-	return 0;
+	} while (remaining > 0);
+
+	return size;
+
 fail:
-	drbd_free_page_chain(transport, chain, 0);
+	drbd_free_page(transport, page);
 	return err;
 }
 
@@ -446,6 +442,28 @@ static bool dtt_path_cmp_addr(struct dtt_path *path)
 	return memcmp(&drbd_path->my_addr, &drbd_path->peer_addr, addr_size) > 0;
 }
 
+/* Translate transient socket errors (connect timeout, peer reset, etc.)
+ * to -EAGAIN so the caller restarts the connect cycle instead of treating
+ * the error as fatal. Other errors are returned unchanged.
+ */
+static int dtt_socket_err_to_eagain(int err)
+{
+	switch (err) {
+	case -ETIMEDOUT:
+	case -EINPROGRESS:
+	case -EINTR:
+	case -ERESTARTSYS:
+	case -ECONNREFUSED:
+	case -ECONNRESET:
+	case -ENETUNREACH:
+	case -EHOSTDOWN:
+	case -EHOSTUNREACH:
+		return -EAGAIN;
+	default:
+		return err;
+	}
+}
+
 static int dtt_try_connect(struct dtt_path *path, struct socket **ret_socket)
 {
 	struct drbd_transport *transport = path->path.transport;
@@ -494,34 +512,34 @@ static int dtt_try_connect(struct dtt_path *path, struct socket **ret_socket)
 	*  able to use lo: interfaces for drbd.
 	* Make sure to use 0 as port number, so linux selects
 	*  a free one dynamically.
+# 5 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 514 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 	*/
 	what = "bind before connect";
-	err = socket->ops->bind(socket, (struct sockaddr *) &my_addr, path->path.my_addr_len);
+# 518 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 9 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 522 "/scrap/drbd/drbd/build-6.12.116-mdl+/drbd_transport_tcp.c"
+	err = socket->ops->bind(socket, (struct sockaddr *) &my_addr,
+				path->path.my_addr_len);
+# 11 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 518 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 	if (err < 0)
 		goto out;
 
 	/* connect may fail, peer not yet available.
 	 * stay C_CONNECTING, don't go Disconnecting! */
 	what = "connect";
+# 525 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 18 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 535 "/scrap/drbd/drbd/build-6.12.116-mdl+/drbd_transport_tcp.c"
 	err = socket->ops->connect(socket, (struct sockaddr *) &peer_addr,
+# 19 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 525 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 				   path->path.peer_addr_len, 0);
 	if (err < 0) {
-		switch (err) {
-		case -ETIMEDOUT:
-		case -EINPROGRESS:
-		case -EINTR:
-		case -ERESTARTSYS:
-		case -ECONNREFUSED:
-		case -ECONNRESET:
-		case -ENETUNREACH:
-		case -EHOSTDOWN:
-		case -EHOSTUNREACH:
-			err = -EAGAIN;
-			break;
-		case -EINVAL:
+		err = dtt_socket_err_to_eagain(err);
+		if (err == -EINVAL)
 			err = -EADDRNOTAVAIL;
-			break;
-		}
 	}
 
 out:
@@ -689,7 +707,11 @@ static struct dtt_path *dtt_wait_connect_cond(struct drbd_transport *transport)
 	rcu_read_lock();
 	list_for_each_entry_rcu(drbd_path, &transport->paths, list) {
 		path = container_of(drbd_path, struct dtt_path, path);
-		listener = drbd_path->listener;
+
+		/* Pairs with xchg() in drbd_put_listener() */
+		listener = READ_ONCE(drbd_path->listener);
+		if (!listener)
+			continue;
 
 		spin_lock_bh(&listener->waiters_lock);
 		rv = listener->pending_accepts > 0 || !list_empty(&path->sockets);
@@ -714,9 +736,11 @@ static void unregister_state_change(struct sock *sock, struct dtt_listener *list
 }
 
 static int dtt_wait_for_connect(struct drbd_transport *transport,
-				struct drbd_listener *drbd_listener, struct socket **socket,
+				struct socket **socket,
 				struct dtt_path **ret_path)
 {
+	struct drbd_tcp_transport *tcp_transport =
+		container_of(transport, struct drbd_tcp_transport, transport);
 	struct dtt_socket_container *socket_c;
 	struct sockaddr_storage peer_addr;
 	int connect_int, err = 0;
@@ -724,14 +748,23 @@ static int dtt_wait_for_connect(struct drbd_transport *transport,
 	struct socket *s_estab = NULL;
 	struct net_conf *nc;
 	struct drbd_path *drbd_path2;
-	struct dtt_listener *listener = container_of(drbd_listener, struct dtt_listener, listener);
+	struct drbd_listener *drbd_listener;
+	struct dtt_listener *listener;
 	struct dtt_path *path = NULL;
+
+	/* Protect the listener from a concurrent del-path (drbd_put_listener()) */
+	drbd_listener = drbd_listener_try_get_ref(&(*ret_path)->path);
+	if (!drbd_listener)
+		return -EAGAIN;
+
+	listener = container_of(drbd_listener, struct dtt_listener, listener);
 
 	rcu_read_lock();
 	nc = rcu_dereference(transport->net_conf);
 	if (!nc) {
 		rcu_read_unlock();
-		return -EINVAL;
+		err = -EINVAL;
+		goto out;
 	}
 	connect_int = nc->connect_int;
 	rcu_read_unlock();
@@ -742,11 +775,13 @@ static int dtt_wait_for_connect(struct drbd_transport *transport,
 retry:
 	if (path)
 		kref_put(&path->path.kref, drbd_destroy_path);
-	timeo = wait_event_interruptible_timeout(listener->wait,
+	timeo = wait_event_interruptible_timeout(tcp_transport->wait,
 			(path = dtt_wait_connect_cond(transport)),
 			timeo);
-	if (timeo <= 0)
-		return -EAGAIN;
+	if (timeo <= 0) {
+		err = -EAGAIN;
+		goto out;
+	}
 
 	spin_lock_bh(&listener->listener.waiters_lock);
 	socket_c = list_first_entry_or_null(&path->sockets, struct dtt_socket_container, list);
@@ -762,7 +797,7 @@ retry:
 		err = kernel_accept(listener->s_listen, &s_estab, O_NONBLOCK);
 		if (err < 0) {
 			kref_put(&path->path.kref, drbd_destroy_path);
-			return err;
+			goto out;
 		}
 
 		/* The established socket inherits the sk_state_change callback
@@ -795,8 +830,11 @@ retry:
 		if (drbd_path2 != &path->path) {
 			struct dtt_path *path2 =
 				container_of(drbd_path2, struct dtt_path, path);
+			struct drbd_tcp_transport *path2_tcp_transport =
+				container_of(drbd_path2->transport,
+					     struct drbd_tcp_transport, transport);
 
-			socket_c = kmalloc(sizeof(*socket_c), GFP_ATOMIC);
+			socket_c = kmalloc_obj(*socket_c, GFP_ATOMIC);
 			if (!socket_c) {
 				tr_info(transport, /* path2->transport, */
 					"No mem, dropped an incoming connection\n");
@@ -806,7 +844,7 @@ retry:
 			socket_c->socket = s_estab;
 			s_estab = NULL;
 			list_add_tail(&socket_c->list, &path2->sockets);
-			wake_up(&listener->wait);
+			wake_up(&path2_tcp_transport->wait);
 			goto retry_locked;
 		}
 		if (s_estab->sk->sk_state != TCP_ESTABLISHED)
@@ -817,12 +855,17 @@ retry:
 	if (*ret_path)
 		kref_put(&(*ret_path)->path.kref, drbd_destroy_path);
 	*ret_path = path;
-	return 0;
+	err = 0;
+	goto out;
 
 retry_locked:
 	spin_unlock_bh(&listener->listener.waiters_lock);
 	dtt_socket_free(&s_estab);
 	goto retry;
+
+out:
+	kref_put(&drbd_listener->kref, drbd_listener_destroy);
+	return err;
 }
 
 static int dtt_receive_first_packet(struct drbd_tcp_transport *tcp_transport, struct socket *socket)
@@ -896,8 +939,20 @@ static void dtt_control_data_ready_work(struct work_struct *item)
 	while (true) {
 		n = dtt_recv_short(csocket, tcp_transport->rbuf[CONTROL_STREAM].base, PAGE_SIZE,
 				   MSG_DONTWAIT | MSG_NOSIGNAL);
-		if (n <= 0)
+		if (n == 0) {
+			/* Orderly shutdown: the peer closed the meta socket, and
+			 * the close surfaced here as EOF rather than (or before) a
+			 * state-change callback. Do not silently drop it -- treat
+			 * it as a peer-initiated disconnect, mirroring
+			 * dtt_control_state_change(). Otherwise the connection
+			 * lingers until the ping timeout, or forever on a transport
+			 * that reports a close only through the receive path.
+			 */
+			drbd_control_event(&tcp_transport->transport, CLOSED_BY_PEER);
 			break;
+		}
+		if (n < 0)
+			break;	/* -EAGAIN: nothing more available right now */
 
 		drbd_buffer.buffer = tcp_transport->rbuf[CONTROL_STREAM].base;
 		drbd_buffer.avail = n;
@@ -963,6 +1018,7 @@ static void dtt_control_state_change(struct sock *sock)
 static void dtt_incoming_connection(struct sock *sock)
 {
 	struct dtt_listener *listener = sock->sk_user_data;
+	struct drbd_path *drbd_path;
 	void (*state_change)(struct sock *sock);
 
 	state_change = listener->original_sk_state_change;
@@ -970,13 +1026,24 @@ static void dtt_incoming_connection(struct sock *sock)
 
 	spin_lock(&listener->listener.waiters_lock);
 	listener->listener.pending_accepts++;
+	list_for_each_entry(drbd_path, &listener->listener.waiters, listener_link) {
+		struct drbd_tcp_transport *tcp_transport =
+			container_of(drbd_path->transport,
+				     struct drbd_tcp_transport, transport);
+		wake_up(&tcp_transport->wait);
+	}
 	spin_unlock(&listener->listener.waiters_lock);
-	wake_up(&listener->wait);
 }
 
 static void dtt_control_timer_fn(struct timer_list *t)
 {
-	struct drbd_tcp_transport *tcp_transport = from_timer(tcp_transport, t, control_timer);
+# 1028 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 27 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1043 "/scrap/drbd/drbd/build-6.12.116-mdl+/drbd_transport_tcp.c"
+	struct drbd_tcp_transport *tcp_transport = from_timer(tcp_transport, t,
+# 28 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1028 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+			control_timer);
 	struct drbd_transport *transport = &tcp_transport->transport;
 
 	drbd_control_event(transport, TIMEOUT);
@@ -1030,7 +1097,13 @@ static int dtt_init_listener(struct drbd_transport *transport,
 	addr_len = addr->sa_family == AF_INET6 ? sizeof(struct sockaddr_in6)
 		: sizeof(struct sockaddr_in);
 
-	err = s_listen->ops->bind(s_listen, (struct sockaddr *)&my_addr, addr_len);
+# 1083 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 36 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1103 "/scrap/drbd/drbd/build-6.12.116-mdl+/drbd_transport_tcp.c"
+	err = s_listen->ops->bind(s_listen, (struct sockaddr *)&my_addr,
+				  addr_len);
+# 38 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1083 "/scrap/drbd/drbd/drbd_transport_tcp.c"
 	if (err < 0) {
 		what = "bind before listen";
 		goto out;
@@ -1050,7 +1123,6 @@ static int dtt_init_listener(struct drbd_transport *transport,
 	}
 
 	listener->listener.listen_addr = my_addr;
-	init_waitqueue_head(&listener->wait);
 
 	return 0;
 out:
@@ -1140,6 +1212,8 @@ static int dtt_connect(struct drbd_transport *transport)
 	key_serial_t tls_keyring, tls_privkey, tls_certificate;
 	int timeout, err;
 	bool ok;
+	struct tls_handshake_wait csocket_tls_wait = { .status = 0 };
+	struct tls_handshake_wait dsocket_tls_wait = { .status = 0 };
 
 	dsocket = NULL;
 	csocket = NULL;
@@ -1220,7 +1294,7 @@ static int dtt_connect(struct drbd_transport *transport)
 
 retry:
 		s = NULL;
-		err = dtt_wait_for_connect(transport, connect_to_path->path.listener, &s, &connect_to_path);
+		err = dtt_wait_for_connect(transport, &s, &connect_to_path);
 		if (err < 0 && err != -EAGAIN)
 			goto out_release_sockets;
 
@@ -1300,12 +1374,8 @@ randomize:
 	write_unlock_bh(&csocket->sk->sk_callback_lock);
 
 	if (tls) {
-		struct tls_handshake_wait csocket_tls_wait = {
-			.done = COMPLETION_INITIALIZER_ONSTACK(csocket_tls_wait.done),
-		};
-		struct tls_handshake_wait dsocket_tls_wait = {
-			.done = COMPLETION_INITIALIZER_ONSTACK(dsocket_tls_wait.done),
-		};
+		csocket_tls_wait.done = COMPLETION_INITIALIZER_ONSTACK(csocket_tls_wait.done);
+		dsocket_tls_wait.done = COMPLETION_INITIALIZER_ONSTACK(dsocket_tls_wait.done);
 
 		err = tls_init_hello(
 			csocket, peername, tls_keyring, tls_privkey, tls_certificate,
@@ -1313,6 +1383,7 @@ randomize:
 			&csocket_tls_wait);
 		if (err < 0) {
 			tr_warn(transport, "Error from control socket tls handshake: %d\n", err);
+			err = dtt_socket_err_to_eagain(err);
 			goto out_release_sockets;
 		}
 
@@ -1322,12 +1393,14 @@ randomize:
 			&dsocket_tls_wait);
 		if (err < 0) {
 			tr_warn(transport, "Error from data socket tls handshake: %d\n", err);
+			err = dtt_socket_err_to_eagain(err);
 			goto out_release_sockets;
 		}
 
 		err = tls_wait_hello(&csocket_tls_wait, &dsocket_tls_wait, timeout);
 		if (err < 0) {
 			tr_warn(transport, "Error from tls handshake: %d\n", err);
+			err = dtt_socket_err_to_eagain(err);
 			goto out_release_sockets;
 		}
 
@@ -1493,22 +1566,60 @@ static int dtt_send_page(struct drbd_transport *transport, enum drbd_stream stre
 	struct drbd_tcp_transport *tcp_transport =
 		container_of(transport, struct drbd_tcp_transport, transport);
 	struct socket *socket = tcp_transport->stream[stream];
-	struct msghdr msg = { .msg_flags = msg_flags | MSG_NOSIGNAL | MSG_SPLICE_PAGES };
+	struct net_conf *nc;
+	struct msghdr msg;
 	struct bio_vec bvec;
 	int len = size;
 	int err = -EIO;
+	bool tls;
 
 	if (!socket)
 		return -ENOTCONN;
+
+	rcu_read_lock();
+	nc = rcu_dereference(transport->net_conf);
+	tls = nc && nc->tls;
+	rcu_read_unlock();
+
+	/* With kTLS the payload is encrypted into freshly allocated TLS records,
+	 * so there is no zero-copy to preserve. Doing so would cause page ref bugs.
+	 */
+	if (tls)
+		msg_flags &= ~MSG_SPLICE_PAGES;
+
+	msg = (struct msghdr) { .msg_flags = msg_flags | MSG_NOSIGNAL };
 
 	dtt_update_congested(tcp_transport);
 	do {
 		int sent;
 
-		bvec_set_page(&bvec, page, len, offset);
-		iov_iter_bvec(&msg.msg_iter, ITER_SOURCE, &bvec, 1, len);
+		if (tls) {
+			/* Map and send at most one page at a time. */
+			struct page *p = page + (offset >> PAGE_SHIFT);
+			unsigned int poff = offset & ~PAGE_MASK;
+			unsigned int chunk = min_t(int, len, PAGE_SIZE - poff);
+# 1578 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 46 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1604 "/scrap/drbd/drbd/build-6.12.116-mdl+/drbd_transport_tcp.c"
+			void *addr = kmap(p);
+# 47 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1578 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+			struct kvec iov = { .iov_base = addr + poff, .iov_len = chunk };
 
-		sent = sock_sendmsg(socket, &msg);
+			iov_iter_kvec(&msg.msg_iter, ITER_SOURCE, &iov, 1, chunk);
+			sent = sock_sendmsg(socket, &msg);
+# 1583 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+# 52 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1614 "/scrap/drbd/drbd/build-6.12.116-mdl+/drbd_transport_tcp.c"
+			kunmap(p);
+# 53 "/scrap/drbd/drbd/build-6.12.116-mdl+/.patches/drbd_transport_tcp.c.patch"
+# 1583 "/scrap/drbd/drbd/drbd_transport_tcp.c"
+		} else {
+			bvec_set_page(&bvec, page, len, offset);
+			iov_iter_bvec(&msg.msg_iter, ITER_SOURCE, &bvec, 1, len);
+
+			sent = sock_sendmsg(socket, &msg);
+		}
 		if (sent <= 0) {
 			if (sent == -EAGAIN) {
 				if (drbd_stream_send_timed_out(transport, stream))
@@ -1538,7 +1649,7 @@ static int dtt_send_page(struct drbd_transport *transport, enum drbd_stream stre
 	return err;
 }
 
-static int dtt_send_zc_bio(struct drbd_transport *transport, struct bio *bio)
+static int dtt_send_bio(struct drbd_transport *transport, struct bio *bio, unsigned int msg_flags)
 {
 	struct bio_vec bvec;
 	struct bvec_iter iter;
@@ -1548,7 +1659,7 @@ static int dtt_send_zc_bio(struct drbd_transport *transport, struct bio *bio)
 
 		err = dtt_send_page(transport, DATA_STREAM, bvec.bv_page,
 				      bvec.bv_offset, bvec.bv_len,
-				      bio_iter_last(bvec, iter) ? 0 : MSG_MORE);
+				      msg_flags | (bio_iter_last(bvec, iter) ? 0 : MSG_MORE));
 		if (err)
 			return err;
 	}

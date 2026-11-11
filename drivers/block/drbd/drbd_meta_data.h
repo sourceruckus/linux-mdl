@@ -19,6 +19,13 @@
  * base64 decode "actlog==" ;) */
 #define DRBD_AL_MAGIC 0x69cb65a2
 
+#define BM_BLOCK_SHIFT_4k	12			 /* 4k per bit */
+#define BM_BLOCK_SHIFT_MIN	BM_BLOCK_SHIFT_4k
+#define BM_BLOCK_SHIFT_MAX	20
+#define BM_BLOCK_SIZE_4k	4096
+#define BM_BLOCK_SIZE_MIN	(1<<BM_BLOCK_SHIFT_MIN)
+#define BM_BLOCK_SIZE_MAX	(1<<BM_BLOCK_SHIFT_MAX)
+
 struct peer_dev_md_on_disk_9 {
 	be_u64 bitmap_uuid;
 	be_u64 bitmap_dagtag;
@@ -31,7 +38,11 @@ struct meta_data_on_disk_9 {
 	be_u64 effective_size;    /* last agreed size */
 	be_u64 current_uuid;
 	be_u64 members;	  	  /* only if MDF_HAVE_MEMBERS_MASK is in the flags */
-	be_u64 reserved_u64[3];   /* to have the magic at the same position as in v07, and v08 */
+	/* Feature flags. Values prefixed with "DRBD_MDFF".
+	 * Separate from "flags": Unknown features bits are cleared; unknown flags bits are kept.
+	 */
+	be_u64 features;
+	be_u64 reserved_u64[2];   /* to have the magic at the same position as in v07, and v08 */
 	be_u64 device_uuid;
 	be_u32 flags;             /* MDF */
 	be_u32 magic;

@@ -1,14 +1,10 @@
 # 1 "/scrap/drbd/drbd/drbd_req.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
-   drbd_req.h
-
-   This file is part of DRBD by Philipp Reisner and Lars Ellenberg.
-
-   Copyright (C) 2006-2008, LINBIT Information Technologies GmbH.
-   Copyright (C) 2006-2008, Lars Ellenberg <lars.ellenberg@linbit.com>.
-   Copyright (C) 2006-2008, Philipp Reisner <philipp.reisner@linbit.com>.
-
+ * Copyright (C) 2006-2008, Lars Ellenberg <lars.ellenberg@linbit.com>.
+ * Copyright (C) 2006-2008, Philipp Reisner <philipp.reisner@linbit.com>.
+ * Copyright (C) 2006-2008, LINBIT Information Technologies GmbH.
+ * Copyright (C) 2008, LINBIT HA-Solutions GmbH.
  */
 
 #ifndef _DRBD_REQ_H
@@ -70,7 +66,8 @@ enum drbd_req_event {
 	NEW_NET_READ,
 	NEW_NET_WRITE,
 	NEW_NET_OOS,
-	ADDED_TO_TRANSFER_LOG,
+	READY_FOR_NET,
+	SKIP_OOS,
 
 	/* For an empty flush, mark that a corresponding barrier has been sent
 	 * to this peer. This causes it to complete "successfully", even if the
@@ -90,6 +87,7 @@ enum drbd_req_event {
 	WRITE_ACKED_BY_PEER,
 	WRITE_ACKED_BY_PEER_AND_SIS, /* and set_in_sync */
 	NEG_ACKED,
+	POSTPONED_BY_PEER,
 	BARRIER_ACKED, /* in protocol A and B */
 	DATA_RECEIVED, /* (remote read) */
 
@@ -104,6 +102,7 @@ enum drbd_req_event {
 	RESEND,
 	CANCEL_SUSPENDED_IO,
 	COMPLETION_RESUMED,
+	NEW_UUID_CONFIRMED,
 	NOTHING,
 };
 
@@ -113,32 +112,51 @@ enum drbd_req_event {
  */
 enum drbd_req_state_bits {
 	/*
-	 * Here are the possible combinations of the core net flags pending,
-	 * queued, sent, done, ok.
+	 * Here are the possible combinations of the core net flags pending, pending-oos,
+	 * queued, ready, sent, done, ok.
 	 *
 	 * <none>:
 	 *   No network required, or not yet processed.
-	 * pending:
-	 *   Intended for this peer, but not yet queued, or connection lost. If
-	 *   IO is suspended, it will stay in this state until the connection
-	 *   is restored or IO is resumed.
 	 * pending,queued:
-	 *   To be sent, on transfer log to be processed by sender.
-	 * pending,sent:
+	 *   To be sent, must not be processed yet.
+	 * pending,queued,ready:
+	 *   To be sent, processing allowed.
+	 * pending,ready,sent:
 	 *   Sent, expecting P_RECV_ACK (B) or P_WRITE_ACK (C).
-	 * sent,ok:
+	 * queued,ready,ok:
+	 *   P_RECV_ACK (B) or P_WRITE_ACK (C) received before request marked
+	 *   as having been sent.
+	 * ready,sent,ok:
 	 *   Sent, implicit "ack" (A), P_RECV_ACK (B) or P_WRITE_ACK (C) received.
 	 *   Still waiting for the barrier ack.
 	 *   master_bio may already be completed and invalidated.
-	 * sent,done,ok:
+	 * pending:
+	 *   Intended for this peer, but connection lost before processing
+	 *   allowed.
+	 * pending,ready:
+	 *   Intended for this peer, but connection lost. If
+	 *   IO is suspended, it will stay in this state until the connection
+	 *   is restored or IO is resumed.
+	 * ready,sent,done,ok:
 	 *   Data received (for remote read, any protocol),
 	 *   or finally the barrier ack has arrived.
-	 * sent,done:
+	 * ready,sent,done:
 	 *   Received P_NEG_ACK for write (protocol C, or we are SyncSource),
 	 *   or P_NEG_DREPLY for read (any protocol).
-	 *   Or cleaned up after connection loss.
+	 *   Or cleaned up after connection loss after send.
+	 * pending-oos,queued,done:
+	 *   P_OUT_OF_SYNC to be sent, must not be processed yet.
+	 * pending-oos,queued,ready,done:
+	 *   P_OUT_OF_SYNC to be sent, processing allowed.
+	 * queued,ready,done:
+	 *   P_OUT_OF_SYNC was intended, but skipped.
 	 * done:
-	 *   Canceled, send failed, or P_OUT_OF_SYNC sent.
+	 *   P_OUT_OF_SYNC was intended, but connection lost before processing
+	 *   allowed.
+	 * ready,done:
+	 *   P_OUT_OF_SYNC sent.
+	 *   Or cleaned up after connection loss, either before send or when
+	 *   only P_OUT_OF_SYNC was intended.
 	 */
 
 	/* Pending some network interaction towards the peer apart from
@@ -147,13 +165,19 @@ enum drbd_req_state_bits {
 	 * While set, the master_bio may not be completed. */
 	__RQ_NET_PENDING,
 
-	/* Queued for sending but not yet sent. */
+	/* Pending send of P_OUT_OF_SYNC */
+	__RQ_NET_PENDING_OOS,
+
+	/* The sender might store pointers to it */
 	__RQ_NET_QUEUED,
+
+	/* Ready for processing by the sender */
+	__RQ_NET_READY,
 
 	/* Well, actually only "handed over to the network stack". */
 	__RQ_NET_SENT,
 
-	/* When set, the request may be freed, as far as interaction with this
+	/* When set, the data stage is done, as far as interaction with this
 	 * peer is concerned. Basically this means the corresponding
 	 * P_BARRIER_ACK was received. */
 	__RQ_NET_DONE,
@@ -205,6 +229,12 @@ enum drbd_req_state_bits {
 	/* Should call drbd_al_complete_io() for this request... */
 	__RQ_IN_ACT_LOG,
 
+	/* Accounted in device->wait_for_actlog_ecnt, respectively in
+	 * device->ap_actlog_cnt. AL_SUSPENDED may flip at any time.
+	 */
+	__RQ_WAIT_FOR_AL_ECNT,
+	__RQ_AP_ACTLOG_CNT,
+
 	/* This was the most recent request during some blk_finish_plug()
 	 * or its implicit from-schedule equivalent.
 	 * We may use it as hint to send a P_UNPLUG_REMOTE */
@@ -216,9 +246,26 @@ enum drbd_req_state_bits {
 	/* would have been completed,
 	 * but was not, because of drbd_suspended() */
 	__RQ_COMPLETION_SUSP,
+
+	/* Completion held back because this write was acknowledged in a data
+	 * generation that a diskless primary rotated to optimistically, before
+	 * any quorate peer confirmed persisting the new current UUID
+	 * (confirm-before-complete).  The hold is implemented via
+	 * RQ_COMPLETION_SUSP; this flag marks it as a generation hold so that
+	 * NEW_UUID_CONFIRMED releases exactly these requests once an in-order
+	 * barrier ack proves the generation durable.
+	 */
+	__RQ_UNCONF_GEN,
+
+	/* Completed to the application with success.  Read at a connection
+	 * loss, to tell an acknowledged write from one that failed.
+	 */
+	__RQ_COMPLETED_OK,
 };
 #define RQ_NET_PENDING     (1UL << __RQ_NET_PENDING)
+#define RQ_NET_PENDING_OOS (1UL << __RQ_NET_PENDING_OOS)
 #define RQ_NET_QUEUED      (1UL << __RQ_NET_QUEUED)
+#define RQ_NET_READY       (1UL << __RQ_NET_READY)
 #define RQ_NET_SENT        (1UL << __RQ_NET_SENT)
 #define RQ_NET_DONE        (1UL << __RQ_NET_DONE)
 #define RQ_NET_OK          (1UL << __RQ_NET_OK)
@@ -243,9 +290,13 @@ enum drbd_req_state_bits {
 #define RQ_UNMAP           (1UL << __RQ_UNMAP)
 #define RQ_ZEROES          (1UL << __RQ_ZEROES)
 #define RQ_IN_ACT_LOG      (1UL << __RQ_IN_ACT_LOG)
+#define RQ_WAIT_FOR_AL_ECNT (1UL << __RQ_WAIT_FOR_AL_ECNT)
+#define RQ_AP_ACTLOG_CNT   (1UL << __RQ_AP_ACTLOG_CNT)
 #define RQ_UNPLUG          (1UL << __RQ_UNPLUG)
 #define RQ_POSTPONED	   (1UL << __RQ_POSTPONED)
 #define RQ_COMPLETION_SUSP (1UL << __RQ_COMPLETION_SUSP)
+#define RQ_UNCONF_GEN      (1UL << __RQ_UNCONF_GEN)
+#define RQ_COMPLETED_OK    (1UL << __RQ_COMPLETED_OK)
 
 
 /* these flags go into local_rq_state,
@@ -257,9 +308,13 @@ enum drbd_req_state_bits {
 	 RQ_UNMAP       |\
 	 RQ_ZEROES      |\
 	 RQ_IN_ACT_LOG  |\
+	 RQ_WAIT_FOR_AL_ECNT |\
+	 RQ_AP_ACTLOG_CNT |\
 	 RQ_UNPLUG      |\
 	 RQ_POSTPONED   |\
-	 RQ_COMPLETION_SUSP)
+	 RQ_COMPLETION_SUSP |\
+	 RQ_UNCONF_GEN  |\
+	 RQ_COMPLETED_OK)
 
 static inline bool drbd_req_is_write(struct drbd_request *req)
 {
@@ -274,30 +329,32 @@ struct bio_and_error {
 	int error;
 };
 
-extern bool start_new_tl_epoch(struct drbd_resource *resource);
-extern void drbd_req_destroy(struct kref *kref);
-extern void __req_mod(struct drbd_request *req, enum drbd_req_event what,
-		struct drbd_peer_device *peer_device,
-		struct bio_and_error *m);
-extern void complete_master_bio(struct drbd_device *device,
-		struct bio_and_error *m);
-extern void drbd_release_conflicts(struct drbd_device *device,
-		struct drbd_interval *release_interval);
-extern void drbd_set_pending_out_of_sync(struct drbd_peer_device *peer_device);
-extern void request_timer_fn(struct timer_list *t);
-extern void tl_walk(struct drbd_connection *connection, struct drbd_request **from_req, enum drbd_req_event what);
-extern void __tl_walk(struct drbd_resource *const resource,
-		struct drbd_connection *const connection,
-		struct drbd_request **from_req,
-		const enum drbd_req_event what);
-extern void drbd_destroy_peer_ack_if_done(struct drbd_peer_ack *peer_ack);
-extern int w_queue_peer_ack(struct drbd_work *w, int cancel);
-extern void drbd_queue_peer_ack(struct drbd_resource *resource, struct drbd_request *req);
-extern bool drbd_should_do_remote(struct drbd_peer_device *, enum which_state);
-extern void drbd_reclaim_req(struct rcu_head *rp);
+bool start_new_tl_epoch(struct drbd_resource *resource);
+void drbd_req_destroy(struct kref *kref);
+void __req_mod(struct drbd_request *req, enum drbd_req_event what,
+	       struct drbd_peer_device *peer_device, struct bio_and_error *m);
+void complete_master_bio(struct drbd_device *device, struct bio_and_error *m);
+void drbd_release_conflicts(struct drbd_device *device,
+			    struct drbd_interval *release_interval);
+void drbd_put_ref_tl_walk(struct drbd_request *req, int done_put, int oos_send_put);
+void drbd_set_pending_out_of_sync(struct drbd_peer_device *peer_device);
+void request_timer_fn(struct timer_list *t);
+void tl_walk(struct drbd_connection *connection,
+	     struct drbd_request **from_req, enum drbd_req_event what);
+void __tl_walk(struct drbd_resource * const resource,
+	       struct drbd_connection * const connection,
+	       struct drbd_request **from_req, const enum drbd_req_event what);
+void drbd_destroy_peer_ack_if_done(struct drbd_peer_ack *peer_ack);
+int w_queue_peer_ack(struct drbd_work *w, int cancel);
+void drbd_queue_peer_ack(struct drbd_resource *resource,
+			 struct drbd_request *req);
+bool drbd_should_do_remote(struct drbd_peer_device *peer_device,
+			   enum which_state which);
+void drbd_reclaim_req(struct rcu_head *rp);
 
 /* this is in drbd_main.c */
-extern void drbd_restart_request(struct drbd_request *req);
+void drbd_restart_request(struct drbd_request *req);
+void drbd_restart_suspended_reqs(struct drbd_resource *resource);
 
 /* use this if you don't want to deal with calling complete_master_bio()
  * outside the spinlock, e.g. when walking some list on cleanup. */

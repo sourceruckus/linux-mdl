@@ -1,5 +1,9 @@
 # 1 "/scrap/drbd/drbd/drbd-headers/drbd_transport.h"
 /* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * Copyright (C) 2014, LINBIT HA-Solutions GmbH.
+ */
+
 #ifndef DRBD_TRANSPORT_H
 #define DRBD_TRANSPORT_H
 
@@ -13,7 +17,7 @@
    So that transport compiled against an older version of this
    header will no longer load in a module that assumes a newer
    version. */
-#define DRBD_TRANSPORT_API_VERSION 21
+#define DRBD_TRANSPORT_API_VERSION 22
 
 /* MSG_MSG_DONTROUTE and MSG_PROBE are not used by DRBD. I.e.
    we can reuse these flags for our purposes */
@@ -58,6 +62,7 @@
 struct drbd_resource;
 struct drbd_listener;
 struct drbd_transport;
+struct bio;
 
 enum drbd_stream {
 	DATA_STREAM,
@@ -137,12 +142,6 @@ struct drbd_transport_stats {
 	int send_buffer_used;
 };
 
-/* argument to ->recv_pages() */
-struct drbd_page_chain_head {
-	struct page *head;
-	unsigned int nr_pages;
-};
-
 struct drbd_const_buffer {
 	const u8 *buffer;
 	unsigned int avail;
@@ -158,7 +157,7 @@ struct drbd_const_buffer {
  * * prepare_connect()
  * * finish_connect()
  * * add_path() and the subsequent list_add_tail_rcu() for the paths list
- * * may_remove_path() and the subsequent list_del_rcu() for the paths list
+ * * may_remove_path(), remove_path() and the subsequent list_del_rcu() for the paths list
  *
  * The connection sequence is as follows:
  * 1. prepare_connect(), with the above exclusivity guarantee
@@ -209,18 +208,20 @@ struct drbd_transport_ops {
 	int (*recv)(struct drbd_transport *, enum drbd_stream, void **buf, size_t size, int flags);
 
 /**
- * recv_pages() - Receive bulk data via the transport's DATA_STREAM
+ * recv_bio() - Receive bulk data via the transport's DATA_STREAM into bios
  * @peer_device: Identify the transport and the device
- * @page_chain:	Here recv_pages() will place the page chain head and length
+ * @bios:	the bio_list to add received data to
  * @size:	Number of bytes to receive
  *
- * recv_pages() will return the requested amount of data from DATA_STREAM,
- * and place it into pages allocated with drbd_alloc_pages().
+ * recv_bio() receives the requested amount of data from DATA_STREAM. It
+ * allocates pages by using drbd_alloc_pages() and adds them to bios in the
+ * bio_list.
  *
- * Upon success the function returns 0. Upon error the function returns a
- * negative value
+ * Upon success the function returns the bytes read. Upon error the return
+ * code is negative. A 0 indicates that the socket was closed by the remote
+ * side.
  */
-	int (*recv_pages)(struct drbd_transport *, struct drbd_page_chain_head *, size_t size);
+	int (*recv_bio)(struct drbd_transport *, struct bio_list *bios, size_t size);
 
 	void (*stats)(struct drbd_transport *, struct drbd_transport_stats *stats);
 /**
@@ -241,7 +242,7 @@ struct drbd_transport_ops {
 	long (*get_rcvtimeo)(struct drbd_transport *, enum drbd_stream);
 	int (*send_page)(struct drbd_transport *, enum drbd_stream, struct page *,
 			 int offset, size_t size, unsigned msg_flags);
-	int (*send_zc_bio)(struct drbd_transport *, struct bio *bio);
+	int (*send_bio)(struct drbd_transport *, struct bio *bio, unsigned int msg_flags);
 	bool (*stream_ok)(struct drbd_transport *, enum drbd_stream);
 	bool (*hint)(struct drbd_transport *, enum drbd_stream, enum drbd_tr_hints hint);
 	void (*debugfs_show)(struct drbd_transport *, struct seq_file *m);
@@ -265,11 +266,14 @@ struct drbd_transport_ops {
 	bool (*may_remove_path)(struct drbd_path *path);
 
 /**
- * remove_path() - Clear up after path removal
+ * remove_path() - Tear down a path that is being removed
  * @path: The path that is being removed
  *
- * Clear up a path that is being removed. Called after the path has been
- * removed from the list and all kref references have been put.
+ * Clean up a path that is being removed. Called with the path still on the
+ * transport's paths list and with references still held, under the same
+ * exclusivity guarantee as may_remove_path(). The transport may sleep here,
+ * e.g. to gracefully shut down an established connection, before the caller
+ * removes the path from the list and drops the remaining references.
  */
 	void (*remove_path)(struct drbd_path *path);
 };
@@ -304,26 +308,35 @@ struct drbd_listener {
 };
 
 /* drbd_main.c */
-extern void drbd_destroy_path(struct kref *kref);
+void drbd_destroy_path(struct kref *kref);
 
 /* drbd_transport.c */
-extern int drbd_register_transport_class(struct drbd_transport_class *transport_class,
-					 int api_version,
-					 int drbd_transport_size);
-extern void drbd_unregister_transport_class(struct drbd_transport_class *transport_class);
-extern struct drbd_transport_class *drbd_get_transport_class(const char *transport_name);
-extern void drbd_put_transport_class(struct drbd_transport_class *);
-extern void drbd_print_transports_loaded(struct seq_file *seq);
+int drbd_register_transport_class(struct drbd_transport_class *transport_class,
+				  int version, int drbd_transport_size);
+void drbd_unregister_transport_class(struct drbd_transport_class *transport_class);
+struct drbd_transport_class *drbd_get_transport_class(const char *name);
+void drbd_put_transport_class(struct drbd_transport_class *tc);
+void drbd_print_transports_loaded(struct seq_file *seq);
 
-extern int drbd_get_listener(struct drbd_path *path);
-extern void drbd_put_listener(struct drbd_path *path);
-extern struct drbd_path *drbd_find_path_by_addr(struct drbd_listener *, struct sockaddr_storage *);
-extern bool drbd_stream_send_timed_out(struct drbd_transport *transport, enum drbd_stream stream);
-extern bool drbd_should_abort_listening(struct drbd_transport *transport);
-extern void drbd_path_event(struct drbd_transport *transport, struct drbd_path *path);
-extern void drbd_listener_destroy(struct kref *kref);
-extern struct drbd_path *__drbd_next_path_ref(struct drbd_path *drbd_path,
-					      struct drbd_transport *transport);
+int drbd_get_listener(struct drbd_path *path);
+void drbd_put_listener(struct drbd_path *path);
+struct drbd_listener *drbd_listener_try_get_ref(struct drbd_path *path);
+struct drbd_path *drbd_find_path_by_addr(struct drbd_listener *listener,
+					 struct sockaddr_storage *addr);
+bool drbd_path_conflicts_by_listener(struct drbd_path *existing,
+				     struct drbd_path *candidate);
+bool drbd_stream_send_timed_out(struct drbd_transport *transport,
+				enum drbd_stream stream);
+bool drbd_should_abort_listening(struct drbd_transport *transport);
+void drbd_path_event(struct drbd_transport *transport, struct drbd_path *path);
+void drbd_listener_destroy(struct kref *kref);
+struct drbd_path *__drbd_next_path_ref(struct drbd_path *drbd_path,
+				       struct drbd_transport *transport);
+int drbd_bio_add_page(struct drbd_transport *transport, struct bio_list *bios,
+		      struct page *page, unsigned int len, unsigned int offset);
+
+void drbd_transport_lock(struct drbd_transport *transport);
+void drbd_transport_unlock(struct drbd_transport *transport);
 
 /* Might restart iteration, if current element is removed from list!! */
 #define for_each_path_ref(path, transport)			\
@@ -332,24 +345,12 @@ extern struct drbd_path *__drbd_next_path_ref(struct drbd_path *drbd_path,
 	     path = __drbd_next_path_ref(path, transport))
 
 /* drbd_receiver.c*/
-extern struct page *drbd_alloc_pages(struct drbd_transport *, unsigned int, gfp_t);
-extern void drbd_free_pages(struct drbd_transport *transport, struct page *page, int is_net);
-extern void drbd_control_data_ready(struct drbd_transport *transport, struct drbd_const_buffer *pool);
-extern void drbd_control_event(struct drbd_transport *transport, enum drbd_tr_event);
-
-static inline void drbd_alloc_page_chain(struct drbd_transport *t,
-	struct drbd_page_chain_head *chain, unsigned int nr, gfp_t gfp_flags)
-{
-	chain->head = drbd_alloc_pages(t, nr, gfp_flags);
-	chain->nr_pages = chain->head ? nr : 0;
-}
-
-static inline void drbd_free_page_chain(struct drbd_transport *transport, struct drbd_page_chain_head *chain, int is_net)
-{
-	drbd_free_pages(transport, chain->head, is_net);
-	chain->head = NULL;
-	chain->nr_pages = 0;
-}
+struct page *drbd_alloc_pages(struct drbd_transport *transport, gfp_t gfp_mask, unsigned int size);
+void drbd_free_page(struct drbd_transport *transport, struct page *page);
+void drbd_control_data_ready(struct drbd_transport *transport,
+			     struct drbd_const_buffer *pool);
+void drbd_control_event(struct drbd_transport *transport,
+			enum drbd_tr_event event);
 
 /*
  * Some helper functions to deal with our page chains.

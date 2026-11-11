@@ -29,14 +29,6 @@
 #define ALIGN_DOWN(x, a)       __ALIGN_KERNEL((x) - ((a) - 1), (a))
 #endif
 
-/* introduced in v3.13-rc1-4-g4f024f3797c4 */
-#ifndef COMPAT_HAVE_STRUCT_BVEC_ITER
-struct bvec_iter {
-	int bi_size;
-	int bi_idx;
-};
-#endif
-
 /* introduced in v3.13-4220-g89a0714106aa */
 #ifndef U32_MAX
 #define U32_MAX ((u32)~0U)
@@ -57,6 +49,21 @@ struct bvec_iter {
 /* introduced in v4.3-8058-g71baba4b92dc */
 #ifndef __GFP_RECLAIM
 #define __GFP_RECLAIM __GFP_WAIT
+#endif
+
+/* introduced in v4.12-11009-gdcda9b04713c */
+#ifndef __GFP_RETRY_MAYFAIL
+/*
+ * __GFP_RETRY_MAYFAIL replaced __GFP_REPEAT, however that had different
+ * semantics. Avoid causing regressions on older kernels.
+ */
+#define __GFP_RETRY_MAYFAIL 0
+#endif
+
+/* introduced in v3.16-rc1 febdbfe8a91c ("arch: Prepare for
+ * smp_mb__{before,after}_atomic()"); missing on RHEL 7.0's 3.10.0-123 */
+#ifndef smp_mb__after_atomic
+#define smp_mb__after_atomic() smp_mb()
 #endif
 
 /* introduced in v4.14-rc8-66-gf54bb2ec02c8 */
@@ -130,63 +137,16 @@ struct bvec_iter {
 	blkdev_issue_zeroout(BDEV, SS, NS, GFP)
 #endif
 
-#ifndef COMPAT_HAVE_SIMPLE_POSITIVE
-#include <linux/dcache.h>
-static inline int simple_positive(struct dentry *dentry)
-{
-        return dentry->d_inode && !d_unhashed(dentry);
-}
-#endif
-
-#if !(defined(COMPAT_HAVE_SHASH_DESC_ON_STACK) &&    \
-      defined COMPAT_HAVE_SHASH_DESC_ZERO)
-#include <crypto/hash.h>
-
-/* introduced in a0a77af14117 (v3.17-9284) */
-#ifndef COMPAT_HAVE_SHASH_DESC_ON_STACK
-#define SHASH_DESC_ON_STACK(shash, ctx)				  \
-	char __##shash##_desc[sizeof(struct shash_desc) +	  \
-		crypto_shash_descsize(ctx)] CRYPTO_MINALIGN_ATTR; \
-	struct shash_desc *shash = (struct shash_desc *)__##shash##_desc
-#endif
-
-/* introduced in e67ffe0af4d4 (v4.5-rc1-24) */
-#ifndef COMPAT_HAVE_SHASH_DESC_ZERO
-#ifndef barrier_data
-#define barrier_data(ptr) barrier()
-#endif
-static inline void shash_desc_zero(struct shash_desc *desc)
-{
-	/* memzero_explicit(...) */
-	memset(desc, 0, sizeof(*desc) + crypto_shash_descsize(desc->tfm));
-	barrier_data(desc);
-}
-#endif
-#endif
-
 /* RDMA related */
-#ifndef COMPAT_HAVE_IB_CQ_INIT_ATTR
+#ifndef COMPAT_HAVE_IB_ALLOC_CQ_ANY
 #include <rdma/ib_verbs.h>
 
-struct ib_cq_init_attr {
-	unsigned int    cqe;
-	int             comp_vector;
-	u32             flags;
-};
-
 static inline struct ib_cq *
-drbd_ib_create_cq(struct ib_device *device,
-		  ib_comp_handler comp_handler,
-		  void (*event_handler)(struct ib_event *, void *),
-		  void *cq_context,
-		  const struct ib_cq_init_attr *cq_attr)
+ib_alloc_cq_any(struct ib_device *dev, void *private,
+		int nr_cqe, enum ib_poll_context poll_ctx)
 {
-	return ib_create_cq(device, comp_handler, event_handler, cq_context,
-			    cq_attr->cqe, cq_attr->comp_vector);
+	return ib_alloc_cq(dev, private, nr_cqe, 0, poll_ctx);
 }
-
-#define ib_create_cq(DEV, COMP_H, EVENT_H, CTX, ATTR) \
-	drbd_ib_create_cq(DEV, COMP_H, EVENT_H, CTX, ATTR)
 #endif
 /* RDMA */
 
@@ -227,4 +187,43 @@ void arch_wb_cache_pmem(void *addr, size_t size);
 #define list_last_entry(ptr, type, member) \
         list_entry((ptr)->prev, type, member)
 #endif
+
+
+/* For kernels before 5.1: bio_for_each_bvec polyfill.
+ * On these kernels, bio_for_each_segment() does not split multi-page bvecs
+ * into PAGE_SIZE chunks (upstream commit 3d75ca0adef4, merged in v5.1).
+ * The cocci compat patch also forces single-page allocations in
+ * drbd_alloc_pages() to avoid buffer overflows with drivers that iterate
+ * using bio_for_each_segment (e.g. brd). */
+#ifndef COMPAT_HAVE_BIO_FOR_EACH_BVEC
+#define mp_bvec_iter_page(bvec, iter)				\
+	(__bvec_iter_bvec((bvec), (iter))->bv_page)
+
+#define mp_bvec_iter_len(bvec, iter)				\
+	min((iter).bi_size,					\
+	    __bvec_iter_bvec((bvec), (iter))->bv_len - (iter).bi_bvec_done)
+
+#define mp_bvec_iter_offset(bvec, iter)				\
+	(__bvec_iter_bvec((bvec), (iter))->bv_offset + (iter).bi_bvec_done)
+
+#define mp_bvec_iter_page_idx(bvec, iter)			\
+	(mp_bvec_iter_offset((bvec), (iter)) / PAGE_SIZE)
+
+#define mp_bvec_iter_bvec(bvec, iter)				\
+((struct bio_vec) {						\
+	.bv_page	= mp_bvec_iter_page((bvec), (iter)),	\
+	.bv_len		= mp_bvec_iter_len((bvec), (iter)),	\
+	.bv_offset	= mp_bvec_iter_offset((bvec), (iter)),	\
+})
+
+#define __bio_for_each_bvec(bvl, bio, iter, start)			\
+	for (iter = (start);						\
+	     (iter).bi_size &&						\
+		((bvl = mp_bvec_iter_bvec((bio)->bi_io_vec, (iter))), 1); \
+	     bio_advance_iter((bio), &(iter), (bvl).bv_len))
+
+#define bio_for_each_bvec(bvl, bio, iter)			\
+	__bio_for_each_bvec(bvl, bio, iter, (bio)->bi_iter)
+#endif
+
 #endif

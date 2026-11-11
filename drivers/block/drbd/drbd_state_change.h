@@ -10,6 +10,7 @@ struct drbd_resource_state_change {
 	bool susp_nod[2];
 	bool susp_uuid[2];
 	bool fail_io[2];
+	bool resume_held_for_outdate[2];
 };
 
 struct drbd_device_state_change {
@@ -43,7 +44,10 @@ struct drbd_peer_device_state_change {
 	bool resync_susp_peer[2];
 	bool resync_susp_dependency[2];
 	bool resync_susp_other_c[2];
+	bool resync_susp_max_parallel[2];
 	bool resync_active[2];
+	bool replication[2];
+	bool peer_replication[2];
 };
 
 struct drbd_state_change_object_count {
@@ -64,25 +68,22 @@ struct drbd_state_change {
 	struct drbd_path_state *paths;
 };
 
-extern struct drbd_state_change *remember_state_change(struct drbd_resource *, gfp_t);
-extern void copy_old_to_new_state_change(struct drbd_state_change *);
-extern void forget_state_change(struct drbd_state_change *);
+struct drbd_state_change *remember_state_change(struct drbd_resource *resource,
+						gfp_t gfp);
+void copy_old_to_new_state_change(struct drbd_state_change *state_change);
+void forget_state_change(struct drbd_state_change *state_change);
 
-extern int notify_resource_state_change(struct sk_buff *,
-					 unsigned int,
-					 void *,
-					 enum drbd_notification_type type);
-extern int notify_connection_state_change(struct sk_buff *,
-					   unsigned int,
-					   void *,
-					   enum drbd_notification_type type);
-extern int notify_device_state_change(struct sk_buff *,
-				       unsigned int,
-				       void *,
-				       enum drbd_notification_type type);
-extern int notify_peer_device_state_change(struct sk_buff *,
-					    unsigned int,
-					    void *,
-					    enum drbd_notification_type type);
+int notify_resource_state_change(struct sk_buff *skb, unsigned int seq,
+				 void *state_change,
+				 enum drbd_notification_type type);
+int notify_connection_state_change(struct sk_buff *skb, unsigned int seq,
+				   void *state_change,
+				   enum drbd_notification_type type);
+int notify_device_state_change(struct sk_buff *skb, unsigned int seq,
+			       void *state_change,
+			       enum drbd_notification_type type);
+int notify_peer_device_state_change(struct sk_buff *skb, unsigned int seq,
+				    void *state_change,
+				    enum drbd_notification_type type);
 
 #endif  /* DRBD_STATE_CHANGE_H */

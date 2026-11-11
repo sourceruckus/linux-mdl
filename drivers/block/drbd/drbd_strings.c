@@ -1,19 +1,12 @@
 # 1 "/scrap/drbd/drbd/drbd-headers/drbd_strings.c"
 // SPDX-License-Identifier: GPL-2.0-only
 /*
-  drbd.h
-
-  This file is part of DRBD by Philipp Reisner and Lars Ellenberg.
-
-  Copyright (C) 2003-2008, LINBIT Information Technologies GmbH.
-  Copyright (C) 2003-2008, Philipp Reisner <philipp.reisner@linbit.com>.
-  Copyright (C) 2003-2008, Lars Ellenberg <lars.ellenberg@linbit.com>.
-
-*/
+ * Copyright (C) 2014, LINBIT HA-Solutions GmbH.
+ */
 
 #include <linux/drbd.h>
 #include "drbd_strings.h"
-#include "drbd_protocol.h"
+#include <linux/drbd_protocol.h>
 
 static const char * const __conn_state_names[] = {
 	[C_STANDALONE]       = "StandAlone",
@@ -195,6 +188,14 @@ static const char * const __packet_names[] = {
 	[P_RS_NEG_ACK]          = "P_RS_NEG_ACK",
 	[P_OV_RESULT_ID]        = "P_OV_RESULT_ID",
 	[P_RS_DEALLOCATED_ID]   = "P_RS_DEALLOCATED_ID",
+	[P_FLUSH_REQUESTS]      = "P_FLUSH_REQUESTS",
+	[P_FLUSH_FORWARD]       = "P_FLUSH_FORWARD",
+	[P_FLUSH_REQUESTS_ACK]  = "P_FLUSH_REQUESTS_ACK",
+	[P_ENABLE_REPLICATION_NEXT] = "P_ENABLE_REPLICATION_NEXT",
+	[P_ENABLE_REPLICATION]  = "P_ENABLE_REPLICATION",
+	[P_RS_DAGTAG_WAIT_REQ]  = "P_RS_DAGTAG_WAIT_REQ",
+	[P_RS_DAGTAG_REACHED]   = "P_RS_DAGTAG_REACHED",
+	[P_RS_DAGTAG_UNREACHABLE] = "P_RS_DAGTAG_UNREACHABLE",
 	/* enum drbd_packet, but not commands - obsoleted flags:
 	 *	P_MAY_IGNORE
 	 *	P_MAX_OPT_CMD

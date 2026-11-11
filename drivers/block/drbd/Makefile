@@ -61,11 +61,7 @@ compat_objs += drbd_wrappers.o
 
 
 #ifdef CONFIG_DEV_DAX_PMEM
-#ifneq ($(shell grep -e '\<arch_wb_cache_pmem\>' $(objtree)/Module.symvers | wc -l),1)
-#override EXTRA_CFLAGS += -DDAX_PMEM_IS_INCOMPLETE
-#else
 #drbd-y += drbd_dax_pmem.o
-#endif
 #endif
 #
 # NOTE: 5.4 - 5.10 have it, haven't double-checked since then.
@@ -84,8 +80,9 @@ endif
 # enable fault injection by default
 #ifndef CONFIG_DRBD_FAULT_INJECTION
 #       override EXTRA_CFLAGS += -DCONFIG_DRBD_FAULT_INJECTION
+#       ccflags-y += -DCONFIG_DRBD_FAULT_INJECTION
 #endif
-
+ccflags-$(CONFIG_DRBD_FAULT_INJECTION) += -DCONFIG_DRBD_FAULT_INJECTION
 
 # enable timing stats if enabled
 ccflags-$(CONFIG_DRBD_TIMING_STATS) += -DCONFIG_DRBD_TIMING_STATS
@@ -96,11 +93,14 @@ drbd-y += drbd_sender.o drbd_receiver.o drbd_req.o drbd_actlog.o
 drbd-y += drbd_main.o drbd_strings.o drbd_nl.o
 drbd-y += drbd_nl_gen.o
 drbd-y += drbd_interval.o drbd_state.o $(compat_objs)
-drbd-y += drbd_nla.o drbd_transport.o
+drbd-y += drbd_transport.o
 
 ifdef CONFIG_KREF_DEBUG
       drbd-y += kref_debug.o drbd_kref_debug.o
 endif
+
+drbd-$(CONFIG_DRBD_COMPAT_84) += drbd_legacy_84.o
+ccflags-$(CONFIG_DRBD_COMPAT_84) += -DCONFIG_DRBD_COMPAT_84
 
 
 #HOST_EXTRACFLAGS += -I$(src) -std=c11 $(EXTRA_CFLAGS)
